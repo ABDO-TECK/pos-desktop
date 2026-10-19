@@ -1,0 +1,94 @@
+/* Desktop */
+.posDesktop {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 3rem);
+  height: calc(100dvh - 3rem);
+}
+.posMobile { display: none; }
+
+.productsPanel {
+  flex: 1;
+  padding: 0.75rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cartPanel {
+  width: 340px;
+  flex-shrink: 0;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow: hidden;
+}
+/* Mobile */
+@media (max-width: 767px) {
+  .posDesktop { display: none !important; }
+  .posMobile {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 56px - 2rem);
+    height: calc(100dvh - 56px - 2rem);
+  }
+  .mobileContent {
+    flex: 1;
+    padding: 0.6rem;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  :global(.product-grid) {
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 0.35rem;
+    overflow-y: auto;
+    flex: 1;
+    align-content: start;
+  }
+  .tabBar {
+    display: flex;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-top: 0.5rem;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.6rem 0.5rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    position: relative;
+    transition: background .15s;
+  }
+  .tabActive {
+    color: var(--primary);
+    background: rgba(34,197,94,.08);
+  }
+  .tabBadge {
+    position: absolute;
+    top: 4px;
+    right: calc(50% - 22px);
+    background: var(--primary);
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    border-radius: 9999px;
+    padding: 0 5px;
+    min-width: 18px;
+    text-align: center;
+    line-height: 18px;
+  }
+}

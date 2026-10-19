@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>تحميل نظام نقاط البيع</title>
+  <style>
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; }
+    }
+    body {
+      margin: 0; padding: 0;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      height: 100vh;
+      background: #1a1d2e; /* Matches sidebar dark background */
+      font-family: 'Tajawal', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      text-align: center;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid #2d3147;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      color: #ffffff;
+      -webkit-app-region: drag; /* Allow dragging splash screen */
+    }
+    .icon-container {
+      width: 80px;
+      height: 80px;
+      background: rgba(34, 197, 94, 0.1);
+      border-radius: 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 15px rgba(34, 197, 94, 0.15);
+    }
+    .icon-container img {
+      width: 50px;
+      height: 50px;
+      object-fit: contain;
+    }
+    .loader-container {
+      position: relative;
+      width: 48px;
+      height: 48px;
+      margin: 25px auto 15px auto;
+    }
+    .loader {
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top: 3px solid #22c55e; /* Primary green */
+      border-radius: 50%;
+      width: 100%; height: 100%;
+      animation: spin 1s linear infinite;
+      box-sizing: border-box;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    h2 { 
+      margin: 0; 
+      font-size: 1.4rem; 
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    p { 
+      color: #9ca3af; 
+      font-size: 0.95rem; 
+      margin-top: 5px;
+      font-weight: 500;
+    }
+    .glow {
+      position: absolute;
+      width: 150px;
+      height: 150px;
+      background: radial-gradient(circle, rgba(34,197,94,0.15) 0%, rgba(0,0,0,0) 70%);
+      top: -50px;
+      right: -50px;
+      border-radius: 50%;
+      z-index: -1;
+    }
+  </style>
+</head>
+<body>
+  <div class="glow"></div>
+  
+  <div class="icon-container">
+    <img src="icon.png" alt="POS Logo" />
+  </div>
+
+  <h2>نظام نقاط البيع</h2>
+  <p id="status">جاري التهيئة...</p>
+
+  <div class="loader-container">
+    <div class="loader"></div>
+  </div>
+  <script>
+    // Listen for status updates from main process via secure IPC
+    if (window.splashAPI && window.splashAPI.onStatusUpdate) {
+      window.splashAPI.onStatusUpdate(function(message) {
+        document.getElementById('status').textContent = message;
+      });
+    }
+  </script>
+</body>
+</html>

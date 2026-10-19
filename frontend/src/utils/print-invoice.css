@@ -1,0 +1,421 @@
+/**
+ * CSS محسن للطباعة - نسخة محدثة من new_delivery_order.js
+ * تم تحويل الكود من JavaScript إلى CSS خالص
+ */
+
+/* إعدادات عامة للشاشة */
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif;
+    background-color: white;
+    font-size: 10px;
+    font-weight: 900;
+    line-height: 1.3;
+    margin: 0;
+    padding: 0;
+    direction: rtl;
+    unicode-bidi: embed;
+    color: #000000;
+    width: 100%;
+}
+
+.invoice-container {
+    width: 100%;
+    max-width: 600px;
+    margin: 20px auto;
+    background-color: #fff;
+    padding: 20px;
+    border-radius: 8px;
+}
+
+.invoice-header {
+    text-align: center;
+    margin-bottom: 3mm;
+    padding-bottom: 3mm;
+    direction: rtl;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif;
+    color: #000000;
+}
+
+.invoice-header img {
+    max-height: 15mm;
+    margin-bottom: 2mm;
+}
+
+.invoice-header h2 {
+    font-size: 7mm;
+    margin: 1mm 0;
+    color: #000000;
+    font-weight: 900;
+}
+
+.invoice-header p {
+    font-size: 5mm;
+    margin: 1mm 0;
+    color: #000000;
+    font-weight: 700;
+}
+
+.invoice-title {
+    font-weight: 900;
+    font-size: 4mm;
+    margin: 1mm 0;
+    color: #000000;
+    text-align: center;
+    direction: rtl;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif;
+}
+
+.invoice-details {
+    margin: 2mm 0;
+    padding-bottom: 2mm;
+}
+
+.invoice-details .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2mm;
+    margin: 0;
+    padding: 0;
+}
+
+.invoice-details .col-6 {
+    margin: 0;
+    padding: 0;
+}
+
+.info-row {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 2mm;
+    margin: 1mm 0;
+    font-size: 3.5mm;
+    direction: rtl;
+    text-align: right;
+}
+
+.info-row span:first-child {
+    font-weight: 800;
+    color: #000000;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 2mm 0;
+}
+
+.table th,
+.table td {
+    padding: 1.5mm;
+    font-size: 3.5mm;
+    border: 1.5pt solid #000000;
+    text-align: center;
+    vertical-align: middle;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif;
+    font-weight: 700;
+    direction: rtl;
+    color: #000000;
+    background-color: white;
+}
+
+.table th {
+    background-color: white;
+    font-weight: 900;
+    color: #000000;
+}
+
+.invoice-footer {
+    text-align: center;
+    margin: 3mm 0;
+    padding: 2mm 0;
+    font-size: 3.5mm;
+    font-weight: 700;
+    color: #000000;
+}
+
+.branch-info {
+    margin-bottom: 3mm;
+    padding-bottom: 2mm;
+}
+
+.branch-info p {
+    margin: 0.5mm 0;
+    padding: 0;
+}
+
+.invoice-footer > p {
+    margin: 2mm 0;
+    padding: 1mm 0;
+}
+
+.qr-code {
+    text-align: center;
+    margin: 4mm 0;
+    padding: 2mm 0;
+}
+
+.qr-code img {
+    max-width: 20mm;
+    max-height: 20mm;
+    margin: 1mm 0;
+}
+
+.qr-code p {
+    color: #000000;
+    font-weight: 700;
+    font-size: 4mm;
+}
+
+.print-buttons {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.print-buttons .btn {
+    margin: 0 8px;
+}
+
+.footer-text {
+    position: fixed !important;
+    bottom: 3mm !important;
+    left: 0 !important;
+    width: 100% !important;
+    text-align: center !important;
+    font-size: 4mm !important;
+    font-weight: 700 !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 3mm 0 !important;
+    background: white !important;
+    z-index: 1000 !important;
+}
+
+/* تحسينات للأجهزة المحمولة */
+@media (max-width: 768px) {
+    .invoice-container {
+        margin: 10px;
+        padding: 15px;
+    }
+}
+
+/* إعدادات الطباعة المحدثة من new_delivery_order.js */
+@media print {
+    @page {
+        size: 100% auto;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
+    * {
+        margin: 0 !important;
+        padding: 0 !important;
+        box-sizing: border-box !important;
+    }
+    
+    body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif !important;
+        font-size: 10px !important;
+        font-weight: 900 !important;
+        line-height: 1.3 !important;
+        color: #000000 !important;
+        background: white !important;
+        width: 100% !important;
+        direction: rtl !important;
+        unicode-bidi: embed !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+        padding-bottom: 15mm !important;
+    }
+    
+    .invoice-container {
+        width: 100% !important;
+        max-width: 100% !important;
+        padding: 5mm !important;
+        background: white !important;
+        margin: 0 !important;
+    }
+    
+    .invoice-header {
+        text-align: center !important;
+        margin-bottom: 4mm !important;
+        padding-bottom: 3mm !important;
+    }
+    
+    .invoice-header img {
+        max-height: 15mm !important;
+        margin-bottom: 2mm !important;
+    }
+    
+    .invoice-header h2 {
+        font-size: 5mm !important;
+        font-weight: 900 !important;
+        margin: 2mm 0 !important;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif !important;
+        direction: rtl !important;
+        color: #000000 !important;
+    }
+
+    .invoice-title {
+        font-size: 3mm !important;
+        font-weight: 900 !important;
+        margin: 2mm 0 !important;
+        text-align: center !important;
+        direction: rtl !important;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif !important;
+        color: #000000 !important;
+    }
+    
+    .invoice-details {
+        margin: 2mm 0 !important;
+        padding-bottom: 2mm !important;
+    }
+    
+    .invoice-details .row {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 2mm !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
+    .invoice-details .col-6 {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
+    .info-row {
+        display: flex !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+        gap: 2mm !important;
+        margin: 1mm 0 !important;
+        font-size: 3.5mm !important;
+        direction: rtl !important;
+        text-align: right !important;
+    }
+    
+    .info-row span:first-child {
+        font-weight: 800 !important;
+        color: #000000 !important;
+    }
+    
+    .table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+        margin: 2mm 0 !important;
+    }
+    
+    .table th, .table td {
+        padding: 1.5mm !important;
+        font-size: 3.5mm !important;
+        border: 1.5pt solid #000000 !important;
+        text-align: center !important;
+        vertical-align: middle !important;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Tahoma, sans-serif !important;
+        font-weight: 700 !important;
+        direction: rtl !important;
+        color: #000000 !important;
+        background-color: white !important;
+    }
+    
+    .table th {
+        background-color: white !important;
+        font-weight: 900 !important;
+        color: #000000 !important;
+    }
+    
+    .invoice-footer {
+        text-align: center !important;
+        margin: 3mm 0 !important;
+        padding: 2mm 0 !important;
+        font-size: 4mm !important;
+        font-weight: 700 !important;
+        color: #000000 !important;
+    }
+    
+    .branch-info {
+        margin-bottom: 3mm !important;
+        padding-bottom: 2mm !important;
+    }
+    
+    .branch-info p {
+        margin: 0.5mm 0 !important;
+        padding: 0 !important;
+        font-size: 3.5mm;
+    }
+    
+    .invoice-footer > p {
+        margin: 2mm 0 !important;
+        padding: 1mm 0 !important;
+    }
+    
+    .qr-code {
+        text-align: center !important;
+        margin: 4mm 0 !important;
+        padding: 2mm 0 !important;
+    }
+    
+    .qr-code img {
+        max-width: 20mm !important;
+        max-height: 20mm !important;
+        margin: 1mm 0 !important;
+    }
+    
+    .qr-code p {
+        color: #000000 !important;
+        font-weight: 700 !important;
+        font-size: 4mm !important;
+    }
+    
+    .total-section {
+        margin-top: 2mm !important;
+        padding-top: 2mm !important;
+        border-top: 2px dashed #000000 !important;
+    }
+    
+    .total-row {
+        display: flex !important;
+        justify-content: space-between !important;
+        margin: 1mm 0 !important;
+        font-size: 4mm !important;
+        font-weight: 900 !important;
+        direction: rtl !important;
+        text-align: right !important;
+        color: #000000 !important;
+    }
+    
+    .footer-text {
+        position: fixed !important;
+        bottom: 3mm !important;
+        left: 0 !important;
+        width: 100% !important;
+        text-align: center !important;
+        font-size: 4mm !important;
+        font-weight: 700 !important;
+        color: #000000 !important;
+        margin: 0 !important;
+        padding: 3mm 0 !important;
+        background: white !important;
+        z-index: 1000 !important;
+    }
+    
+    /* إخفاء عناصر غير مطلوبة في الطباعة */
+    .no-print {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    /* تحسينات إضافية للطباعة */
+    .text-start {
+        text-align: right !important;
+    }
+    
+    .text-center {
+        text-align: center !important;
+    }
+    
+    .text-end {
+        text-align: left !important;
+    }
+}

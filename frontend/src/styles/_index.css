@@ -1,0 +1,20 @@
+/*
+ * ══════════════════════════════════════════════════════
+ *  نقطة الدخول الوحيدة لكل ملفات CSS
+ *  يجب استيراد هذا الملف فقط في main.tsx
+ *  انظر CSS_ARCHITECTURE.md للتفاصيل
+ * ══════════════════════════════════════════════════════
+ *
+ *  الترتيب مهم:
+ *  1. global.css     → متغيرات CSS، ريسيت، خطوط
+ *  2. layout.css     → تخطيط الصفحة (sidebar, header, content)
+ *  3. sidebar.css    → الشريط الجانبي
+ *  4. components.css → المكونات (أزرار، بطاقات، جداول، نماذج)
+ *  5. responsive.css → استعلامات الميديا (media queries)
+ */
+
+@import './global.css';
+@import './layout.css';
+@import './sidebar.css';
+@import './components.css';
+@import './responsive.css';

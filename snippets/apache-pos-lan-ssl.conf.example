@@ -1,0 +1,46 @@
+# Example: XAMPP Apache — HTTPS on LAN IP, proxy /api to PHP and / to Vite (port 5173)
+#
+# 1. Enable in C:\xampp\apache\conf\httpd.conf:
+#    LoadModule ssl_module modules/mod_ssl.so
+#    LoadModule proxy_module modules/mod_proxy.so
+#    LoadModule proxy_http_module modules/mod_proxy_http.so
+#    LoadModule proxy_wstunnel_module modules/mod_proxy_wstunnel.so
+#    LoadModule rewrite_module modules/mod_rewrite.so
+#    Include conf/extra/httpd-ssl.conf   (or include THIS file from httpd.conf)
+#
+# 2. Copy mkcert (or your) PEM files to e.g.:
+#    C:\xampp\apache\conf\ssl\lan-cert.pem
+#    C:\xampp\apache\conf\ssl\lan-key.pem
+#
+# 3. Replace 192.168.1.22 with your PC's LAN IP.
+# 4. Adjust /pos/backend paths to match your PHP app.
+# 5. Restart Apache from XAMPP Control Panel.
+
+Listen 443
+
+<VirtualHost *:443>
+    ServerName 192.168.1.22
+
+    SSLEngine on
+    SSLCertificateFile "C:/xampp/apache/conf/ssl/lan-cert.pem"
+    SSLCertificateKeyFile "C:/xampp/apache/conf/ssl/lan-key.pem"
+
+    ProxyPreserveHost On
+    ProxyRequests Off
+
+    # Backend API (match your frontend baseURL: /api)
+    ProxyPass        /api http://127.0.0.1/pos/backend/api
+    ProxyPassReverse /api http://127.0.0.1/pos/backend/api
+
+    ProxyPass        /pos/backend/sign-message.php http://127.0.0.1/pos/backend/sign-message.php
+    ProxyPassReverse /pos/backend/sign-message.php http://127.0.0.1/pos/backend/sign-message.php
+
+    # Vite dev server — WebSocket upgrade for HMR
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) ws://127.0.0.1:5173/$1 [P,L]
+
+    ProxyPass        / http://127.0.0.1:5173/
+    ProxyPassReverse / http://127.0.0.1:5173/
+</VirtualHost>

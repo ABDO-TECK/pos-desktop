@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "127.0.0.1:8000:80"
+    environment:
+      - DB_HOST=db
+      - DB_NAME=pos_db
+      - DB_USER=${DB_USER:-pos_user}
+      - DB_PASS=${DB_PASS:?DB_PASS environment variable is required}
+      - APP_ENV=production
+      - APP_DEBUG=false
+      # Production deployments must declare their network security posture.
+      # Use a separate explicit desktop override for loopback-only development.
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:?Set DEPLOYMENT_MODE=web or lan}
+      - DB_PERSISTENT=true
+      - FORCE_HTTPS=${FORCE_HTTPS:?Set FORCE_HTTPS=true}
+      - SECURE_COOKIES=${SECURE_COOKIES:?Set SECURE_COOKIES=true}
+      - FRONTEND_URL=${FRONTEND_URL:?Set FRONTEND_URL to the public HTTPS URL}
+      - REDIS_HOST=${REDIS_HOST:-}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - TOKEN_LIFETIME=${TOKEN_LIFETIME:-14400}
+      - LOW_STOCK_THRESHOLD=${LOW_STOCK_THRESHOLD:-5}
+      - TAX_RATE=${TAX_RATE:-0.15}
+      - QZ_PRIVATE_KEY_PATH=${QZ_PRIVATE_KEY_PATH:-}
+      # Applying an update requires both explicit opt-in and a pinned signed commit.
+      - ENABLE_UPDATE_CHECKS=${ENABLE_UPDATE_CHECKS:-false}
+      - ENABLE_AUTO_UPDATE=${ENABLE_AUTO_UPDATE:-false}
+      - UPDATE_SERVER_URL=${UPDATE_SERVER_URL:-https://api.github.com/repos/ABDO-TECK/pos/contents/version.json?ref=main}
+      - UPDATE_ALLOWED_HOSTS=${UPDATE_ALLOWED_HOSTS:-api.github.com,raw.githubusercontent.com}
+      - UPDATE_COMMIT_SHA=${UPDATE_COMMIT_SHA:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  db:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    ports:
+      - "127.0.0.1:3307:3306"
+    environment:
+      - MYSQL_DATABASE=pos_db
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD environment variable is required}
+      - MYSQL_USER=${DB_USER:-pos_user}
+      - MYSQL_PASSWORD=${DB_PASS:?DB_PASS environment variable is required}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/pos_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "--password=${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  db_data:

@@ -1,0 +1,92 @@
+/*
+ * ══════════════════════════════════════════════════════
+ *  Global CSS — متغيرات، ريسيت، خطوط
+ *  انظر CSS_ARCHITECTURE.md لمزيد من التفاصيل حول الهيكل
+ * ══════════════════════════════════════════════════════
+ *
+ *  BEM Naming Convention:
+ *  - Block:    .pos-card, .pos-btn, .pos-modal
+ *  - Element:  .pos-card__header, .pos-btn__icon
+ *  - Modifier: .pos-btn--primary, .pos-card--active
+ *
+ *  القرار: نحتفظ بالأسماء الحالية (.btn, .card, .input)
+ *  لأنها مستخدمة في عشرات الملفات. يُفضّل استخدام BEM
+ *  فقط للمكونات الجديدة لتجنب كسر الكود.
+ * ══════════════════════════════════════════════════════
+ */
+/* Removed external font import for offline support. Using system fonts (Segoe UI on Windows handles Arabic natively). */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary:    #22c55e;
+  --primary-d:  #16a34a;
+  --secondary:  #3b82f6;
+  --secondary-d:#2563eb;
+  --danger:     #ef4444;
+  --danger-d:   #dc2626;
+  --warning:    #f59e0b;
+  --bg:         #f9fafb;
+  --surface:    #ffffff;
+  --border:     #e5e7eb;
+  --text:       #111827;
+  --text-muted: #6b7280;
+  --radius:     0.5rem;
+  --shadow:     0 1px 3px rgba(0,0,0,.1), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-md:  0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.06);
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:         #0f1419;
+  --surface:    #1a1f2e;
+  --border:     #2d3548;
+  --text:       #f3f4f6;
+  --text-muted: #9ca3af;
+  --shadow:     0 1px 3px rgba(0,0,0,.4), 0 1px 2px rgba(0,0,0,.3);
+  --shadow-md:  0 4px 20px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.2);
+}
+
+/* â”€â”€ Breakpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+   --sm:  â‰¥ 480px   (large phone landscape)
+   Drawer shell: â‰¤1023px (phone + tablet â€” top bar + slide-over sidebar)
+   --lg:  â‰¥ 1024px  (desktop â€” sticky sidebar)
+   Mobile-first: default = mobile, then override upward.
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+html { font-size: 15px; direction: rtl; }
+
+body {
+  font-family: 'Tajawal', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+a { color: inherit; text-decoration: none; }
+
+button { cursor: pointer; font-family: inherit; }
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+/* Ø¥Ø®ÙØ§Ø¡ Ø£Ø³Ù‡Ù… Ø§Ù„Ø²ÙŠØ§Ø¯Ø©/Ø§Ù„Ù†Ù‚ØµØ§Ù† Ù…Ù† Ø­Ù‚ÙˆÙ„ Ø§Ù„Ø£Ø±Ù‚Ø§Ù… */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+

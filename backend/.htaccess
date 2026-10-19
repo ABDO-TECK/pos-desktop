@@ -1,0 +1,35 @@
+Options -Indexes
+RewriteEngine On
+
+# Runtime data and secrets are never public HTTP resources. These rules apply
+# before the generic front-controller rewrite and also protect existing files.
+RewriteRule ^(?:storage|logs)(?:/|$) - [F,L,NC]
+
+<FilesMatch "(^\.|\.(?:pem|key|sqlite(?:-wal|-shm)?|log|sql)$)">
+    Require all denied
+</FilesMatch>
+
+# ── حماية Adminer: منع الوصول في الإنتاج ──────────────────────
+# في بيئة الإنتاج، يتم حظر الوصول تماماً لملفات adminer
+# في بيئة التطوير، يُسمح فقط من localhost (127.0.0.1 / ::1)
+<FilesMatch "^adminer">
+    <If "%{ENV:APP_ENV} == 'production'">
+        Require all denied
+    </If>
+    <Else>
+        Require ip 127.0.0.1 ::1
+    </Else>
+</FilesMatch>
+
+# Pass Authorization header to PHP (Apache strips it by default)
+RewriteCond %{HTTP:Authorization} .
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+# Handle CORS preflight
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# Route all requests to index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php [QSA,L]

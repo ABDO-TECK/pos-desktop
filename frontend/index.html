@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://localhost:* https://localhost:* ws://localhost:* wss://localhost:* http://127.0.0.1:* https://127.0.0.1:* ws://127.0.0.1:* wss://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>نظام الكاشير - سوبر ماركت</title>
+    <meta name="description" content="نظام POS متكامل لإدارة السوبر ماركت" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- QZ Tray: must be loaded as plain (non-module) scripts BEFORE React -->
+    <!-- QZ Tray v2.2.x — تحديث يدوي. انظر public/qz/VERSION.md -->
+    <script src="/qz/qz-tray.js"></script>
+    <script src="/qz/qz-config.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

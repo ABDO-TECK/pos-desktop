@@ -1,0 +1,78 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.titleGroup { min-width: 220px; }
+.titleLine { display: flex; align-items: center; gap: 0.55rem; color: var(--text); }
+.title { margin: 0; font-size: 1.15rem; font-weight: 750; }
+.subtitle { margin: 0.35rem 0 0; color: var(--text-muted); font-size: 0.82rem; line-height: 1.55; }
+
+.actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.filterLabel { display: block; min-width: 130px; }
+.filterLabel select { width: 100%; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.spin { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.summaryGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.7rem; }
+.summaryCard { display: flex; align-items: center; gap: 0.65rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 0.65rem; background: var(--surface); }
+.summaryCard > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.summaryIcon { display: grid; place-items: center; width: 2rem; height: 2rem; flex: 0 0 2rem; border-radius: 50%; color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.dangerIcon { color: #ef4444; background: color-mix(in srgb, #ef4444 14%, transparent); }
+.warningIcon { color: #f59e0b; background: color-mix(in srgb, #f59e0b 16%, transparent); }
+.serverIcon { color: #8b5cf6; background: color-mix(in srgb, #8b5cf6 14%, transparent); }
+.summaryValue { font-size: 1.15rem; line-height: 1.15; color: var(--text); }
+.summaryCard small { color: var(--text-muted); font-size: 0.72rem; white-space: nowrap; }
+
+.tableWrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 0.7rem; background: var(--surface); }
+.table { width: 100%; min-width: 760px; border-collapse: collapse; }
+.table th { padding: 0.75rem 0.8rem; text-align: start; color: var(--text-muted); background: color-mix(in srgb, var(--border) 22%, transparent); font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+.table td { padding: 0.72rem 0.8rem; border-top: 1px solid var(--border); color: var(--text); font-size: 0.8rem; vertical-align: middle; }
+.clickable { cursor: pointer; transition: background-color 0.15s ease; }
+.clickable:hover, .clickable:focus-visible { outline: none; background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.time { direction: ltr; text-align: right; color: var(--text-muted) !important; white-space: nowrap; font-size: 0.74rem !important; }
+.message { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.contextPreview { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted) !important; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.72rem !important; direction: ltr; text-align: left; }
+.empty { padding: 2.5rem 1rem !important; text-align: center; color: var(--text-muted) !important; }
+.levelBadge, .sourceBadge { display: inline-flex; align-items: center; gap: 0.3rem; width: max-content; padding: 0.25rem 0.48rem; border-radius: 999px; font-size: 0.7rem; font-weight: 700; white-space: nowrap; }
+.levelDanger { color: #f87171; background: color-mix(in srgb, #ef4444 16%, transparent); }
+.levelWarning { color: #fbbf24; background: color-mix(in srgb, #f59e0b 17%, transparent); }
+.levelInfo { color: #60a5fa; background: color-mix(in srgb, #3b82f6 16%, transparent); }
+.levelDebug { color: #a78bfa; background: color-mix(in srgb, #8b5cf6 16%, transparent); }
+.clientSource { color: #22c55e; background: color-mix(in srgb, #22c55e 15%, transparent); }
+.serverSource { color: #a78bfa; background: color-mix(in srgb, #8b5cf6 15%, transparent); }
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 0.75rem; color: var(--text-muted); font-size: 0.82rem; }
+.modalOverlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 1rem; background: rgb(0 0 0 / 0.62); }
+.detailModal { width: min(760px, 100%); max-height: min(90vh, 760px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 0.8rem; background: var(--surface); box-shadow: 0 24px 60px rgb(0 0 0 / 0.28); }
+.modalHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.1rem 1.25rem; border-bottom: 1px solid var(--border); }
+.modalHeader h3 { margin: 0.15rem 0 0; color: var(--text); font-size: 1.05rem; }
+.modalEyebrow { margin: 0; color: var(--text-muted); font-size: 0.72rem; }
+.iconButton { display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border: 1px solid var(--border); border-radius: 0.45rem; color: var(--text-muted); background: transparent; cursor: pointer; }
+.iconButton:hover, .iconButton:focus-visible { color: var(--text); background: color-mix(in srgb, var(--border) 35%, transparent); }
+.modalBody { overflow-y: auto; padding: 1.1rem 1.25rem; }
+.detailGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; margin-bottom: 1rem; }
+.detailCard { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; padding: 0.7rem; border: 1px solid var(--border); border-radius: 0.55rem; }
+.detailCard small { color: var(--text-muted); font-size: 0.7rem; }
+.detailCard > span { overflow: hidden; color: var(--text); font-size: 0.8rem; text-overflow: ellipsis; white-space: nowrap; }
+.detailSection + .detailSection { margin-top: 1rem; }
+.detailSection h4 { margin: 0 0 0.4rem; color: var(--text); font-size: 0.78rem; }
+.pre { max-height: 220px; overflow: auto; margin: 0; padding: 0.75rem; border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text); background: color-mix(in srgb, var(--border) 15%, transparent); font: 0.75rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; direction: ltr; text-align: left; }
+.modalFooter { display: flex; justify-content: flex-end; gap: 0.55rem; padding: 0.9rem 1.25rem; border-top: 1px solid var(--border); }
+
+@media (max-width: 720px) {
+  .summaryGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .detailGrid { grid-template-columns: 1fr; }
+  .modalFooter { flex-wrap: wrap; }
+}

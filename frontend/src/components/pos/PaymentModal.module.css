@@ -1,0 +1,8 @@
+.changeBoxActive {
+  background: #dcfce7;
+  color: #166534;
+}
+html[data-theme="dark"] .changeBoxActive {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}

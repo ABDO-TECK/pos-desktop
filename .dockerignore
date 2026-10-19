@@ -1,0 +1,54 @@
+# ══════════════════════════════════════════════════════════════════
+#  .dockerignore — ABDO-TECK POS
+#  يمنع نسخ الملفات غير الضرورية إلى صورة Docker
+# ══════════════════════════════════════════════════════════════════
+
+# Git
+.git
+.gitignore
+
+# Node.js (سيتم تثبيتها داخل Docker)
+frontend/node_modules
+frontend/.vite
+
+# IDE & OS
+.vscode
+.idea
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Logs
+backend/logs/*.log
+
+# Environment (سيتم تمريرها عبر docker-compose)
+backend/.env
+
+# Tests
+backend/tests
+backend/phpunit.xml
+backend/.phpunit.result.cache
+frontend/src/setupTests.js
+
+# Documentation & misc
+docs/
+*.md
+!README.md
+prd.txt
+snippets/
+
+# Certificates (development only)
+certs/
+
+# Windows scripts
+*.bat
+*.vbs
+
+# Frontend dist (سيتم بناؤها داخل Docker)
+frontend-dist/
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

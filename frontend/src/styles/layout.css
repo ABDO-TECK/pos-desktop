@@ -1,0 +1,177 @@
+.app-layout {
+  display: flex;
+  height: 100vh; /* fallback */
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Mobile top header â€” hidden on desktop */
+.mobile-header {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 56px;
+  background: #1a1d2e;
+  z-index: 200;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 1rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.mobile-header .mh-title {
+  color: #fff;
+  font-weight: 700;
+  font-size: 1rem;
+  flex: 1;
+}
+.mobile-header .mh-btn {
+  background: transparent;
+  border: none;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  padding: 0.4rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+.mobile-header .mh-btn:hover { background: rgba(255,255,255,.08); }
+
+/* Theme switch: smooth color/border transitions (fallback when View Transitions unsupported) */
+html.theme-changing,
+html.theme-changing body,
+html.theme-changing .card,
+html.theme-changing .stat-card,
+html.theme-changing .modal,
+html.theme-changing .input,
+html.theme-changing .btn:not(:active),
+html.theme-changing .main-content,
+html.theme-changing .mobile-header {
+  transition: background-color 0.35s ease, color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-changing,
+  html.theme-changing body,
+  html.theme-changing .card,
+  html.theme-changing .stat-card,
+  html.theme-changing .modal,
+  html.theme-changing .input,
+  html.theme-changing .btn:not(:active),
+  html.theme-changing .main-content,
+  html.theme-changing .mobile-header {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Main content */
+.main-content {
+  flex: 1;
+  overflow: auto;
+  padding: 1.5rem;
+  min-width: 0;
+}
+
+/* â”€â”€ Responsive page header (title + button) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+.page-header h2 { font-size: 1.2rem; font-weight: 700; }
+
+/* â”€â”€ Stats grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+/* â”€â”€ Form grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+.form-group { display: flex; flex-direction: column; gap: 0.35rem; }
+.form-group label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+
+/* â”€â”€ Table wrapper (horizontal scroll on mobile) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* â”€â”€ Phone + tablet: same as mobile â€” top bar + drawer sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@media (max-width: 1023px) {
+  .mobile-header { display: flex; }
+
+  .main-content {
+    padding: 1rem;
+    padding-top: calc(56px + 1rem);
+  }
+
+}
+
+/* â”€â”€ Phone-only: tighter type + modals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@media (max-width: 767px) {
+  .modal {
+    padding: 1.25rem;
+    border-radius: var(--radius);
+  }
+
+  html { font-size: 14px; }
+}
+
+/* â”€â”€ Responsive 2-col grid (collapses on small screens) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.resp-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+@media (max-width: 480px) {
+  .resp-2col { grid-template-columns: 1fr; }
+}
+
+/* Show-mobile: hidden by default, shown only on mobile */
+.show-mobile { display: none; }
+
+/* â”€â”€ Scrollable tab bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.tabs-scroll {
+  display: flex;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  border-bottom: 2px solid var(--border);
+  gap: 0;
+}
+.tabs-scroll::-webkit-scrollbar { display: none; }
+.tabs-scroll button { white-space: nowrap; flex-shrink: 0; }
+
+/* â”€â”€ Filter bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+.filter-bar .input,
+.filter-bar select { min-width: 130px; }
+
+/* â”€â”€ Card grid (auto-fill) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
+/* â”€â”€ Product grid (POS & Suppliers shared) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 0.4rem;
+  overflow-y: auto;
+  flex: 1;
+  align-content: start;
+}

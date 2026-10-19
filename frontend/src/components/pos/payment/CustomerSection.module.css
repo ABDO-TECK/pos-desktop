@@ -1,0 +1,20 @@
+.custModeBtn {
+  flex: 1;
+  padding: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.custModeBtn:hover { background: var(--bg); }
+html[data-theme="dark"] .custModeBtn:hover { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.1); }
+
+.active {
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}

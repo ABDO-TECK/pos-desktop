@@ -1,0 +1,12 @@
+/* Customers page — scoped styles */
+
+.customersHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.ledgerSection {
+  margin-top: 1.5rem;
+}

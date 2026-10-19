@@ -1,0 +1,91 @@
+# ── Private keys & secrets ─────────────────────────────
+private-key.pem
+*.pem
+!backend/certs/cacert.pem
+!backend/certs/update_public_key.pem
+release/*.pem
+release/*-key.pem
+release/private_key.pem
+*.key
+*digital-certificate.txt
+# مجلد الشهادات المحلية — اترك README فقط إن رغبت
+certs/*.pem
+!backend/certs/cacert.pem
+!backend/certs/update_public_key.pem
+certs/*-key.pem
+.env
+.env.*
+!.env.example
+!.env.docker.example
+db_credentials.json
+release/
+
+# ── Frontend ────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+frontend/*.local
+frontend/test-results/
+frontend/playwright-report/
+frontend/coverage/
+frontend/tsc_output.txt
+
+# ── Backend / PHP ───────────────────────────────────────
+backend/storage/
+backend/cache/
+backend/logs/
+backend/*.log
+backend/.env
+backend/storage/.csrf_secret
+backend/.phpunit.result.cache
+backend/vendor/
+backend/backend.phar
+backend/adminer.php
+backend/adminer-local.php
+composer.phar
+composer-setup.php
+tmp/
+scratch/
+*.tmp
+*.cache
+
+# ── Database ────────────────────────────────────────────
+database/*.sql.bak
+database/backups/
+*.sqlite
+*.db
+*.bak
+
+# ── OS / Editor ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+
+# ── Electron / Desktop Build ────────────────────────────
+node_modules/
+.npm-cache*/
+out/
+dist-electron/
+portable/
+build/prerequisites/
+forge.config.js
+convert_icon.js
+create_ico.js
+
+# QZ Tray bundled runtime
+portable/java/
+portable/qz-tray/
+tray/out/
+
+# -- QZ Tray bundled runtime & source --------------------
+build-tools/
+tray/
+
+# ── AI Agent Rules ──────────────────────────────────────
+AGENTS.md
+.agents/

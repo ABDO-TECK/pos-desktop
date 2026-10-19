@@ -1,0 +1,1880 @@
+openapi: 3.0.3
+info:
+  title: ABDO-TECK POS API
+  description: |
+    واجهة برمجة التطبيقات (API) لنظام نقاط البيع ABDO-TECK POS.
+
+    ## المصادقة
+    يستخدم النظام نوعين من المصادقة:
+    - **Bearer Token**: يُرسل في ترويسة `Authorization: Bearer <token>`
+    - **HttpOnly Cookie**: يُضبط تلقائياً عند تسجيل الدخول (`pos_token`)
+
+    ## حماية CSRF
+    جميع طلبات التعديل (POST/PUT/DELETE) تتطلب ترويسة `X-XSRF-TOKEN`.
+    احصل على الكوكي عبر `GET /api/csrf-cookie`.
+
+    ## إصدار API
+    يدعم النظام المسارات بإصدار (`/api/v1/...`) أو بدون (`/api/...`).
+  version: 2.0.0
+  contact:
+    name: ABDO-TECK
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost/pos/backend/api
+    description: بيئة التطوير المحلية (XAMPP)
+  - url: http://localhost:8000/api
+    description: بيئة Docker
+
+tags:
+  - name: Auth
+    description: المصادقة وإدارة الجلسات
+  - name: Products
+    description: إدارة المنتجات
+  - name: Sales
+    description: عمليات البيع والفواتير
+  - name: Inventory
+    description: إدارة المخزون
+  - name: Suppliers
+    description: إدارة الموردين والمشتريات
+  - name: Customers
+    description: إدارة العملاء وكشوف الحساب
+  - name: Reports
+    description: التقارير والإحصائيات
+  - name: Users
+    description: إدارة المستخدمين (Admin فقط)
+  - name: Settings
+    description: إعدادات النظام
+  - name: Health
+    description: فحص صحة النظام
+  - name: ClientLog
+    description: تسجيل أخطاء الواجهة الأمامية
+  - name: Categories
+    description: إدارة تصنيفات المنتجات
+  - name: Expenses
+    description: إدارة المصروفات وتصنيفاتها
+  - name: Backup
+    description: النسخ الاحتياطي والاستعادة
+  - name: Updates
+    description: تحديثات النظام
+
+# ══════════════════════════════════════════════════════════════════
+#  PATHS
+# ══════════════════════════════════════════════════════════════════
+paths:
+
+  # ── Auth ────────────────────────────────────────────────────────
+  /csrf-cookie:
+    get:
+      tags: [Auth]
+      summary: الحصول على كوكي CSRF
+      description: يُضبط كوكي `XSRF-TOKEN` الذي يجب إرساله في ترويسة `X-XSRF-TOKEN` مع كل طلب تعديل.
+      responses:
+        '200':
+          description: تم ضبط كوكي CSRF
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /login:
+    post:
+      tags: [Auth]
+      summary: تسجيل الدخول
+      description: يتحقق من بيانات الاعتماد ويعيد رمز الوصول (Token) ومعلومات المستخدم.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: admin@admin.com
+                password:
+                  type: string
+                  minLength: 6
+                  example: password
+      responses:
+        '200':
+          description: تسجيل دخول ناجح
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token:
+                            type: string
+                            description: رمز الوصول
+                          user:
+                            $ref: '#/components/schemas/AuthUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /logout:
+    post:
+      tags: [Auth]
+      summary: تسجيل الخروج
+      description: يحذف رمز الوصول ويمسح كوكي الجلسة.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: تم تسجيل الخروج
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /refresh:
+    post:
+      tags: [Auth]
+      summary: تجديد رمز الوصول
+      description: يستخدم الـ refresh token cookie لتوليد access token جديد.
+      responses:
+        '200':
+          description: تم تجديد الرمز
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /user:
+    get:
+      tags: [Auth]
+      summary: بيانات المستخدم الحالي
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: بيانات المستخدم
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Products ───────────────────────────────────────────────────
+  /products:
+    get:
+      tags: [Products]
+      summary: قائمة المنتجات
+      description: استرجاع جميع المنتجات مع دعم البحث والتصفية والترقيم.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SearchParam'
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+          description: تصفية حسب التصنيف
+        - name: low_stock
+          in: query
+          schema:
+            type: boolean
+          description: عرض المنتجات منخفضة المخزون فقط
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: قائمة المنتجات
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: معرف النسخة للتخزين المؤقت
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Product'
+                      pagination:
+                        $ref: '#/components/schemas/Pagination'
+        '304':
+          description: لم يتغير المحتوى (مخزن مؤقتاً)
+    post:
+      tags: [Products]
+      summary: إضافة منتج جديد
+      description: إنشاء منتج جديد (Admin فقط).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '201':
+          description: تم إنشاء المنتج
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Product'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /products/sync:
+    get:
+      tags: [Products]
+      summary: Resumable offline product catalog synchronization
+      description: Returns an initial ID-cursor page or a branch-scoped change-sequence delta page without a catalog COUNT query.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: checkpoint
+          in: query
+          schema:
+            type: string
+          description: Opaque checkpoint returned by the preceding page. Checkpoints are bound to the authenticated branch.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 500
+      responses:
+        '200':
+          description: Catalog rows or delete tombstones plus cursor metadata
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /products/{id}:
+    get:
+      tags: [Products]
+      summary: تفاصيل منتج
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+        - name: barcode
+          in: query
+          schema:
+            type: string
+          description: البحث بالباركود (عند id=barcode)
+      responses:
+        '200':
+          description: بيانات المنتج
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Products]
+      summary: تحديث منتج
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '200':
+          description: تم تحديث المنتج
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Products]
+      summary: حذف منتج
+      description: حذف منتج (Admin فقط).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف المنتج
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /products/{id}/price-history:
+    get:
+      tags: [Products]
+      summary: سجل تغييرات الأسعار
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: سجل الأسعار
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Sales ──────────────────────────────────────────────────────
+  /sales:
+    get:
+      tags: [Sales]
+      summary: قائمة الفواتير
+      description: استرجاع فواتير المبيعات مع التصفية والترقيم.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: تصفية حسب التاريخ
+        - name: month
+          in: query
+          schema:
+            type: integer
+        - name: year
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [completed, reserved, cancelled]
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: قائمة الفواتير
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Invoice'
+                      pagination:
+                        $ref: '#/components/schemas/Pagination'
+    post:
+      tags: [Sales]
+      summary: إنشاء عملية بيع
+      description: تسجيل فاتورة بيع جديدة مع خصم المخزون تلقائياً.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key, items, payment_method]
+              properties:
+                idempotency_key:
+                  type: string
+                  format: uuid
+                  description: Stable UUID v4 retained for every retry and offline replay of this sale payload.
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [product_id, quantity]
+                    properties:
+                      product_id:
+                        type: integer
+                      quantity:
+                        type: number
+                        exclusiveMinimum: 0
+                      price:
+                        type: number
+                        description: سعر مخصص (اختياري)
+                payment_method:
+                  type: string
+                  enum: [cash, card, vodafone_cash, instapay, other_wallet, credit]
+                discount:
+                  type: number
+                  default: 0
+                shipping_cost:
+                  type: number
+                  minimum: 0
+                  default: 0
+                customer_id:
+                  type: integer
+                  nullable: true
+                notes:
+                  type: string
+      responses:
+        '201':
+          description: تم تسجيل البيع
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          invoice:
+                            $ref: '#/components/schemas/Invoice'
+                          low_stock_alerts:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                product_id:
+                                  type: integer
+                                name:
+                                  type: string
+                                quantity:
+                                  type: integer
+                          idempotency:
+                            type: object
+                            properties:
+                              key:
+                                type: string
+                                format: uuid
+                              replayed:
+                                type: boolean
+        '400':
+          description: سلة فارغة أو خطأ في البيانات
+        '409':
+          description: The idempotency key was reused with a different sale payload.
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /sales/{id}:
+    get:
+      tags: [Sales]
+      summary: تفاصيل فاتورة
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: بيانات الفاتورة مع البنود
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Sales]
+      summary: حذف فاتورة
+      description: حذف فاتورة نهائياً وإعادة الكميات للمخزون (Admin فقط).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف الفاتورة
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sales/{id}/status:
+    put:
+      tags: [Sales]
+      summary: تحديث حالة الفاتورة
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [completed, reserved, cancelled]
+      responses:
+        '200':
+          description: تم تحديث الحالة
+        '400':
+          description: حالة غير صالحة
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Inventory ──────────────────────────────────────────────────
+  /inventory:
+    get:
+      tags: [Inventory]
+      summary: قائمة المخزون
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SearchParam'
+        - name: category_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: قائمة المخزون
+
+  /inventory/low-stock:
+    get:
+      tags: [Inventory]
+      summary: المنتجات منخفضة المخزون
+      description: قائمة المنتجات التي انخفض مخزونها عن الحد الأدنى.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: قائمة المنتجات منخفضة المخزون
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+
+  /inventory/{id}:
+    put:
+      tags: [Inventory]
+      summary: تعديل كمية المخزون
+      description: ضبط كمية منتج يدوياً (Admin فقط).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: تم تعديل المخزون
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Reports ────────────────────────────────────────────────────
+  /reports/summary:
+    get:
+      tags: [Reports]
+      summary: ملخص لوحة التحكم
+      description: إحصائيات سريعة (إيرادات اليوم/الشهر، عدد الفواتير، المخزون).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: ملخص الإحصائيات
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          today_revenue:
+                            type: number
+                          month_revenue:
+                            type: number
+                          today_invoices:
+                            type: integer
+                          total_products:
+                            type: integer
+                          low_stock_count:
+                            type: integer
+                          total_suppliers:
+                            type: integer
+
+  /reports/daily:
+    get:
+      tags: [Reports]
+      summary: تقرير يومي
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Complete daily aggregates plus one explicitly paginated invoice page
+
+  /reports/monthly:
+    get:
+      tags: [Reports]
+      summary: تقرير شهري
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: month
+          in: query
+          schema:
+            type: integer
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: تقرير المبيعات الشهري
+
+  /reports/profit:
+    get:
+      tags: [Reports]
+      summary: تقرير الأرباح
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: month
+          in: query
+          schema:
+            type: integer
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: تقرير الأرباح التفصيلي
+
+  /reports/products:
+    get:
+      tags: [Reports]
+      summary: المنتجات الأكثر مبيعاً
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: قائمة المنتجات الأكثر مبيعاً
+
+  # ── Users ──────────────────────────────────────────────────────
+  /users:
+    get:
+      tags: [Users]
+      summary: قائمة المستخدمين
+      description: Admin فقط.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: قائمة المستخدمين
+    post:
+      tags: [Users]
+      summary: إضافة مستخدم
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserInput'
+      responses:
+        '201':
+          description: تم إنشاء المستخدم
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /users/{id}:
+    put:
+      tags: [Users]
+      summary: تحديث مستخدم
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateInput'
+      responses:
+        '200':
+          description: تم تحديث المستخدم. تغيير كلمة المرور يلغي جلسات المستخدم المستهدف، والتغيير الذاتي يتطلب تسجيل الدخول مجدداً.
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Users]
+      summary: حذف مستخدم
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف المستخدم
+
+  # ── Settings ───────────────────────────────────────────────────
+  /settings:
+    get:
+      tags: [Settings]
+      summary: استرجاع الإعدادات
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: إعدادات النظام
+    post:
+      tags: [Settings]
+      summary: تحديث الإعدادات
+      description: Admin فقط.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: تم تحديث الإعدادات
+
+  # ── Health ─────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: فحص جاهزية الخدمة
+      description: لا يتطلب مصادقة. يعيد فقط حالة الخدمة ومعرّف الإصدار الآمن.
+      responses:
+        '200':
+          description: الخدمة تعمل
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, version]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+
+  /health/diagnostics:
+    get:
+      tags: [Health]
+      summary: فحص تشخيصي عميق للنظام
+      description: يتطلب المصادقة وصلاحية settings.update.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: تفاصيل التشخيص
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: صلاحية settings.update مطلوبة
+
+  # ── Client Log ─────────────────────────────────────────────────
+  /client-log:
+    post:
+      tags: [ClientLog]
+      summary: تسجيل خطأ من الواجهة الأمامية
+      description: يستقبل أخطاء JavaScript/React ويحفظها في ملفات اللوج.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [level, message]
+              properties:
+                level:
+                  type: string
+                  enum: [error, warning, info, critical]
+                message:
+                  type: string
+                  example: "Cannot read property 'x' of undefined"
+                context:
+                  type: object
+                  properties:
+                    url:
+                      type: string
+                    stack:
+                      type: string
+                    component:
+                      type: string
+                    userAgent:
+                      type: string
+      responses:
+        '200':
+          description: تم استلام اللوج
+
+
+  # ── Categories ──────────────────────────────────────────────────
+  /admin/error-logs:
+    get:
+      tags: [Admin]
+      summary: Read client, server, and PHP runtime logs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: level
+          in: query
+          schema:
+            type: string
+            enum: [all, debug, info, warning, error, critical]
+            default: all
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Newest-first structured error log entries with pagination
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: audit.view permission required
+
+  /categories:
+    get:
+      tags: [Categories]
+      summary: قائمة التصنيفات
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: قائمة التصنيفات
+    post:
+      tags: [Categories]
+      summary: إضافة تصنيف
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: تم إنشاء التصنيف
+  /categories/{id}:
+    put:
+      tags: [Categories]
+      summary: تحديث تصنيف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: تم تحديث التصنيف
+    delete:
+      tags: [Categories]
+      summary: حذف تصنيف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف التصنيف
+
+  # ── Suppliers Extended ──────────────────────────────────────────
+  /suppliers/{id}:
+    get:
+      tags: [Suppliers]
+      summary: تفاصيل مورد
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تفاصيل المورد
+    put:
+      tags: [Suppliers]
+      summary: تحديث مورد
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Supplier'
+      responses:
+        '200':
+          description: تم تحديث المورد
+    delete:
+      tags: [Suppliers]
+      summary: حذف مورد
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف المورد
+
+  /suppliers/{id}/pdf:
+    get:
+      tags: [Suppliers]
+      summary: كشف حساب PDF
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: ملف PDF
+
+  /suppliers/{id}/payment:
+    post:
+      tags: [Suppliers]
+      summary: إضافة دفعة
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                description:
+                  type: string
+      responses:
+        '200':
+          description: تم تسجيل الدفعة
+
+  /suppliers/ledger/{entryId}:
+    put:
+      tags: [Suppliers]
+      summary: تعديل قيد
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, amount]
+              properties:
+                type:
+                  type: string
+                amount:
+                  type: number
+                description:
+                  type: string
+      responses:
+        '200':
+          description: تم تعديل القيد
+
+  /purchase-invoices:
+    get:
+      tags: [Suppliers]
+      summary: فواتير المشتريات
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: قائمة ফواتير المشتريات
+
+  /purchase-invoices/{id}:
+    get:
+      tags: [Suppliers]
+      summary: تفاصيل فاتورة شراء
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تفاصيل الفاتورة
+    delete:
+      tags: [Suppliers]
+      summary: حذف فاتورة شراء
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف الفاتورة
+
+  /purchases/bulk:
+    post:
+      tags: [Suppliers]
+      summary: شراء بالجملة
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplier_id, items]
+              properties:
+                supplier_id:
+                  type: integer
+                  minimum: 1
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [product_id, quantity, cost]
+                    properties:
+                      product_id:
+                        type: integer
+                        minimum: 1
+                      quantity:
+                        type: number
+                        exclusiveMinimum: 0
+                      cost:
+                        type: number
+                        minimum: 0
+                      update_cost:
+                        type: boolean
+                discount:
+                  type: number
+                  minimum: 0
+                  description: Supplier discount deducted from the item subtotal.
+                shipping_cost:
+                  type: number
+                  minimum: 0
+                  description: Inbound shipping or transport cost added to the invoice total.
+                notes:
+                  type: string
+                  maxLength: 1000
+                driver_name:
+                  type: string
+                  maxLength: 150
+                delivery_date:
+                  type: string
+                  format: date
+                delivery_notes:
+                  type: string
+                  maxLength: 1000
+                payment_type:
+                  type: string
+                  enum: [cash, credit]
+                deposit:
+                  type: number
+                  minimum: 0
+                replace_invoice_id:
+                  type: integer
+                  minimum: 1
+      responses:
+        '201':
+          description: تم إنشاء الشراء
+
+  # ── Customers Extended ──────────────────────────────────────────
+  /customers/{id}:
+    get:
+      tags: [Customers]
+      summary: تفاصيل عميل
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تفاصيل العميل
+    put:
+      tags: [Customers]
+      summary: تحديث عميل
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                phone:
+                  type: string
+                email:
+                  type: string
+      responses:
+        '200':
+          description: تم تحديث العميل
+    delete:
+      tags: [Customers]
+      summary: حذف عميل
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف العميل
+
+  /customers/{id}/payment:
+    post:
+      tags: [Customers]
+      summary: إضافة دفعة عميل
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                description:
+                  type: string
+      responses:
+        '200':
+          description: تم تسجيل الدفعة
+
+  /customers/ledger/{entryId}:
+    put:
+      tags: [Customers]
+      summary: تعديل قيد عميل
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, amount]
+              properties:
+                type:
+                  type: string
+                amount:
+                  type: number
+                description:
+                  type: string
+      responses:
+        '200':
+          description: تم تعديل القيد
+
+  /customers/{id}/pdf:
+    get:
+      tags: [Customers]
+      summary: كشف حساب PDF
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: ملف PDF
+
+  # ── Expense Categories ──────────────────────────────────────────
+  /expense-categories:
+    get:
+      tags: [Expenses]
+      summary: تصنيفات المصروفات
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: قائمة تصنيفات المصروفات
+    post:
+      tags: [Expenses]
+      summary: إضافة تصنيف مصروف
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: تم إنشاء التصنيف
+
+  /expense-categories/{id}:
+    put:
+      tags: [Expenses]
+      summary: تحديث تصنيف مصروف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: تم تحديث التصنيف
+    delete:
+      tags: [Expenses]
+      summary: حذف تصنيف مصروف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف التصنيف
+
+  # ── Expenses ────────────────────────────────────────────────────
+  /expenses:
+    get:
+      tags: [Expenses]
+      summary: قائمة المصروفات
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: قائمة المصروفات
+    post:
+      tags: [Expenses]
+      summary: إضافة مصروف
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category_id, amount]
+              properties:
+                category_id:
+                  type: integer
+                amount:
+                  type: number
+                notes:
+                  type: string
+                expense_date:
+                  type: string
+                  format: date
+      responses:
+        '201':
+          description: تم إنشاء المصروف
+
+  /expenses/{id}:
+    put:
+      tags: [Expenses]
+      summary: تحديث مصروف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category_id, amount]
+              properties:
+                category_id:
+                  type: integer
+                amount:
+                  type: number
+                notes:
+                  type: string
+                expense_date:
+                  type: string
+                  format: date
+      responses:
+        '200':
+          description: تم تحديث المصروف
+    delete:
+      tags: [Expenses]
+      summary: حذف مصروف
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: تم حذف المصروف
+
+  # ── Backup ──────────────────────────────────────────────────────
+  /backup:
+    get:
+      tags: [Backup]
+      summary: تنزيل النسخة الاحتياطية
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: ملف النسخة الاحتياطية
+
+  /backup/restore:
+    post:
+      tags: [Backup]
+      summary: استعادة نسخة احتياطية
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                backup_file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: تم استعادة النسخة بنجاح
+
+  # ── Updates ─────────────────────────────────────────────────────
+  /update/check:
+    get:
+      tags: [Updates]
+      summary: التحقق من التحديثات
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: حالة التحديث
+
+  /update/apply:
+    post:
+      tags: [Updates]
+      summary: تطبيق التحديث
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: تم تطبيق التحديث
+
+  /update/changelog:
+    get:
+      tags: [Updates]
+      summary: سجل التغييرات
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: سجل التغييرات
+
+# ══════════════════════════════════════════════════════════════════
+#  COMPONENTS
+# ══════════════════════════════════════════════════════════════════
+  /sse/inventory:
+    get:
+      tags: [Inventory]
+      summary: تحديثات المخزون اللحظية (SSE)
+      description: اتصال Server-Sent Events لاستقبال تحديثات المخزون اللحظية.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: last_id
+          in: query
+          schema:
+            type: integer
+          description: آخر معرف حدث لاستئناف الاتصال
+      responses:
+        '200':
+          description: بث SSE مستمر
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: رمز الوصول المستلم من `/login`
+
+  parameters:
+    IdParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+      description: معرف العنصر
+    SearchParam:
+      name: search
+      in: query
+      schema:
+        type: string
+      description: نص البحث
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+      description: رقم الصفحة
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+      description: عدد العناصر لكل صفحة
+
+  schemas:
+    SuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+          example: success
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        message:
+          type: string
+        errors:
+          type: object
+          additionalProperties: true
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        pages:
+          type: integer
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    Supplier:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        initial_balance:
+          type: number
+        balance:
+          type: number
+        total_debit:
+          type: number
+        total_credit:
+          type: number
+
+    Customer:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        balance:
+          type: number
+
+    Expense:
+      type: object
+      properties:
+        id:
+          type: integer
+        category_id:
+          type: integer
+        category_name:
+          type: string
+        user_id:
+          type: integer
+        user_name:
+          type: string
+        amount:
+          type: number
+        notes:
+          type: string
+          nullable: true
+        expense_date:
+          type: string
+          format: date
+
+    ExpenseCategory:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, cashier]
+        force_password_change:
+          type: integer
+          enum: [0, 1]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, cashier]
+        is_active:
+          type: integer
+        force_password_change:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    UserInput:
+      type: object
+      required: [name, email, role]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        role:
+          type: string
+          enum: [admin, cashier]
+        is_active:
+          type: integer
+          enum: [0, 1]
+
+    UserUpdateInput:
+      allOf:
+        - $ref: '#/components/schemas/UserInput'
+        - type: object
+          properties:
+            current_password:
+              type: string
+              description: Required when the authenticated user changes their own password.
+
+    Product:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        barcode:
+          type: string
+          nullable: true
+        price:
+          type: number
+        cost:
+          type: number
+        quantity:
+          type: integer
+        min_quantity:
+          type: integer
+        category_id:
+          type: integer
+          nullable: true
+        category_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ProductInput:
+      type: object
+      required: [name, price]
+      properties:
+        name:
+          type: string
+          example: منتج جديد
+        barcode:
+          type: string
+          nullable: true
+        price:
+          type: number
+          minimum: 0
+          example: 25.50
+        cost:
+          type: number
+          minimum: 0
+          example: 15.00
+        quantity:
+          type: integer
+          minimum: 0
+          default: 0
+        min_quantity:
+          type: integer
+          minimum: 0
+          default: 5
+        category_id:
+          type: integer
+          nullable: true
+
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: integer
+        invoice_number:
+          type: string
+        total:
+          type: number
+        discount:
+          type: number
+        tax:
+          type: number
+        shipping_cost:
+          type: number
+        net_total:
+          type: number
+        payment_method:
+          type: string
+          enum: [cash, card, vodafone_cash, instapay, other_wallet, credit]
+        status:
+          type: string
+          enum: [completed, reserved, cancelled]
+        user_id:
+          type: integer
+        user_name:
+          type: string
+        customer_id:
+          type: integer
+          nullable: true
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              product_id:
+                type: integer
+              product_name:
+                type: string
+              quantity:
+                type: integer
+              price:
+                type: number
+              cost:
+                type: number
+              total:
+                type: number
+        created_at:
+          type: string
+          format: date-time
+
+  responses:
+    Unauthorized:
+      description: غير مصرح — رمز الوصول مفقود أو منتهي الصلاحية
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: العنصر غير موجود
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: خطأ في التحقق من البيانات
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+security:
+  - bearerAuth: []

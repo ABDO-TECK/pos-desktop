@@ -1,0 +1,145 @@
+/* Sidebar */
+.sidebar-wrap {
+  width: 220px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+}
+.sidebar-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.55);
+  z-index: 299;
+}
+
+/* Sidebar interior â€” hover/active via CSS (smooth transitions, no inline hover fights) */
+.sidebar-panel {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  background: #1a1d2e;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 2.2rem 1rem 1.25rem 1rem; /* Added top padding to clear window controls */
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border-bottom: 1px solid #2d3147;
+  min-height: 80px;
+}
+
+/* Electron window drag utilities */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * Electron treats drag regions as non-interactive hit areas. Keep every
+ * control and modal surface out of those regions so a stale/expanded drag
+ * ancestor can never swallow a click intended for a form field.
+ */
+button,
+input,
+select,
+textarea,
+a,
+label,
+form,
+[role="button"],
+[contenteditable="true"],
+.card,
+.modal-overlay,
+.modal,
+.modal-content,
+.sidebar-overlay {
+  -webkit-app-region: no-drag;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 0.75rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.4rem;
+  color: #9ca3af;
+  background: transparent;
+  font-weight: 500;
+  font-size: 0.9rem;
+  text-decoration: none;
+  transition: background-color 0.22s ease, color 0.22s ease;
+}
+
+.sidebar-link:hover {
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-link--active {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.sidebar-link--active:hover {
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.2);
+}
+
+.sidebar-icon-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem;
+  border: none;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.sidebar-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e5e7eb;
+}
+
+.sidebar-footer {
+  padding: 0.85rem 1rem;
+  border-top: 1px solid #2d3147;
+}
+
+@media (max-width: 1023px) {
+  .sidebar-wrap {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    height: 100dvh;
+    width: 260px;
+    max-width: min(260px, 88vw);
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    z-index: 300;
+  }
+  .sidebar-wrap.open { transform: translateX(0); }
+  .sidebar-overlay.open { display: block; }
+
+  .sidebar-close-btn { display: flex !important; }
+}

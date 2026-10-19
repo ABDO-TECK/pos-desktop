@@ -1,0 +1,97 @@
+{
+  "name": "pos-desktop",
+  "version": "0.0.1",
+  "description": "Desktop point of sale with embedded PHP, MariaDB and receipt printing",
+  "author": "ABDO-TECK",
+  "main": "electron/main.js",
+  "scripts": {
+    "frontend:build": "npm --prefix frontend run build",
+    "build:phar": "node scripts/build-phar.mjs",
+    "electron:build": "npx electron-builder --win --publish never",
+    "prepare:desktop-runtime": "powershell.exe -NoProfile -NonInteractive -File scripts/prepare-desktop-runtime.ps1",
+    "verify:desktop-runtime": "node scripts/verify-desktop-runtime.mjs",
+    "prepare:print-runtime": "powershell.exe -NoProfile -NonInteractive -File scripts/prepare-print-runtime.ps1"
+  },
+  "build": {
+    "asar": true,
+    "asarUnpack": [
+      "frontend/dist/**",
+      "backend/backend.phar",
+      "backend/certs/cacert.pem",
+      "database/pos_schema.sql"
+    ],
+    "files": [
+      "electron/**",
+      "frontend/dist/**",
+      "backend/backend.phar",
+      "backend/certs/cacert.pem",
+      "backend/certs/update_public_key.pem",
+      "database/pos_schema.sql",
+      "version.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "portable",
+        "to": "portable",
+        "filter": [
+          "**/*",
+          "!**/data/**",
+          "!**/*.properties",
+          "!**/override.crt",
+          "!**/*.p12",
+          "!**/*.key",
+          "!**/*.pem"
+        ]
+      }
+    ],
+    "nsis": {
+      "include": "build/installer.nsh",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "appId": "com.abdoteck.pos",
+    "productName": "POS Desktop",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "artifactName": "POS-Desktop-Setup-${version}.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ABDO-TECK",
+        "repo": "pos-desktop",
+        "releaseType": "prerelease"
+      }
+    ]
+  },
+  "dependencies": {
+    "@vscode/sudo-prompt": "9.3.2",
+    "electron-updater": "^6.8.9",
+    "node-forge": "^1.4.0"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ABDO-TECK/pos-desktop.git"
+  },
+  "homepage": "https://github.com/ABDO-TECK/pos-desktop"
+}

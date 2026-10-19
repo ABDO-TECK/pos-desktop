@@ -1,0 +1,194 @@
+/* Shared customer/supplier statement presentation. Values use an LTR override
+   so mixed Arabic month names and Latin numerals keep their visual order. */
+.ledger-header {
+  align-items: stretch;
+  padding: .8rem 1rem;
+  margin-bottom: .65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.ledger-header-title {
+  align-items: flex-start;
+  gap: .7rem;
+}
+
+.ledger-header-title > div:last-child {
+  padding-top: .15rem;
+}
+
+.ledger-header-title h2 {
+  color: var(--text);
+  letter-spacing: -.01em;
+}
+
+.ledger-header-title span {
+  display: inline-flex;
+  align-items: center;
+  gap: .2rem;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.ledger-balance {
+  min-width: 9.5rem;
+  padding: .55rem .9rem !important;
+  border-radius: .65rem !important;
+}
+
+.ledger-balance > div:last-child {
+  direction: ltr;
+  unicode-bidi: isolate;
+  white-space: nowrap;
+}
+
+.statement-table-shell {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border) !important;
+  border-radius: .65rem !important;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.statement-notice {
+  padding: .65rem .8rem !important;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface)) !important;
+  color: var(--text) !important;
+  font-size: .82rem;
+}
+
+.statement-table {
+  width: 100% !important;
+  min-width: 700px;
+  border-collapse: separate !important;
+  border-spacing: 0;
+  font-size: .84rem !important;
+  color: var(--text);
+}
+
+.statement-table th,
+.statement-table td {
+  border: 0 !important;
+  border-bottom: 1px solid var(--border) !important;
+  padding: .7rem .8rem !important;
+  vertical-align: middle;
+}
+
+.statement-table thead tr {
+  background: var(--surface) !important;
+}
+
+.statement-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface) !important;
+  color: var(--text-muted);
+  font-size: .72rem;
+  font-weight: 800 !important;
+  letter-spacing: .02em;
+  text-transform: none;
+  white-space: nowrap;
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.statement-table tbody tr {
+  background: var(--surface) !important;
+  transition: background .15s ease;
+}
+
+.statement-table tbody tr:hover {
+  background: color-mix(in srgb, var(--primary) 5%, var(--surface)) !important;
+}
+
+.statement-table tbody td:nth-child(1) {
+  color: var(--text-muted) !important;
+  font-size: .78rem;
+  white-space: nowrap;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.statement-table .statement-date,
+.statement-table .statement-date bdi {
+  direction: ltr;
+  unicode-bidi: bidi-override;
+  text-align: left !important;
+  white-space: nowrap;
+}
+
+.statement-table .statement-date bdi {
+  display: inline-block;
+}
+
+.statement-table tbody td:nth-child(2) {
+  min-width: 14rem;
+  color: var(--text) !important;
+  overflow-wrap: anywhere;
+}
+
+.statement-table tbody td:nth-child(3),
+.statement-table tbody td:nth-child(4),
+.statement-table tbody td:nth-child(5),
+.statement-table tfoot td:nth-child(3),
+.statement-table tfoot td:nth-child(4),
+.statement-table tfoot td:nth-child(5) {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left !important;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.statement-table tbody td:nth-child(3) { color: var(--danger) !important; }
+.statement-table tbody td:nth-child(4) { color: var(--primary-d) !important; }
+.statement-table tbody td:nth-child(5) { font-weight: 800; }
+
+.statement-table tbody td:nth-child(6) {
+  width: 5.5rem;
+  padding-inline: .45rem !important;
+  text-align: center !important;
+}
+
+.statement-table tbody td:nth-child(6) .btn {
+  margin: 0 !important;
+  padding: .25rem !important;
+}
+
+.statement-table tfoot tr {
+  background: var(--surface) !important;
+  font-weight: 800;
+}
+
+.statement-table tfoot td {
+  border-bottom: 0 !important;
+  border-top: 2px solid var(--border) !important;
+  color: var(--text) !important;
+}
+
+.statement-table tfoot td:nth-child(3) { color: var(--danger) !important; }
+.statement-table tfoot td:nth-child(4) { color: var(--primary-d) !important; }
+
+.statement-empty,
+.statement-loading {
+  padding: 2.5rem 1rem !important;
+  color: var(--text-muted) !important;
+  text-align: center !important;
+}
+
+@media (max-width: 767px) {
+  .ledger-header { padding: .75rem; }
+  .ledger-balance { min-width: 0; }
+  .statement-table-shell { border-radius: .5rem !important; }
+}
+
+@media print {
+  .statement-table-shell { overflow: visible; box-shadow: none; }
+  .statement-table { min-width: 0; }
+  .ledger-header { box-shadow: none; }
+}

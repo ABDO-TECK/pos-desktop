@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "php": {
+    "distribution": "PHP for Windows",
+    "version": "8.2.30",
+    "url": "https://windows.php.net/downloads/releases/archives/php-8.2.30-nts-Win32-vs16-x64.zip",
+    "sha256": "8a6e409adb5f7fb196c07315c69195c4eb87eec8acae2e74a0e04ec50745a055",
+    "archiveName": "php-8.2.30-nts-Win32-vs16-x64.zip",
+    "requiredFiles": [
+      "php/php.exe",
+      "php/php.ini",
+      "php/libsqlite3.dll",
+      "php/ext/php_mbstring.dll",
+      "php/ext/php_mysqli.dll",
+      "php/ext/php_pdo_mysql.dll",
+      "php/ext/php_pdo_sqlite.dll"
+    ]
+  },
+  "mysql": {
+    "distribution": "MariaDB Community Server",
+    "version": "10.4.32",
+    "url": "https://dlm.mariadb.com/3560101/MariaDB/mariadb-10.4.32/winx64-packages/mariadb-10.4.32-winx64.zip",
+    "sha256": "c7239062b1e491c8292ed53f38da633f0642c9e5b78a08673fdb4919ee7194bc",
+    "archiveName": "mariadb-10.4.32-winx64.zip",
+    "requiredFiles": [
+      "mysql/bin/mysqld.exe",
+      "mysql/bin/mysql.exe",
+      "mysql/bin/mysqladmin.exe",
+      "mysql/bin/mysql_install_db.exe"
+    ]
+  },
+  "vcredist": {
+    "distribution": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+    "version": "14.44.35211.0",
+    "url": "https://download.visualstudio.microsoft.com/download/pr/9d270333-8b7b-4f96-9458-6fcdb2ec0b25/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+    "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+    "archiveName": "vc_redist.x64.exe",
+    "requiredFiles": [
+      "prerequisites/vc_redist.x64.exe"
+    ]
+  },
+  "printing": {
+    "distribution": "QZ Tray Windows x64 with its official bundled Java runtime",
+    "version": "2.2.6",
+    "url": "https://github.com/qzind/tray/releases/download/v2.2.6/qz-tray-2.2.6-x86_64.exe",
+    "sha256": "aeb93a601c27f5fa6bb464f63471e7acd43052ba384fef49dceec8290d4f7587",
+    "archiveName": "qz-tray-2.2.6-x86_64.exe",
+    "requiredFiles": [
+      "java/bin/java.exe",
+      "qz-tray/qz-tray.jar"
+    ]
+  }
+}

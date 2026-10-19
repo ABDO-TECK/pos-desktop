@@ -1,0 +1,34 @@
+{
+  "app": {
+    "name": "POS System",
+    "loading": "Loading...",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "add": "Add",
+    "search": "Search...",
+    "confirm_delete": "Are you sure you want to delete?",
+    "no_results": "No results found",
+    "error_occurred": "An error occurred"
+  },
+  "nav": {
+    "pos": "POS",
+    "products": "Products",
+    "sales": "Sales",
+    "inventory": "Inventory",
+    "suppliers": "Suppliers",
+    "customers": "Customers",
+    "expenses": "Expenses",
+    "reports": "Reports",
+    "settings": "Settings",
+    "users": "Users"
+  },
+  "auth": {
+    "login": "Login",
+    "logout": "Logout",
+    "email": "Email",
+    "password": "Password",
+    "invalid_credentials": "Invalid credentials"
+  }
+}

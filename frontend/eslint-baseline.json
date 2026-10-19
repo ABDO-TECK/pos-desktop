@@ -1,0 +1,15 @@
+{
+  "maxWarnings": 199,
+  "snapshot": {
+    "totalWarnings": 199,
+    "rules": {
+      "@typescript-eslint/no-explicit-any": 132,
+      "@typescript-eslint/no-unused-vars": 46,
+      "@typescript-eslint/prefer-as-const": 1,
+      "@typescript-eslint/triple-slash-reference": 8,
+      "prefer-const": 1,
+      "react-hooks/exhaustive-deps": 6,
+      "react-refresh/only-export-components": 5
+    }
+  }
+}

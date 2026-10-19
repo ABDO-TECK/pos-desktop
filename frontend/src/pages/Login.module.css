@@ -1,0 +1,42 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1a1d2e 0%, #22c55e22 100%);
+}
+
+:global(html[data-theme="dark"]) .page {
+  background: linear-gradient(135deg, #0a0c12 0%, rgba(34,197,94,0.14) 100%);
+}
+
+.themeToggle {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.2);
+  background: rgba(0,0,0,.2);
+  color: #e5e7eb;
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.themeToggle:hover {
+  background: rgba(255,255,255,.12);
+}
+
+:global(html[data-theme="dark"]) .themeToggle {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+:global(html[data-theme="dark"]) .themeToggle:hover {
+  background: rgba(255,255,255,.06);
+}

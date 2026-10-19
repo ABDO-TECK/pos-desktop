@@ -1,0 +1,30 @@
+.payBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.5rem 0.4rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 0.82rem;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.payBtn:hover { background: var(--bg); }
+html[data-theme="dark"] .payBtn:hover { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.1); }
+
+.activeNormal {
+  border-color: var(--primary);
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--primary);
+}
+
+.activeCredit {
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}

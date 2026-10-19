@@ -1,0 +1,136 @@
+/* â”€â”€ Generic page padding fix for phone â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@media (max-width: 767px) {
+  h1, h2 { font-size: 1.1rem !important; }
+
+  .stat-card .stat-value { font-size: 1.3rem; }
+
+  /* Tables: hide less-important columns */
+  table .hide-mobile { display: none !important; }
+  .show-mobile { display: block !important; }
+
+  /* Buttons full-width in some contexts */
+  .btn-full-mobile { width: 100%; justify-content: center; }
+
+  /* Filters stack */
+  .filter-bar { flex-direction: column; }
+  .filter-bar > * { width: 100%; }
+  .filter-bar .input,
+  .filter-bar select { width: 100%; }
+}
+
+/* â”€â”€ Responsive Split Layout (List + Ledger Detail) â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.split-layout {
+  display: flex;
+  height: 100%;
+  gap: 1rem;
+  overflow: hidden;
+  position: relative;
+}
+
+.split-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  transition: width 0.25s, opacity 0.2s;
+  flex-shrink: 0;
+}
+.split-list.is-split { width: 320px; }
+.split-list.full-width { width: 100%; }
+
+.split-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow: hidden;
+  min-width: 0;
+  animation: fadeIn 0.2s;
+}
+
+@media (max-width: 1023px) {
+  /* On <= tablet, hide the list entirely when detail is open */
+  .split-layout.has-detail .split-list {
+    display: none;
+  }
+}
+
+/* â”€â”€ Specific Responsive Layouts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.ledger-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ledger-header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.ledger-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+@media (max-width: 767px) {
+  .ledger-header {
+    flex-direction: column;
+    align-items: stretch;
+    background: var(--surface);
+    padding: 1rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+  }
+  .ledger-header-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+  }
+  .ledger-header-actions {
+    display: flex;
+    gap: 0.5rem;
+    width: 100%;
+  }
+  .ledger-header-actions > *:first-child,
+  .ledger-header-actions .ledger-balance {
+    flex: 1; /* Make balance box or primary button stretch */
+  }
+}
+
+.page-tabs-bar {
+  display: flex;
+  gap: 0.25rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.page-tabs-bar::-webkit-scrollbar { display: none; }
+
+@media (max-width: 767px) {
+  .page-header.col-mobile {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+  .page-header.col-mobile h2 {
+    text-align: center;
+    margin-bottom: 0.25rem;
+  }
+  .page-tabs-bar {
+    width: 100%;
+    margin: 0 auto;
+  }
+}
+
+

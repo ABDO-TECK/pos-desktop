@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>وضع الاسترداد</title>
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: #151d30;
+      --text-color: #e2e8f0;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.1);
+      --success: #10b981;
+      --border-color: #1e293b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 760px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 30px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      margin-bottom: 25px;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 20px;
+    }
+
+    .header-icon {
+      color: var(--danger);
+      width: 48px;
+      height: 48px;
+    }
+
+    .title {
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .alert-box {
+      background: var(--danger-bg);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 25px;
+    }
+
+    .alert-title {
+      color: var(--danger);
+      font-weight: 600;
+      font-size: 16px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .alert-message {
+      font-size: 14px;
+      line-height: 1.6;
+      word-break: break-all;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+      margin-top: 15px;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-top: 1px solid rgba(239, 68, 68, 0.15);
+      padding-top: 12px;
+    }
+
+    .checks-list {
+      margin-top: 15px;
+    }
+
+    .check-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .check-name {
+      font-weight: 500;
+    }
+
+    .check-status {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .status-ok {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--success);
+    }
+
+    .status-failed {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+
+    .action-group {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 25px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background-color: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background-color: var(--primary-hover);
+    }
+
+    .btn-secondary {
+      background-color: #1e293b;
+      color: var(--text-color);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background-color: #334155;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .diagnostics-panel {
+      background: rgba(0, 0, 0, 0.15);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 15px;
+      display: none;
+    }
+
+    .diagnostics-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 15px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .diagnostics-item {
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+
+    .diagnostics-label {
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      font-weight: 500;
+    }
+
+    .diagnostics-val {
+      background: #0a0e17;
+      padding: 8px 12px;
+      border-radius: 4px;
+      border: 1px solid #1e293b;
+      font-family: monospace;
+      word-break: break-all;
+      color: #38bdf8;
+    }
+
+    .spinning {
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+    </svg>
+    <div>
+      <h1 class="title">وضع الاسترداد وإصلاح الأخطاء</h1>
+      <p class="subtitle">وضع استرداد نظام نقاط البيع</p>
+    </div>
+  </div>
+
+  <div class="alert-box">
+    <div class="alert-title">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01" />
+      </svg>
+      <span>تفاصيل الخطأ الأخير:</span>
+    </div>
+    <div class="alert-message" id="error-msg">جاري تحميل حالة الخطأ...</div>
+    
+    <div class="meta-grid">
+      <div>مرحلة بدء التشغيل: <span id="error-stage">غير متوفر</span></div>
+      <div>رمز الخطأ: <span id="error-code">غير متوفر</span></div>
+      <div>وقت الفشل: <span id="error-time">غير متوفر</span></div>
+      <div>عنوان الخادم: <span id="error-url">غير متوفر</span></div>
+    </div>
+
+    <div class="checks-list" id="checks-container">
+      <!-- Dynamic checks status will go here -->
+    </div>
+  </div>
+
+  <div class="action-group">
+    <button class="btn btn-primary" id="btn-retry" onclick="retryStartup()">
+      <svg id="retry-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+      </svg>
+      <span>إعادة المحاولة</span>
+    </button>
+    <button class="btn btn-secondary" id="btn-diagnostics" onclick="toggleDiagnostics()">
+      <span>عرض تشخيص النظام</span>
+    </button>
+    <button class="btn btn-secondary" id="btn-export" disabled>
+      <span>تصدير ملفات التشخيص</span>
+    </button>
+  </div>
+
+  <!-- Prerequisite Remediation Box (for PHP_RUNTIME_DLL_MISSING) -->
+  <div class="alert-box" id="prerequisite-remediation-box" style="background: rgba(239, 68, 68, 0.05); border: 1px solid rgba(239, 68, 68, 0.25); margin-top: 25px; display: none;">
+    <div class="alert-title" style="color: var(--danger);">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+      <span>متطلبات تشغيل Windows مفقودة</span>
+    </div>
+    <div class="alert-message">
+      <p style="font-size: 13px; margin-bottom: 8px;">
+        تعذر تشغيل مكوّن PHP لأن حزمة تشغيل Microsoft Visual C++ 2015-2022 Redistributable (x64) غير مثبتة على هذا الجهاز.
+      </p>
+      <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">
+        <strong>الحل الموصى به:</strong> أعد تشغيل برنامج تثبيت POS Desktop Setup حيث يقوم بتثبيت الحزمة التكميلية تلقائياً، أو قم بتثبيت الحزمة يدوياً من موقع Microsoft الرسمي.
+      </p>
+      <p style="font-size: 12px; color: #f59e0b;">
+        هذا الخطأ لا يرتبط ببيانات أو قواعد بيانات POS، ولا يتطلب استعادة أو تعديل قاعدة البيانات.
+      </p>
+    </div>
+  </div>
+
+  <!-- MySQL Rollback Section -->
+  <div class="alert-box" id="mysql-rollback-section" style="background: rgba(59, 130, 246, 0.05); border: 1px solid rgba(59, 130, 246, 0.25); margin-top: 25px;">
+    <div class="alert-title" style="color: var(--primary);">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+      </svg>
+      <span>خيارات استعادة قاعدة البيانات</span>
+    </div>
+    
+    <div class="alert-message" style="margin-bottom: 15px;">
+      <div>حالة جاهزية الاسترداد: <strong id="rollback-readiness">جاري الفحص...</strong></div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;" id="rollback-readiness-details"></div>
+    </div>
+
+    <!-- Plan Display -->
+    <div id="rollback-plan-container" style="display: none; background: #0a0e17; padding: 12px; border-radius: 6px; border: 1px solid #1e293b; margin-bottom: 15px; font-size: 13px;">
+      <div style="font-weight: 600; margin-bottom: 8px; color: var(--primary);">خطة الاستعادة المقترحة:</div>
+      <div style="margin-bottom: 4px;">• مسار البيانات الحالي: <code id="plan-active-path" style="color:#38bdf8;"></code></div>
+      <div style="margin-bottom: 4px;">• مسار مصدر الاستعادة: <code id="plan-source-path" style="color:#38bdf8;"></code></div>
+      <div style="margin-bottom: 4px;">• مسار النسخة الاحتياطية قبل الاستعادة: <code id="plan-snapshot-path" style="color:#38bdf8;"></code></div>
+      <div style="font-weight: 600; margin-top: 10px; margin-bottom: 4px;">العمليات المخطط لها:</div>
+      <ol id="plan-actions" style="padding-right: 20px; color: var(--text-muted);">
+      </ol>
+    </div>
+
+    <div class="action-group" style="margin-bottom: 15px;">
+      <button class="btn btn-secondary" id="btn-dryrun" onclick="runRollbackDryRun()" disabled>
+        <span>تشغيل محاكاة الاسترداد</span>
+      </button>
+    </div>
+
+    <!-- Snapshot Section -->
+    <div id="snapshot-execution-section" style="display: none; border-top: 1px solid rgba(59, 130, 246, 0.15); padding-top: 15px;">
+      <p style="font-size: 13px; margin-bottom: 10px; color: #f59e0b;">
+        <strong>ملاحظة هامة:</strong> سيقوم هذا الإجراء بإنشاء نسخة أمان من مسار البيانات النشط الحالي للتحقق من سلامته.
+        <br/>
+        <span style="font-size: 12px; color: var(--text-muted);">لم تتم استعادة البيانات بعد؛ يتم فقط إنشاء نسخة أمان وفحص سلامتها.</span>
+      </p>
+      
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+        <label style="font-size: 13px; font-weight: 500;">لتأكيد العملية، يرجى كتابة <code style="color:var(--danger);">CONFIRM_MYSQL_ROLLBACK</code> أدناه:</label>
+        <input type="text" id="rollback-token-input" placeholder="اكتب رمز التأكيد هنا..." style="background: #0a0e17; color: var(--text-color); border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 4px; font-family: monospace; outline: none; font-size: 13px;" oninput="validateConfirmationToken()"/>
+      </div>
+
+      <button class="btn btn-primary" id="btn-execute-rollback" onclick="executeRollbackSnapshot()" style="background-color: var(--danger);" disabled>
+        <span>إنشاء نسخة الاسترجاع الاحتياطية</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- MySQL Restore Staging Section -->
+  <div class="alert-box" id="restore-staging-box" style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.25); margin-top: 25px; display: none;">
+    <div class="alert-title" style="color: var(--success);">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+      </svg>
+      <span>تهيئة خطوة استعادة قاعدة البيانات</span>
+    </div>
+    
+    <div class="alert-message" style="margin-bottom: 15px;">
+      <div>حالة الاستعادة الجارية: <strong id="restore-staging-status">جاري الانتظار...</strong></div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;" id="restore-staging-details"></div>
+    </div>
+
+    <div style="border-top: 1px solid rgba(16, 185, 129, 0.15); padding-top: 15px;">
+      <p style="font-size: 13px; margin-bottom: 10px; color: #f59e0b;">
+        <strong>ملاحظة هامة:</strong> هذا الإجراء لا يستبدل قاعدة البيانات النشطة حالياً. إنه يقوم فقط بتهيئة وفحص نسخة الاسترجاع المؤقتة للتحقق التام من سلامتها قبل التبديل النهائي.
+        <br/>
+        <span style="font-size: 12px; color: var(--text-muted);">لم يتم استبدال قاعدة البيانات النشطة بعد؛ يتم فقط تجهيز نسخة استعادة مؤقتة وفحصها.</span>
+      </p>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+        <label style="font-size: 13px; font-weight: 500;">لتأكيد تهيئة النسخة المؤقتة، يرجى كتابة <code style="color:var(--danger);">CONFIRM_MYSQL_ROLLBACK_RESTORE</code> أدناه:</label>
+        <input type="text" id="restore-token-input" placeholder="اكتب رمز التأكيد هنا..." style="background: #0a0e17; color: var(--text-color); border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 4px; font-family: monospace; outline: none; font-size: 13px;" oninput="validateRestoreConfirmationToken()"/>
+      </div>
+
+      <button class="btn btn-primary" id="btn-prepare-restore-staging" onclick="prepareRestoreStaging()" style="background-color: var(--success);" disabled>
+        <span>تهيئة وفحص مجلد الاستعادة المؤقت</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- MySQL Final Rollback Switch Section -->
+  <div class="alert-box" id="final-switch-box" style="background: rgba(239, 68, 68, 0.05); border: 1px solid rgba(239, 68, 68, 0.25); margin-top: 25px; display: none;">
+    <div class="alert-title" style="color: var(--danger);">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 9.172V5L8 4z" />
+      </svg>
+      <span>التبديل النهائي لقاعدة البيانات</span>
+    </div>
+    
+    <div class="alert-message" style="margin-bottom: 15px;">
+      <div>حالة التبديل: <strong id="final-switch-status">جاري الانتظار...</strong></div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;" id="final-switch-details"></div>
+    </div>
+
+    <div style="border-top: 1px solid rgba(239, 68, 68, 0.15); padding-top: 15px;">
+      <p style="font-size: 13px; margin-bottom: 10px; color: #f59e0b;">
+        <strong>تحذير هام جداً:</strong> سيقوم هذا الإجراء بتبديل قاعدة البيانات النشطة بمجلد الاستعادة المؤقت الذي تم التحقق منه. سيتم الاحتفاظ بالبيانات النشطة القديمة كنسخة احتياطية ولا يتم حذفها.
+        <br/>
+        <span style="font-size: 12px; color: var(--text-muted);">This will switch the active database directory to the verified rollback staging copy. Existing active data will be preserved as a pre-final rollback backup, not deleted.</span>
+      </p>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+        <label style="font-size: 13px; font-weight: 500;">لتأكيد عملية التبديل النهائي، يرجى كتابة <code style="color:var(--danger);">CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH</code> أدناه:</label>
+        <input type="text" id="final-switch-token-input" placeholder="اكتب رمز التأكيد هنا..." style="background: #0a0e17; color: var(--text-color); border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 4px; font-family: monospace; outline: none; font-size: 13px;" oninput="validateFinalSwitchToken()"/>
+      </div>
+
+      <button class="btn btn-primary" id="btn-execute-final-switch" onclick="executeFinalRollbackSwitch()" style="background-color: var(--danger);" disabled>
+        <span>التبديل النهائي لقاعدة البيانات النشطة</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="diagnostics-panel" id="diagnostics-panel">
+    <h2 class="diagnostics-title">معلومات تشخيص النظام</h2>
+    <div id="diagnostics-content">
+      <!-- Diagnostics dynamic details -->
+    </div>
+  </div>
+</div>
+
+<script>
+  // Expose safety check
+  const recoveryApi = window.posRecovery;
+
+  async function loadLastError() {
+    if (!recoveryApi) return;
+    try {
+      const err = await recoveryApi.getLastError();
+      if (!err) {
+        document.getElementById('error-msg').textContent = 'لا توجد أخطاء مسجلة حالياً.';
+        return;
+      }
+
+      document.getElementById('error-msg').textContent = err.message || 'فشل غير معروف أثناء محاولة بدء تشغيل خادم الواجهة الخلفية.';
+      document.getElementById('error-time').textContent = err.timestamp ? new Date(err.timestamp).toLocaleString('ar-EG') : 'غير متوفر';
+      document.getElementById('error-url').textContent = err.apiBaseUrl || 'غير متوفر';
+
+      document.getElementById('error-msg').textContent = err.userMessage || err.message || 'فشل بدء التشغيل.';
+      document.getElementById('error-stage').textContent = err.startupStage || 'غير متوفر';
+      document.getElementById('error-code').textContent = err.code || 'غير متوفر';
+
+      const prereqBox = document.getElementById('prerequisite-remediation-box');
+      const rollbackSection = document.getElementById('mysql-rollback-section');
+      if (err.code === 'PHP_RUNTIME_DLL_MISSING') {
+        if (prereqBox) prereqBox.style.display = 'block';
+        if (rollbackSection) rollbackSection.style.display = 'none';
+      } else {
+        if (prereqBox) prereqBox.style.display = 'none';
+        if (rollbackSection) rollbackSection.style.display = 'block';
+      }
+
+      const checksContainer = document.getElementById('checks-container');
+      checksContainer.innerHTML = '';
+      if (err.failedChecks) {
+        Object.keys(err.failedChecks).forEach(key => {
+          const check = err.failedChecks[key];
+          const checkEl = document.createElement('div');
+          checkEl.className = 'check-item';
+          
+          let checkLabel = key;
+          if (key === 'database') checkLabel = 'قاعدة البيانات';
+          if (key === 'storage') checkLabel = 'مسار التخزين';
+          if (key === 'logs') checkLabel = 'مسار السجلات';
+          if (key === 'version') checkLabel = 'إصدار النظام';
+
+          checkEl.innerHTML = `
+            <span class="check-name">${escapeHtml(checkLabel)}</span>
+            <span class="check-status status-${check.status === 'ok' ? 'ok' : 'failed'}">
+              ${check.status === 'ok' ? 'سليم' : 'فشل'}
+            </span>
+          `;
+          checksContainer.appendChild(checkEl);
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load last error:', err);
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function formatDiagnostic(value) {
+    if (value === null || value === undefined) return 'غير متوفر';
+    return escapeHtml(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+  }
+
+  async function toggleDiagnostics() {
+    const panel = document.getElementById('diagnostics-panel');
+    const btn = document.getElementById('btn-diagnostics');
+    
+    if (panel.style.display === 'block') {
+      panel.style.display = 'none';
+      btn.querySelector('span').textContent = 'عرض تشخيص النظام';
+    } else {
+      panel.style.display = 'block';
+      btn.querySelector('span').textContent = 'إخفاء تشخيص النظام';
+      
+      const content = document.getElementById('diagnostics-content');
+      content.innerHTML = '<div style="font-size:13px;color:var(--text-muted);">جاري جمع معلومات التشخيص...</div>';
+      
+      try {
+        const diag = await recoveryApi.getDiagnostics();
+        content.innerHTML = `
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">مجلد البيانات الرئيسي:</div>
+            <div class="diagnostics-val">${escapeHtml(diag.selectedDataDir || 'غير متوفر')}</div>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">مجلد الإعدادات:</div>
+            <div class="diagnostics-val">${escapeHtml(diag.configDir || 'غير متوفر')}</div>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">مجلد سجلات التشغيل:</div>
+            <div class="diagnostics-val">${escapeHtml(diag.logsDir || 'غير متوفر')}</div>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">المنافذ الحالية (runtime_ports.json):</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.runtimePorts)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">تفاصيل خادم PHP:</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.phpServerInfo)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">نتيجة الفحص الأخيرة:</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.lastHealthResult)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">ملخص ترحيل MySQL:</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.mysqlMigration)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">استعادة MySQL:</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.runtimeMetadata?.mysqlRollback)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">اكتشاف مكونات التشغيل المضمنة:</div>
+            <pre class="diagnostics-val">${formatDiagnostic(diag.runtimeDiagnostics)}</pre>
+          </div>
+          <div class="diagnostics-item">
+            <div class="diagnostics-label">آخر أخطاء العمليات:</div>
+            <pre class="diagnostics-val">${formatDiagnostic({ php: diag.lastPhpError, mysql: diag.lastMysqlError })}</pre>
+          </div>
+        `;
+      } catch (err) {
+        content.innerHTML = `<div style="font-size:13px;color:var(--danger);">فشل جمع التشخيص: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+  }
+
+  async function retryStartup() {
+    const btnRetry = document.getElementById('btn-retry');
+    const icon = document.getElementById('retry-icon');
+    
+    btnRetry.disabled = true;
+    btnRetry.querySelector('span').textContent = 'جاري محاولة بدء التشغيل...';
+    icon.classList.add('spinning');
+
+    try {
+      const res = await recoveryApi.retryStartup();
+      if (!res.success) {
+        btnRetry.disabled = false;
+        btnRetry.querySelector('span').textContent = 'إعادة المحاولة';
+        icon.classList.remove('spinning');
+        await loadLastError(); // Reload updated errors
+        
+        // If diagnostics panel is open, refresh it as well
+        const panel = document.getElementById('diagnostics-panel');
+        if (panel.style.display === 'block') {
+          panel.style.display = 'none';
+          toggleDiagnostics();
+        }
+      }
+    } catch (err) {
+      btnRetry.disabled = false;
+      btnRetry.querySelector('span').textContent = 'إعادة المحاولة';
+      icon.classList.remove('spinning');
+      document.getElementById('error-msg').textContent = 'فشل الاتصال بـ Electron IPC: ' + err.message;
+    }
+  }
+
+  async function checkRollbackReadiness() {
+    if (!recoveryApi || !recoveryApi.getRollbackReadiness) return;
+    try {
+      const res = await recoveryApi.getRollbackReadiness();
+      const statusText = document.getElementById('rollback-readiness');
+      const detailsText = document.getElementById('rollback-readiness-details');
+      const btnDryRun = document.getElementById('btn-dryrun');
+      
+      if (res.available) {
+        statusText.textContent = 'جاهز';
+        statusText.style.color = 'var(--success)';
+        detailsText.textContent = `مسار المصدر: ${res.sourcePath}`;
+        btnDryRun.disabled = false;
+      } else {
+        statusText.textContent = 'غير متاح';
+        statusText.style.color = 'var(--text-muted)';
+        detailsText.textContent = `السبب: ${res.reason}`;
+        btnDryRun.disabled = true;
+      }
+    } catch (err) {
+      console.error('Readiness check failed:', err);
+    }
+  }
+
+  async function runRollbackDryRun() {
+    if (!recoveryApi || !recoveryApi.runRollbackDryRun) return;
+    const btnDryRun = document.getElementById('btn-dryrun');
+    btnDryRun.disabled = true;
+    btnDryRun.querySelector('span').textContent = 'جاري التشغيل...';
+
+    try {
+      const res = await recoveryApi.runRollbackDryRun();
+      btnDryRun.querySelector('span').textContent = 'تشغيل محاكاة الاسترداد';
+      btnDryRun.disabled = false;
+
+      if (res.dryRun && res.dryRun.status === 'ready') {
+        alert('نجحت محاكاة الاسترداد! الخطة جاهزة.');
+        
+        const plan = res.dryRun.plan;
+        document.getElementById('plan-active-path').textContent = plan.currentActivePath;
+        document.getElementById('plan-source-path').textContent = plan.rollbackSourceCandidate;
+        document.getElementById('plan-snapshot-path').textContent = plan.snapshotPath;
+        
+        const actionsList = document.getElementById('plan-actions');
+        actionsList.innerHTML = '';
+        plan.actions.forEach(act => {
+          const li = document.createElement('li');
+          li.textContent = act;
+          actionsList.appendChild(li);
+        });
+        
+        document.getElementById('rollback-plan-container').style.display = 'block';
+        document.getElementById('snapshot-execution-section').style.display = 'block';
+      } else {
+        alert(`فشلت محاكاة الاسترداد: ${res.dryRun ? res.dryRun.reason : 'سبب غير معروف'}`);
+      }
+    } catch (err) {
+      alert(`خطأ أثناء المحاكاة: ${err.message}`);
+      btnDryRun.querySelector('span').textContent = 'تشغيل محاكاة الاسترداد';
+      btnDryRun.disabled = false;
+    }
+  }
+
+  function validateConfirmationToken() {
+    const input = document.getElementById('rollback-token-input').value;
+    const btn = document.getElementById('btn-execute-rollback');
+    if (input === 'CONFIRM_MYSQL_ROLLBACK') {
+      btn.disabled = false;
+    } else {
+      btn.disabled = true;
+    }
+  }
+
+  async function executeRollbackSnapshot() {
+    const inputToken = document.getElementById('rollback-token-input').value;
+    if (inputToken !== 'CONFIRM_MYSQL_ROLLBACK') {
+      alert('رمز التأكيد غير صحيح.');
+      return;
+    }
+
+    if (!recoveryApi || !recoveryApi.executeRollback) return;
+    const btn = document.getElementById('btn-execute-rollback');
+    btn.disabled = true;
+    btn.querySelector('span').textContent = 'جاري إنشاء النسخة الاحتياطية...';
+
+    try {
+      const res = await recoveryApi.executeRollback({
+        enableRollback: true,
+        dryRun: false,
+        confirmationToken: 'CONFIRM_MYSQL_ROLLBACK'
+      });
+
+      if (res.success && res.status === 'rollback_ready_for_restore') {
+        alert(`تم إنشاء نسخة الاسترداد الاحتياطية بنجاح وتم التحقق منها!\nالمسار: ${res.snapshotPath}\nالحالة الحالية: ${res.status}\n\nلم تتم استعادة البيانات بعد؛ تم فقط إنشاء نسخة أمان وفحص سلامتها.`);
+        btn.querySelector('span').textContent = 'جاهز للاستعادة';
+        btn.style.backgroundColor = 'var(--success)';
+        
+        await updateRestoreStagingUI();
+
+        const panel = document.getElementById('diagnostics-panel');
+        if (panel.style.display === 'block') {
+          panel.style.display = 'none';
+          toggleDiagnostics();
+        }
+      } else {
+        alert(`فشل إنشاء النسخة الاحتياطية: ${res.reason}`);
+        btn.disabled = false;
+        btn.querySelector('span').textContent = 'إنشاء نسخة الاسترجاع الاحتياطية';
+      }
+    } catch (err) {
+      alert(`خطأ: ${err.message}`);
+      btn.disabled = false;
+      btn.querySelector('span').textContent = 'إنشاء نسخة الاسترجاع الاحتياطية';
+    }
+  }
+
+  async function updateRestoreStagingUI() {
+    if (!recoveryApi) return;
+    try {
+      const diag = await recoveryApi.getDiagnostics();
+      const mr = diag.runtimeMetadata && diag.runtimeMetadata.mysqlRollback;
+      const box = document.getElementById('restore-staging-box');
+      const statusText = document.getElementById('restore-staging-status');
+      const detailsText = document.getElementById('restore-staging-details');
+      const btn = document.getElementById('btn-prepare-restore-staging');
+      
+      if (mr && (
+        mr.status === 'rollback_ready_for_restore' ||
+        mr.status === 'rollback_restore_staged_verified' ||
+        mr.status === 'rollback_restore_verify_failed' ||
+        mr.status === 'rollback_restore_blocked'
+      )) {
+        box.style.display = 'block';
+        
+        if (mr.status === 'rollback_ready_for_restore') {
+          statusText.textContent = 'جاهز لتهيئة النسخة المؤقتة';
+          statusText.style.color = 'var(--primary)';
+          detailsText.textContent = 'يمكنك الآن إدخال رمز التأكيد لإنشاء وفحص نسخة الاسترجاع المؤقتة.';
+          btn.disabled = document.getElementById('restore-token-input').value !== 'CONFIRM_MYSQL_ROLLBACK_RESTORE';
+          btn.style.backgroundColor = 'var(--success)';
+          btn.querySelector('span').textContent = 'تهيئة وفحص مجلد الاستعادة المؤقت';
+        } else if (mr.status === 'rollback_restore_staged_verified') {
+          statusText.textContent = 'تم التحقق من النسخة المؤقتة بنجاح';
+          statusText.style.color = 'var(--success)';
+          detailsText.textContent = `المجلد المؤقت: ${mr.stagingPath} | المصدر: ${mr.restoreSource}`;
+          btn.querySelector('span').textContent = 'تم إعداد وفحص النسخة المؤقتة بنجاح';
+          btn.disabled = true;
+          btn.style.backgroundColor = 'var(--success)';
+        } else if (mr.status === 'rollback_restore_verify_failed') {
+          statusText.textContent = 'فشل التحقق من النسخة المؤقتة';
+          statusText.style.color = 'var(--danger)';
+          detailsText.textContent = `السبب: ${mr.lastError} | المسار المؤقت: ${mr.stagingPath || 'غير متوفر'}`;
+          btn.disabled = document.getElementById('restore-token-input').value !== 'CONFIRM_MYSQL_ROLLBACK_RESTORE';
+          btn.style.backgroundColor = 'var(--success)';
+          btn.querySelector('span').textContent = 'تهيئة وفحص مجلد الاستعادة المؤقت';
+        } else if (mr.status === 'rollback_restore_blocked') {
+          statusText.textContent = 'العملية محظورة';
+          statusText.style.color = 'var(--danger)';
+          detailsText.textContent = `السبب: ${mr.lastError}`;
+          btn.disabled = true;
+          btn.style.backgroundColor = 'var(--danger)';
+        }
+      } else {
+        box.style.display = 'none';
+      }
+    } catch (err) {
+      console.error('Failed to update restore staging UI:', err);
+    }
+  }
+
+  function validateRestoreConfirmationToken() {
+    const input = document.getElementById('restore-token-input').value;
+    const btn = document.getElementById('btn-prepare-restore-staging');
+    if (input === 'CONFIRM_MYSQL_ROLLBACK_RESTORE') {
+      btn.disabled = false;
+    } else {
+      btn.disabled = true;
+    }
+  }
+
+  async function prepareRestoreStaging() {
+    const inputToken = document.getElementById('restore-token-input').value;
+    if (inputToken !== 'CONFIRM_MYSQL_ROLLBACK_RESTORE') {
+      alert('رمز التأكيد غير صحيح.');
+      return;
+    }
+
+    if (!recoveryApi || !recoveryApi.prepareRollbackRestoreStaging) return;
+    const btn = document.getElementById('btn-prepare-restore-staging');
+    btn.disabled = true;
+    btn.querySelector('span').textContent = 'جاري النسخ والتحقق...';
+
+    try {
+      const res = await recoveryApi.prepareRollbackRestoreStaging({
+        enableRollbackRestore: true,
+        dryRun: false,
+        confirmationToken: 'CONFIRM_MYSQL_ROLLBACK_RESTORE'
+      });
+
+      if (res.success && res.status === 'rollback_restore_staged_verified') {
+        alert(`نجحت العملية! تم إنشاء وفحص نسخة الاستعادة المؤقتة بنجاح.\nالمجلد: ${res.stagingPath}\nالمصدر: ${res.restoreSource}\n\nلم يتم استبدال قاعدة البيانات النشطة بعد.`);
+        await updateRestoreStagingUI();
+        await updateFinalSwitchUI();
+        
+        const panel = document.getElementById('diagnostics-panel');
+        if (panel.style.display === 'block') {
+          panel.style.display = 'none';
+          toggleDiagnostics();
+        }
+      } else {
+        alert(`فشلت العملية: ${res.reason}`);
+        btn.disabled = false;
+        btn.querySelector('span').textContent = 'تهيئة وفحص مجلد الاستعادة المؤقت';
+      }
+    } catch (err) {
+      alert(`خطأ: ${err.message}`);
+      btn.disabled = false;
+      btn.querySelector('span').textContent = 'تهيئة وفحص مجلد الاستعادة المؤقت';
+    }
+  }
+
+  function validateFinalSwitchToken() {
+    const input = document.getElementById('final-switch-token-input').value;
+    const btn = document.getElementById('btn-execute-final-switch');
+    if (input === 'CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH') {
+      btn.disabled = false;
+    } else {
+      btn.disabled = true;
+    }
+  }
+
+  async function updateFinalSwitchUI() {
+    if (!recoveryApi) return;
+    try {
+      const diag = await recoveryApi.getDiagnostics();
+      const mr = diag.runtimeMetadata && diag.runtimeMetadata.mysqlRollback;
+      const box = document.getElementById('final-switch-box');
+      const statusText = document.getElementById('final-switch-status');
+      const detailsText = document.getElementById('final-switch-details');
+      const btn = document.getElementById('btn-execute-final-switch');
+
+      if (mr && (
+        mr.status === 'rollback_restore_staged_verified' ||
+        mr.status === 'final_switch_blocked' ||
+        mr.status === 'final_switch_snapshot_failed' ||
+        mr.status === 'final_switch_verify_failed' ||
+        mr.status === 'rollback_completed'
+      )) {
+        box.style.display = 'block';
+
+        if (mr.status === 'rollback_restore_staged_verified') {
+          statusText.textContent = 'جاهز للتبديل النهائي';
+          statusText.style.color = 'var(--primary)';
+          detailsText.textContent = 'النسخة المؤقتة جاهزة ومفحوصة. يمكنك إدخال رمز التأكيد للتبديل النهائي.';
+          btn.disabled = document.getElementById('final-switch-token-input').value !== 'CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH';
+          btn.style.backgroundColor = 'var(--danger)';
+        btn.querySelector('span').textContent = 'التبديل النهائي لقاعدة البيانات النشطة';
+        } else if (mr.status === 'rollback_completed') {
+          statusText.textContent = 'تم التبديل النهائي بنجاح';
+          statusText.style.color = 'var(--success)';
+          detailsText.textContent = `المسار النشط: ${mr.finalActivePath} | النسخة الاحتياطية السابقة: ${mr.previousActivePathBackup}`;
+          btn.querySelector('span').textContent = 'اكتملت عملية الاستعادة والتبديل بنجاح';
+          btn.disabled = true;
+          btn.style.backgroundColor = 'var(--success)';
+        } else if (mr.status === 'final_switch_blocked') {
+          statusText.textContent = 'عملية التبديل محظورة';
+          statusText.style.color = 'var(--danger)';
+          detailsText.textContent = `السبب: ${mr.lastError}`;
+          btn.disabled = true;
+          btn.style.backgroundColor = 'var(--danger)';
+        } else if (mr.status === 'final_switch_snapshot_failed') {
+          statusText.textContent = 'فشل إنشاء النسخة الاحتياطية الوقائية';
+          statusText.style.color = 'var(--danger)';
+          detailsText.textContent = `السبب: ${mr.lastError}`;
+          btn.disabled = document.getElementById('final-switch-token-input').value !== 'CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH';
+          btn.style.backgroundColor = 'var(--danger)';
+        } else if (mr.status === 'final_switch_verify_failed') {
+          statusText.textContent = 'فشل التحقق بعد التبديل';
+          statusText.style.color = 'var(--danger)';
+          detailsText.textContent = `السبب: ${mr.lastError}. يرجى التحقق اليدوي الفوري!`;
+          btn.disabled = true;
+          btn.style.backgroundColor = 'var(--danger)';
+        }
+      } else {
+        box.style.display = 'none';
+      }
+    } catch (err) {
+      console.error('Failed to update final switch UI:', err);
+    }
+  }
+
+  async function executeFinalRollbackSwitch() {
+    const inputToken = document.getElementById('final-switch-token-input').value;
+    if (inputToken !== 'CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH') {
+      alert('رمز التأكيد غير صحيح.');
+      return;
+    }
+
+    if (!recoveryApi || !recoveryApi.runFinalRollbackSwitch) return;
+    const btn = document.getElementById('btn-execute-final-switch');
+    btn.disabled = true;
+    btn.querySelector('span').textContent = 'جاري التبديل والتحقق النهائي...';
+
+    try {
+      const res = await recoveryApi.runFinalRollbackSwitch({
+        enableFinalRollbackSwitch: true,
+        dryRun: false,
+        confirmationToken: 'CONFIRM_FINAL_MYSQL_ROLLBACK_SWITCH'
+      });
+
+      if (res.success && res.status === 'rollback_completed') {
+        alert(`نجحت العملية! تم التبديل النهائي لقاعدة البيانات بنجاح.\nالمسار النشط: ${res.finalActivePath}\nالنسخة الاحتياطية للنشط القديم: ${res.previousActivePathBackup}`);
+        await updateRestoreStagingUI();
+        await updateFinalSwitchUI();
+        
+        const panel = document.getElementById('diagnostics-panel');
+        if (panel.style.display === 'block') {
+          panel.style.display = 'none';
+          toggleDiagnostics();
+        }
+      } else {
+        alert(`فشلت العملية: ${res.reason}`);
+        btn.disabled = false;
+        btn.querySelector('span').textContent = 'التبديل النهائي لقاعدة البيانات النشطة';
+      }
+    } catch (err) {
+      alert(`خطأ: ${err.message}`);
+      btn.disabled = false;
+      btn.querySelector('span').textContent = 'التبديل النهائي لقاعدة البيانات النشطة';
+    }
+  }
+
+  // Load last error on startup
+  window.addEventListener('DOMContentLoaded', () => {
+    loadLastError();
+    checkRollbackReadiness();
+    updateRestoreStagingUI();
+    updateFinalSwitchUI();
+  });
+</script>
+</body>
+</html>
