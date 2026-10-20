@@ -1,18 +1,20 @@
 {
-  "version": "0.0.2",
-  "application_version": "0.0.2",
+  "version": "0.0.3-beta.1",
+  "application_version": "0.0.3-beta.1",
   "update_engine_version": "1.0.0",
-  "channel": "stable",
-  "minimum_supported_version": "0.0.1",
+  "channel": "beta",
+  "minimum_supported_version": "0.0.2",
   "release_series": "v0",
   "release_generation": 2,
   "released_at": "2026-10-20",
   "changelog": [
-    "Signed baseline-specific delta publishing for stable and beta on pos-desktop.",
-    "Compare deployed SHA-256 hashes and preserve unchanged files and device data.",
-    "Fix channel selection, unpacked version metadata and full-Setup discovery alongside delta releases."
+    "Signed GitHub delta delivery acceptance release from v0.0.2.",
+    "Refresh release metadata; no sales logic, schema or business-data changes."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
-  "release_type": "setup"
+  "release_type": "delta",
+  "delta_baseline_tags": [
+    "v0.0.2"
+  ]
 }
