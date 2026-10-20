@@ -44,8 +44,9 @@ jobs:
           $setup = Join-Path $lab 'POS-Desktop-Setup-0.0.1.exe'
           if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a') { throw 'Published Setup changed from the supported baseline' }
           $seven = Join-Path $PWD 'node_modules/electron-winstaller/vendor/7z.exe'
-          & $seven e $setup '$PLUGINSDIRapp-64.7z' "-o$lab" -y
+          & $seven e $setup '$PLUGINSDIR\app-64.7z' "-o$lab" -y
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath (Join-Path $lab 'app-64.7z'))) { throw 'Setup payload was not extracted' }
           $application = Join-Path $lab 'app'
           & $seven x (Join-Path $lab 'app-64.7z') "-o$application" -y
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
