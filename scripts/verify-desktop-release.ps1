@@ -36,13 +36,14 @@ $package = Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-J
 $version = (Get-Content (Join-Path $repoRoot 'version.json') -Raw | ConvertFrom-Json).version
 if (-not $version -or $package.version -ne $version) { throw 'package.json and version.json must contain the same release version.' }
 if ($Tag) {
-    $tagVersion = $Tag -replace '^v', '' -replace '-.*$', ''
+    $tagVersion = $Tag -replace '^v', ''
     if ($tagVersion -ne $version) { throw "Tag '$Tag' does not match version '$version'." }
 }
 
 $installerName = "POS-Desktop-Setup-$version.exe"
 $installerPath = Join-Path $releaseRoot $installerName
-$latestPath = Join-Path $releaseRoot 'latest.yml'
+$metadataName = if ($version -match '-beta\.') { 'beta.yml' } elseif ($version -match '-rc\.') { 'rc.yml' } else { 'latest.yml' }
+$latestPath = Join-Path $releaseRoot $metadataName
 if (-not (Test-Path -LiteralPath $installerPath)) { throw "Installer is missing: $installerPath" }
 if (-not (Test-Path -LiteralPath $latestPath)) { throw "latest.yml is missing: $latestPath" }
 if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'backend/backend.phar'))) { throw 'backend/backend.phar is missing.' }

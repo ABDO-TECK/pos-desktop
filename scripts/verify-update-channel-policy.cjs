@@ -1,0 +1,18 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { readUpdateChannel, selectSetupRelease } = require('../electron/utils/update-channel-policy');
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-channel-'));
+fs.writeFileSync(path.join(root, 'version.json'), JSON.stringify({ update_channel: 'stable' }));
+assert.equal(readUpdateChannel(root, root), 'stable');
+fs.writeFileSync(path.join(root, 'update_channel.json'), JSON.stringify({ channel: 'beta' }));
+assert.equal(readUpdateChannel(root, root), 'beta');
+const setup = (version, prerelease = false) => ({ tag_name: `v${version}`, prerelease, assets: [{ name: prerelease ? 'beta.yml' : 'latest.yml' }] });
+const stable = setup('0.0.3');
+const beta = setup('0.0.4-beta.1', true);
+const delta = { tag_name: 'v0.0.5', prerelease: false, assets: [{ name: 'delta.zip' }] };
+assert.equal(selectSetupRelease([beta, stable, delta], 'stable', '0.0.2').tag_name, 'v0.0.3');
+assert.equal(selectSetupRelease([stable, delta, beta], 'beta', '0.0.2').tag_name, 'v0.0.4-beta.1');
+assert.equal(selectSetupRelease([beta, stable], 'stable', '0.0.4'), null, 'Never offer an older Setup after a delta.');
+console.log('Setup channels verified: persisted preference, delta-only exclusion and downgrade prevention.');

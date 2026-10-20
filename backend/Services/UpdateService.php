@@ -62,6 +62,9 @@ class UpdateService
         $this->migrationSafetyBackupService = $migrationSafetyBackupService
             ?? new MigrationSafetyBackupService($backupService, $this->deltaUpdateService->getStorageDir());
         $this->repoUrl          = EnvLoader::get('UPDATE_SERVER_URL', 'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/latest');
+        if (preg_match('#^https://api\.github\.com/repos/ABDO-TECK/(?:pos|pos-desktop)/(?:contents/version\.json|releases)(?:[/?]|$)#', $this->repoUrl)) {
+            $this->repoUrl = 'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/latest';
+        }
 
 
         $defaultHosts = 'api.github.com,github.com,raw.githubusercontent.com,objects.githubusercontent.com,github-releases.githubusercontent.com';
@@ -736,12 +739,17 @@ class UpdateService
                     $validation = $this->manifestService->validateManifest($deltaManifest);
                     if ($validation['valid'] && $validation['manifest'] !== null) {
                         $manifestData = $validation['manifest'];
+                        $association = $this->manifestService->checkReleaseAssociation($manifestData, $latestVersion, $remote['tag_name'] ?? ('v' . $latestVersion), $clientChannel);
                         $manifestCompatibility = ReleaseVersionPolicy::assess(
                             $currentVersion,
                             $manifestData['version'] ?? null
                         );
 
-                        if (!$manifestCompatibility['compatible']) {
+                        if (!$association['compatible']) {
+                            $hasUpdate = false;
+                            $deltaReason = $association['reason'];
+                            $deltaReasonCode = 'manifest_release_mismatch';
+                        } elseif (!$manifestCompatibility['compatible']) {
                             $hasUpdate = false;
                             $deltaReason = $manifestCompatibility['reason'];
                             $deltaReasonCode = $manifestCompatibility['reason_code'];
@@ -1028,6 +1036,10 @@ class UpdateService
         if (is_array($potentialManifest)) {
             $val = $this->manifestService->validateManifest($potentialManifest);
             if ($val['valid'] && $val['manifest'] !== null) {
+                $association = $this->manifestService->checkReleaseAssociation($val['manifest'], $targetVersion, $releaseTag, $this->getClientChannel());
+                if (!$association['compatible']) {
+                    return ['ok' => false, 'error' => $association['reason'], 'code' => 403, 'data' => ['logs' => $output]];
+                }
                 $manifestCompatibility = ReleaseVersionPolicy::assess(
                     $currentVersion,
                     $val['manifest']['version'] ?? null

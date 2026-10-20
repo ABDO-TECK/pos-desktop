@@ -1,17 +1,18 @@
 {
-  "version": "0.0.1",
-  "application_version": "0.0.1",
+  "version": "0.0.2",
+  "application_version": "0.0.2",
   "update_engine_version": "1.0.0",
-  "channel": "prerelease",
+  "channel": "stable",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
   "release_generation": 2,
-  "released_at": "2026-10-19",
+  "released_at": "2026-10-20",
   "changelog": [
-    "First release from the clean pos-desktop repository.",
-    "Includes catalog trigger diagnostics, session CSRF, branch page and receipt print fixes.",
-    "Bundles PHP, MariaDB, Java and QZ Tray."
+    "Signed baseline-specific delta publishing for stable and beta on pos-desktop.",
+    "Compare deployed SHA-256 hashes and preserve unchanged files and device data.",
+    "Fix channel selection, unpacked version metadata and full-Setup discovery alongside delta releases."
   ],
   "requires_npm_install": false,
-  "update_channel": "prerelease"
+  "update_channel": "stable",
+  "release_type": "setup"
 }

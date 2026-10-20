@@ -12,7 +12,7 @@ function verifyFail(string $message): never
 
 function verifySemver(string $version, string $label): void
 {
-    if (!preg_match('/^\d+\.\d+\.\d+$/', $version)) {
+    if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $version)) {
         verifyFail("{$label} must be a semantic version in X.Y.Z form.");
     }
 }
@@ -165,6 +165,7 @@ try {
         'manifest.json',
         'manifest.sig',
         'release-notes.md',
+        'deployment-inventory.json',
         'update_public_key.pem',
     ];
     foreach (scandir($releaseDir) ?: [] as $name) {

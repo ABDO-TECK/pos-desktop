@@ -90,6 +90,11 @@ class GitHubReleaseProvider
      */
     public function getLatestRelease(string $channel = 'stable', ?string $currentVersion = null): array
     {
+        return $this->getReleasePage($channel, $currentVersion, 1);
+    }
+
+    private function getReleasePage(string $channel, ?string $currentVersion, int $page): array
+    {
         $channel = strtolower(trim($channel ?: 'stable'));
         if (!in_array($channel, ['stable', 'beta', 'rc'], true)) {
             $channel = 'stable';
@@ -109,35 +114,10 @@ class GitHubReleaseProvider
             return !ReleaseVersionPolicy::assess($currentVersion, $cleanTag)['compatible'];
         };
 
-        // If stable channel and /releases/latest is available, verify it is compatible first
-        if ($channel === 'stable') {
-            $apiUrl = "https://api.github.com/repos/{$this->owner}/{$this->repo}/releases/latest";
-            $res = $this->fetchSingleReleaseUrl($apiUrl);
-            if (!$res['ok'] && in_array($res['error_code'] ?? null, [
-                'github_primary_rate_limited',
-                'github_secondary_rate_limited',
-                'github_http_403_forbidden',
-            ], true)) {
-                $res['channel'] = 'stable';
-                return $res;
-            }
-            if ($res['ok'] && !empty($res['tag_name'])) {
-                $tagLower = strtolower($res['tag_name']);
-                if (!str_contains($tagLower, 'beta') && !str_contains($tagLower, 'rc')) {
-                    if (!$isIncompatibleRelease($res['tag_name'])) {
-                        $res['channel'] = 'stable';
-                        return $res;
-                    }
-                    Logger::info('GitHubReleaseProvider: /releases/latest points to legacy series, falling back to release enumeration', [
-                        'tag' => $res['tag_name'],
-                        'current_version' => $currentVersion,
-                    ]);
-                }
-            }
-        }
-
+        // Enumerate releases for every channel: GitHub's latest Setup may be
+        // intentionally older than newer delta-only releases.
         // Fetch recent releases list to find the newest compatible release in the active generation
-        $listUrl = "https://api.github.com/repos/{$this->owner}/{$this->repo}/releases?per_page=30";
+        $listUrl = "https://api.github.com/repos/{$this->owner}/{$this->repo}/releases?per_page=100&page={$page}";
         if (!$this->isAllowedUrl($listUrl)) {
             $err = "Configured GitHub repository URL '{$listUrl}' is not in the allowed update hosts.";
             Logger::error($err);
@@ -213,8 +193,8 @@ class GitHubReleaseProvider
 
             $tagLower = strtolower($tag);
             $isPrerelease = !empty($rel['prerelease']);
-            $isBeta = $isPrerelease || str_contains($tagLower, 'beta');
             $isRc = str_contains($tagLower, 'rc');
+            $isBeta = !$isRc && ($isPrerelease || str_contains($tagLower, 'beta'));
 
             $relChannel = 'stable';
             if ($isBeta) {
@@ -234,12 +214,18 @@ class GitHubReleaseProvider
                 continue;
             }
 
-            $mapped = $this->mapReleaseData($rel);
+            if (!empty($rel['draft'])) continue;
+            $mapped = $this->mapReleaseData($rel, $currentVersion);
+            if (!empty($mapped['unsupported_baseline'])) continue;
             $mapped['channel'] = $relChannel;
             $compatibleReleases[] = $mapped;
         }
 
         if (empty($compatibleReleases)) {
+            if (count($releases) === 100) {
+                if ($page >= 10) return $this->failureResult('release_catalog_limit', 'Release search exceeded the bounded page limit.');
+                return $this->getReleasePage($channel, $currentVersion, $page + 1);
+            }
             return $this->noEligibleReleaseResult($channel);
         }
 
@@ -283,7 +269,7 @@ class GitHubReleaseProvider
     /**
      * Fetch and parse a single release endpoint.
      */
-    private function fetchSingleReleaseUrl(string $apiUrl): array
+    private function fetchSingleReleaseUrl(string $apiUrl, ?string $currentVersion = null): array
     {
         if (!$this->isAllowedUrl($apiUrl)) {
             return $this->failureResult('invalid_update_url', 'Invalid update URL.');
@@ -318,13 +304,13 @@ class GitHubReleaseProvider
             return $this->failureResult('invalid_release_json', 'Invalid release payload.');
         }
 
-        return $this->mapReleaseData($data);
+        return $this->mapReleaseData($data, $currentVersion);
     }
 
     /**
      * Map raw GitHub API release JSON to structured provider array.
      */
-    public function mapReleaseData(array $data): array
+    public function mapReleaseData(array $data, ?string $currentVersion = null): array
     {
         $tagName = (string) ($data['tag_name'] ?? '');
         $cleanVersion = preg_replace('/^v/i', '', trim($tagName));
@@ -375,8 +361,20 @@ class GitHubReleaseProvider
             }
         }
 
+        // Each baseline has its own signed manifest and ZIP. Never apply a
+        // package built for another installed version or mix asset signatures.
+        $versionedManifests = array_filter(array_keys($assetsMap), static fn (string $name): bool => preg_match('/^manifest-.*\.json$/', $name) === 1);
+        $unsupportedBaseline = false;
+        if ($versionedManifests) {
+            $manifestUrl = $assetsMap["manifest-{$currentVersion}.json"] ?? null;
+            $signatureUrl = $assetsMap["manifest-{$currentVersion}.sig"] ?? null;
+            $deltaUrl = $assetsMap["delta-{$currentVersion}-to-{$cleanVersion}.zip"] ?? null;
+            $unsupportedBaseline = !$manifestUrl || !$signatureUrl || !$deltaUrl;
+        }
+
         return [
             'ok' => true,
+            'unsupported_baseline' => $unsupportedBaseline,
             'latest_version' => $cleanVersion,
             'tag_name' => $tagName,
             'release_url' => $releaseUrl,

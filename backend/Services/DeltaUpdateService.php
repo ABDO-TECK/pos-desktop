@@ -91,6 +91,9 @@ class DeltaUpdateService
      */
     public function prepareDesktopHandoff(array $manifest, string $snapshotPath, ?array $dbRecovery = null): array
     {
+        if (!$this->manifestService->verifyBaselineFiles($this->rootDir, $manifest)) {
+            return ['ok' => false, 'error' => 'Installed artifacts differ from the signed delta baseline.'];
+        }
         $version = (string) ($manifest['version'] ?? 'unknown');
         $stagingDir = $this->getStagingDir($version);
         $verification = $this->manifestService->verifyStagedFiles($stagingDir, $manifest['files'] ?? []);
@@ -961,6 +964,9 @@ class DeltaUpdateService
      */
     public function applyStagedFiles(array $manifest, ?string $snapshotPath = null): array
     {
+        if (!$this->manifestService->verifyBaselineFiles($this->rootDir, $manifest)) {
+            return ['ok' => false, 'errors' => ['Installed artifacts differ from the signed delta baseline.'], 'logs' => [], 'applied_files' => [], 'deleted_files' => [], 'rolled_back' => false];
+        }
         $version = $manifest['version'] ?? 'unknown';
         $stagingDir = $this->getStagingDir($version);
         $logs = [];
@@ -1021,6 +1027,10 @@ class DeltaUpdateService
             $stagedFilePath = $stagingDir . '/' . $relativePath;
             $targetFilePath = $this->rootDir . '/' . $relativePath;
             $targetDir = dirname($targetFilePath);
+
+            if (is_file($targetFilePath) && $this->manifestService->verifyFileHash($targetFilePath, $fileEntry['sha256'] ?? '')) {
+                continue;
+            }
 
 
             if (!is_dir($targetDir) && !@mkdir($targetDir, 0755, true)) {
@@ -1133,7 +1143,8 @@ class DeltaUpdateService
         }
 
         // Update local version.json
-        $this->updateLocalVersionFile($manifest);
+        $deploysVersion = array_filter($manifest['files'] ?? [], static fn (array $file): bool => ($file['path'] ?? '') === 'version.json');
+        if (!$deploysVersion) $this->updateLocalVersionFile($manifest);
         $logs[] = "📝 تم تحديث ملف الإصدار المحلي إلى v{$version}.";
 
         // Invalidate OPcache if enabled

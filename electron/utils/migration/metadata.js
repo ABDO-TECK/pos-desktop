@@ -1,14 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
-const { getRuntimeMetadataPath, getConfigDir, getDataDir } = require('../paths');
+const { getRuntimeMetadataPath, getConfigDir, getDataDir, getAppUnpackedPath } = require('../paths');
 
 /**
  * Resolves the current application version from version.json or app.getVersion() fallback.
  */
 function readAppVersion() {
   try {
-    const versionPath = path.join(app.getAppPath(), 'version.json');
+    const versionPath = path.join(getAppUnpackedPath(), 'version.json');
     if (fs.existsSync(versionPath)) {
       const data = fs.readFileSync(versionPath, 'utf8');
       const json = JSON.parse(data);

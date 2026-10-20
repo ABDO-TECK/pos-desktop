@@ -73,6 +73,12 @@ function applyPendingDelta(storageDir, version, expectedRoot) {
   const files = plan.manifest?.files || [];
   const deleted = plan.manifest?.deleted_files || [];
 
+  for (const [relative, expected] of Object.entries(plan.manifest?.baseline_files || {})) {
+    if (!isAllowed(relative) || !fs.existsSync(path.join(plan.root_dir, relative)) || !hashMatches(path.join(plan.root_dir, relative), expected)) {
+      return { ok: false, error: `Installed artifact differs from delta baseline: ${relative}` };
+    }
+  }
+
   try {
     for (const file of files) {
       if ((file.action || 'replace') === 'delete') continue;
@@ -81,7 +87,9 @@ function applyPendingDelta(storageDir, version, expectedRoot) {
       if (!fs.existsSync(staged) || !hashMatches(staged, file.sha256)) {
         throw new Error(`Staged artifact integrity check failed: ${file.path}`);
       }
-      replaceFile(staged, path.join(plan.root_dir, file.path));
+      const target = path.join(plan.root_dir, file.path);
+      if (fs.existsSync(target) && hashMatches(target, file.sha256)) continue;
+      replaceFile(staged, target);
     }
     for (const relativePath of deleted) {
       if (!isAllowed(relativePath)) throw new Error(`Unsafe deleted artifact path: ${relativePath}`);

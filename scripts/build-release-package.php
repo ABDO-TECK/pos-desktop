@@ -10,6 +10,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/../backend/vendor/autoload.php';
+require_once __DIR__ . '/deployment-inventory.php';
 
 use App\Services\ManifestSignatureService;
 use App\Services\UpdateManifestService;
@@ -48,7 +49,7 @@ function readGitFile(string $rootDir, string $commit, string $relativePath): str
 }
 
 // Parse CLI options
-$options = getopt('', ['tag:', 'from-tag:', 'from-ref:', 'from-version:', 'private-key:', 'output-dir:', 'previous-dist:', 'help']);
+$options = getopt('', ['tag:', 'from-tag:', 'from-ref:', 'from-version:', 'private-key:', 'output-dir:', 'previous-dist:', 'baseline-inventory:', 'help']);
 
 if (isset($options['help'])) {
     echo "Usage: php scripts/build-release-package.php --tag=<tag> [--from-tag=<from_tag>] [--from-ref=<from_ref>] [--from-version=<from_version>] [--private-key=<path>] [--output-dir=<dir>]\n";
@@ -69,7 +70,11 @@ if (!$tag) {
 // 1. Determine version and release type
 $isBootstrap = str_contains(strtolower($tag), 'bootstrap');
 $cleanVersion = preg_replace('/^v/', '', $tag);
-$baseVersion = explode('-', $cleanVersion)[0];
+$baseVersion = preg_replace('/-bootstrap$/', '', $cleanVersion);
+if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $baseVersion)) {
+    throw new RuntimeException('Use vX.Y.Z, vX.Y.Z-beta.N or vX.Y.Z-rc.N.');
+}
+$releaseChannel = str_contains($baseVersion, '-beta.') ? 'beta' : (str_contains($baseVersion, '-rc.') ? 'rc' : 'stable');
 
 echo "════════════════════════════════════════════════════════════════════════════════\n";
 echo "🚀 POS Update Engine Release Builder\n";
@@ -243,8 +248,8 @@ if ($isBootstrap) {
         throw new RuntimeException('Delta release requires an explicit baseline: provide --from-ref (or --from-tag) and --from-version.');
     }
 
-    $fromVersion = explode('-', $fromVersionOption)[0];
-    if (!preg_match('/^\d+\.\d+\.\d+$/', $fromVersion)) {
+    $fromVersion = $fromVersionOption;
+    if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $fromVersion)) {
         throw new RuntimeException("Invalid explicit baseline version '{$fromVersionOption}'.");
     }
 
@@ -260,130 +265,40 @@ if ($isBootstrap) {
 
     echo "Delta comparison: {$fromRef} ({$fromVersion}) -> {$tag} ({$baseVersion})\n";
 
-    // Detect changed files between tags/refs
-    $diffCmd = 'git -C ' . escapeshellarg($rootDir) . ' diff --name-status ' . escapeshellarg($baselineCommit) . ' HEAD 2>&1';
-    $diffOutput = (string) shell_exec($diffCmd);
-    $lines = array_filter(explode("\n", trim($diffOutput)));
-
-    $sourceChanges = [];
-    $sourceDeletes = [];
-    $migrationFiles = [];
-
-    $ignoredPrefixes = [
-        '.git/', '.github/', '.env', 'release/', 'storage/', 'backend/storage/',
-        'backend/logs/', 'node_modules/', 'dist-electron/', 'backend/vendor/',
-        'frontend/node_modules/', 'backend/tests/',
-        'backend/.phpunit.result.cache', 'scratch/',
-    ];
-
-    foreach ($lines as $line) {
-        $parts = preg_split('/\s+/', trim($line), 2);
-        if (count($parts) < 2) continue;
-        $status = $parts[0];
-        $file = str_replace('\\', '/', $parts[1]);
-
-        $skip = false;
-        foreach ($ignoredPrefixes as $ig) {
-            if (str_starts_with($file, $ig)) {
-                $skip = true;
-                break;
-            }
-        }
-        if ($skip) continue;
-
-        if ($status === 'D') {
-            $sourceDeletes[] = $file;
-        } else {
-            if (file_exists($rootDir . '/' . $file)) {
-                $sourceChanges[] = $file;
-            }
-        }
+    if (version_compare($baseVersion, $fromVersion, '<=')) {
+        throw new RuntimeException('Delta target must be newer than its baseline.');
     }
-
-    // Map source changes to the files that actually exist in an installed
-    // app.asar.unpacked tree. PHP source and canonical migrations are shipped
-    // together inside backend/backend.phar; frontend source produces Vite
-    // artifacts under frontend/dist. Never place source-only paths in a delta.
+    if (($versionData['channel'] ?? $releaseChannel) !== $releaseChannel) {
+        throw new RuntimeException('version.json channel does not match its release tag.');
+    }
+    $baselinePath = $options['baseline-inventory'] ?? '';
+    if (!is_file($baselinePath)) throw new RuntimeException('Delta requires --baseline-inventory from the published baseline release.');
+    $previous = json_decode((string) file_get_contents($baselinePath), true, 512, JSON_THROW_ON_ERROR);
+    $inventory = createDeploymentInventory($rootDir, $rootDir);
+    if (($previous['format'] ?? null) !== 1 || ($previous['version'] ?? null) !== $fromVersion || !is_array($previous['files'] ?? null)) {
+        throw new RuntimeException('Baseline deployment inventory has invalid format/version.');
+    }
+    if (($previous['shell_sha256'] ?? '') !== $inventory['shell_sha256']) {
+        throw new RuntimeException('Electron, packaging or runtime inputs changed: publish a full Setup release.');
+    }
     $modifiedFiles = [];
     $deletedFiles = [];
-    $addArtifact = static function (string $path) use (&$modifiedFiles, $rootDir): void {
-        if (is_file($rootDir . '/' . $path) && !in_array($path, $modifiedFiles, true)) {
-            $modifiedFiles[] = $path;
-        }
-    };
-    $addFrontendDist = static function () use (&$modifiedFiles, $rootDir): void {
-        $distDir = $rootDir . '/frontend/dist';
-        if (!is_dir($distDir)) {
-            throw new RuntimeException('frontend/dist is missing. Build the frontend before generating a delta release.');
-        }
-        $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($distDir, RecursiveDirectoryIterator::SKIP_DOTS));
-        foreach ($iterator as $fileInfo) {
-            if ($fileInfo->isFile()) {
-                $path = 'frontend/dist/' . str_replace('\\', '/', substr($fileInfo->getPathname(), strlen($distDir) + 1));
-                if (!in_array($path, $modifiedFiles, true)) $modifiedFiles[] = $path;
-            }
-        }
-    };
-
-    foreach ($sourceChanges as $sourcePath) {
-        if (str_starts_with($sourcePath, 'database/migrations/') && str_ends_with($sourcePath, '.sql')) {
-            $migrationFiles[] = basename($sourcePath);
-        }
-        if (str_starts_with($sourcePath, 'backend/') || str_starts_with($sourcePath, 'database/migrations/') || $sourcePath === 'build-phar.php' || $sourcePath === 'scripts/build-phar.mjs') {
-            if (str_starts_with($sourcePath, 'backend/certs/')) {
-                $addArtifact($sourcePath);
-            } else {
-                $addArtifact('backend/backend.phar');
-            }
-        } elseif (str_starts_with($sourcePath, 'frontend/dist/') || str_starts_with($sourcePath, 'frontend/public/')) {
-            $addArtifact($sourcePath);
-        } elseif (str_starts_with($sourcePath, 'frontend/')) {
-            $addFrontendDist();
-        } elseif ($sourcePath === 'version.json') {
-            $addArtifact('version.json');
-        } elseif (str_starts_with($sourcePath, 'electron/') || $sourcePath === 'package.json') {
-            throw new RuntimeException("{$sourcePath} is stored in app.asar and cannot be emitted as a PHP delta artifact. Publish a bootstrap desktop release for this change.");
-        }
+    foreach ($inventory['files'] as $relative => $entry) {
+        if (($previous['files'][$relative]['sha256'] ?? null) !== $entry['sha256']) $modifiedFiles[] = $relative;
     }
-
-    foreach ($sourceDeletes as $sourcePath) {
-        if (str_starts_with($sourcePath, 'frontend/dist/') || str_starts_with($sourcePath, 'frontend/public/')) {
-            $deletedFiles[] = $sourcePath;
-        } elseif (str_starts_with($sourcePath, 'backend/') || str_starts_with($sourcePath, 'database/migrations/')) {
-            $addArtifact('backend/backend.phar');
-        }
+    foreach ($previous['files'] as $relative => $entry) {
+        if (!isset($inventory['files'][$relative])) $deletedFiles[] = $relative;
     }
-
-    // Vite build output is intentionally ignored by Git, so a source diff
-    // cannot reveal obsolete hashed files. Release automation may provide the
-    // previous deployed frontend tree to emit deletion metadata accurately.
-    $previousDist = $options['previous-dist'] ?? null;
-    if ($previousDist !== null && $previousDist !== '') {
-        $previousDist = rtrim(str_replace('\\', '/', $previousDist), '/');
-        if (!is_dir($previousDist)) {
-            throw new RuntimeException("Previous frontend deployment directory does not exist: {$previousDist}");
-        }
-        $currentDist = $rootDir . '/frontend/dist';
-        $previousIterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($previousDist, RecursiveDirectoryIterator::SKIP_DOTS));
-        foreach ($previousIterator as $fileInfo) {
-            if (!$fileInfo->isFile()) continue;
-            $relative = str_replace('\\', '/', substr($fileInfo->getPathname(), strlen($previousDist) + 1));
-            if (!is_file($currentDist . '/' . $relative)) {
-                $deployedPath = 'frontend/dist/' . $relative;
-                if (!in_array($deployedPath, $deletedFiles, true)) $deletedFiles[] = $deployedPath;
-            }
-        }
-    }
-
-    // version.json is a deployed artifact and the durable local update marker,
-    // but do not turn a source-no-op into a meaningless one-file delta.
-    if (!empty($modifiedFiles) || !empty($deletedFiles)) {
-        $addArtifact('version.json');
-    }
-
-    if (empty($modifiedFiles) && empty($deletedFiles)) {
-        throw new RuntimeException('No deployable artifacts changed; refusing to generate an empty delta release.');
-    }
+    $pathManifest = ['files' => array_map(static fn (string $p): array => ['path' => $p], $modifiedFiles), 'deleted_files' => $deletedFiles];
+    if (!$manifestService->validateManifestPaths($pathManifest, $rootDir)['ok']) throw new RuntimeException('Unsafe baseline artifact paths.');
+    if (empty($modifiedFiles) && empty($deletedFiles)) throw new RuntimeException('No deployed artifact bytes changed.');
+    if (!in_array('version.json', $modifiedFiles, true)) throw new RuntimeException('Delta must deploy the target version.json.');
+    $migrationCommand = 'git -C ' . escapeshellarg($rootDir) . ' diff --no-renames --name-only --diff-filter=AM ' . escapeshellarg($baselineCommit) . ' HEAD -- database/migrations';
+    $migrationOutput = [];
+    exec($migrationCommand, $migrationOutput, $migrationExit);
+    if ($migrationExit !== 0) throw new RuntimeException('Could not inspect migration changes.');
+    $migrationFiles = array_map('basename', array_filter($migrationOutput, static fn (string $p): bool => str_ends_with($p, '.sql')));
+    file_put_contents($outputDir . '/deployment-inventory.json', json_encode($inventory, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
 
     echo "Detected " . count($modifiedFiles) . " modified file(s) and " . count($deletedFiles) . " deleted file(s).\n";
 
@@ -431,8 +346,10 @@ if ($isBootstrap) {
         'version' => $baseVersion,
         'type' => 'delta',
         'minimum_version' => $fromVersion,
+        'from_version' => $fromVersion,
+        'baseline_files' => array_map(static fn (array $file): string => $file['sha256'], $previous['files']),
         'update_engine_version' => '1.0.0',
-        'channel' => 'stable',
+        'channel' => $releaseChannel,
         'released_at' => date('Y-m-d'),
         'changelog' => $changelog,
         'files' => $manifestFiles,
@@ -442,6 +359,11 @@ if ($isBootstrap) {
 }
 
 // 5. Write and Sign Manifest
+if (!$isBootstrap) {
+    $validation = $manifestService->validateManifest($manifestData);
+    if (!$validation['valid']) throw new RuntimeException('Invalid generated manifest: ' . implode('; ', $validation['errors']));
+    if (!$manifestService->validateManifestPaths($manifestData, $rootDir)['ok']) throw new RuntimeException('Unsafe generated manifest paths.');
+}
 $manifestJson = json_encode($manifestData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
 $manifestPath = $outputDir . '/manifest.json';
 file_put_contents($manifestPath, $manifestJson);

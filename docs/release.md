@@ -1,234 +1,72 @@
-# Release Process
+# Publishing POS Desktop updates
 
-## Reproducible release contract
+All Setup and delta releases use **ABDO-TECK/pos-desktop**. The supported publishers are GitHub Actions workflows `Windows Setup release` and `Signed delta release`. Historical v1 release guides and GUI scripts are not the publisher for this v0 repository.
 
-From a checkout with PHP, Composer, Node.js, and Windows build tools installed:
+| Channel | Tag | GitHub release |
+| --- | --- | --- |
+| stable | v0.0.3 | Normal release |
+| beta | v0.0.3-beta.1 | Prerelease |
+| rc | v0.0.3-rc.1 | Prerelease |
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\release.ps1 -Mode build -NonInteractive
+Stable devices accept stable only. Beta devices accept beta, rc and stable. The device preference is persisted separately in `update_channel.json`, which a release never replaces. Discovery reads Releases on this repository, rather than the version on main.
+
+## Setup baseline
+
+Use Setup for changes to Electron, npm runtime dependencies, packaging or portable engines. Set the same complete version in version.json, root/frontend package.json and their lockfiles. Set `release_type: setup`, the tag's `channel`, and the intended default `update_channel`. Commit, tag that commit, and push the branch and tag.
+
+The Setup workflow builds and smoke-tests the packaged app on a clean Windows runner before publishing. It also publishes `deployment-inventory.json`, generated from actual app.asar.unpacked files and tracked desktop shell inputs.
+
+Install **v0.0.2 Setup** before using this improved delta protocol. The original v0.0.1 has no published inventory and lacks the updated shell/physical version-file layout. Current Windows installers are unsigned Authenticode; RSA delta signing is separate and does not sign the Windows EXE.
+
+## Beta delta
+
+Keep root/frontend package versions and lockfiles at their last Setup version. Change application code and version.json, for example:
+
+```json
+{
+  "version": "0.0.3-beta.1",
+  "application_version": "0.0.3-beta.1",
+  "update_engine_version": "1.0.0",
+  "channel": "beta",
+  "release_type": "delta",
+  "delta_baseline_tags": ["v0.0.2"],
+  "released_at": "2026-10-20",
+  "changelog": ["Describe actual changes"]
+}
 ```
 
-This installs locked Composer development dependencies from
-`backend/composer.lock` so the quality suite can run, executes `npm ci` from
-both package-lock files, and runs all quality checks. It then reinstalls locked
-Composer production dependencies with `--no-dev`, builds the frontend and
-production PHAR, and creates the NSIS Electron installer. A failed command
-stops the pipeline with a non-zero exit code. Secrets are never embedded;
-publishing uses only the `GH_TOKEN` environment variable.
+Commit, tag that exact commit v0.0.3-beta.1 and push it. CI downloads each baseline's inventory from its published release, verifies its version and unchanged desktop shell, builds frontend/PHAR, compares deployed SHA-256 hashes, and signs each baseline manifest using the UPDATE_PRIVATE_KEY repository secret. A missing or mismatched key fails the job. The private key never enters source, ZIPs, logs or artifacts.
 
-`backend/backend.phar` is generated and is not tracked by Git. Publish/store it
-with the installer release assets and its trusted SHA-512 value. Verify the
-embedded PHAR signature with the build PHP runtime:
+For each baseline the release contains:
 
-```powershell
-php --% -r "$p='backend/backend.phar'; $f=new Phar($p); $s=$f->getSignature(); if ($s['hash_type'] !== 'SHA-512') { exit(1); } echo $s['hash'], PHP_EOL;"
+- manifest-0.0.2.json and manifest-0.0.2.sig
+- delta-0.0.2-to-0.0.3-beta.1.zip
+
+It also contains the target deployment-inventory.json for future releases. Delta releases do not become GitHub's latest full Setup release. The app selects a delta for its channel and exact installed baseline. The separate full updater selects releases containing installer metadata.
+
+## Promote to stable
+
+For v0.0.3, set matching version fields, `channel: stable`, `release_type: delta`, and support both starting points:
+
+```json
+"delta_baseline_tags": ["v0.0.2", "v0.0.3-beta.1"]
 ```
 
-Compare that output with the value published for the release. SHA-512 verifies
-integrity, not publisher authenticity.
+CI builds distinct signed packages for both. Keep older starting points listed if they should update directly; another baseline's package is never offered instead. Different shell fingerprints require a new Setup.
 
-Use `scripts/release.ps1` to prepare POS desktop releases. A valid release keeps the Electron runtime version, backend update metadata, PHAR, installer, and GitHub Release artifacts in sync.
+## File replacement and verification
 
-## GUI Release Manager
+Only files with different built bytes enter the ZIP. Removed managed files appear explicitly in deleted_files. Unchanged files are omitted; both apply engines also skip already-matching targets. Installed baseline hashes, payload hashes, RSA signature, release version and channel are checked before applying. Databases, device configuration, credentials and portable engines are outside delta targets.
 
-For day-to-day release work, use the developer-only WinForms Release Manager:
-
-```powershell
-powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\scripts\release-gui.ps1
-```
-
-The GUI is an orchestration layer over `scripts/release.ps1`; the command script remains the source of truth for release actions.
-
-### GUI Tabs
-
-- `Status`: shows package/version sync, package-lock version, Git branch, dirty state, GH_TOKEN, PHAR, dist, latest.yml, installer/blockmap, and whether `POS System.exe` is running.
-- `Version`: previews patch/minor/major/custom version changes, syncs `package.json`, `package-lock.json` when present, and `version.json`, and can update `released_at`.
-- `Build`: runs frontend, PHAR, Electron, full local build, clean, and artifact verification commands with log output.
-- `Commit`: classifies changed files, blocks unsafe paths, requires a commit message, and commits only selected safe or warning files.
-- `Publish`: runs repo-only, Electron-only, all, or push flows after confirmation.
-- `Rollback`: safely reverts already-pushed commits by creating new `git revert` commits. It does not rewrite shared history.
-- `Verify`: verifies local artifacts, PHAR contents, or GitHub Release assets. If `GH_TOKEN` is missing, it prints the manual release URL.
-- `Logs`: command logs are shown in the lower pane for all tabs with timestamps, stdout, stderr, and exit codes.
-
-### Commit Classifications
-
-The GUI and release script use `scripts/release-manager.config.json` for commit classification.
-
-- `Safe`: normal source/docs/tooling files. These are selectable.
-- `Warning`: selectable, but review first because the file is release metadata, generated, or binary-like.
-- `Blocked`: never selectable and never passed to `git add`, even if explicitly requested.
-
-Use `Select Safe` for ordinary commits. Use `Select Safe + Warning` only when intentionally committing release metadata or reviewed generated artifacts.
-
-Default blocked patterns:
-
-- `dist-electron/**`
-- `node_modules/**`
-- `vendor/**`
-- `tmp/**`
-- `scratch/**`
-- `backend/.phpunit.result.cache`
-- `backend/storage/**`
-- `backend/logs/**`
-- `backend/temp/**`
-- `backend/tmp/**`
-- `backend/cache/**`
-- `backend/backups/**`
-- `backend/runtime/**`
-- `backend/uploads/**`
-- `.env`
-- `.env.*`
-- `*.log`
-- `*.tmp`
-- `*.sqlite`
-- `*.db`
-- `*.bak`
-- `*.cache`
-
-Default warning patterns:
-
-- `backend/backend.phar`
-- `package-lock.json`
-- `package.json`
-- `version.json`
-- Electron-builder generated artifact patterns
-- binary/archive-like patterns such as `*.exe`, `*.dll`, `*.bin`, `*.zip`, `*.7z`, `*.tar`, `*.gz`
-
-Default safe patterns include:
-
-- `frontend/src/**`
-- frontend config/test files
-- `electron/**`
-- backend source folders such as `config`, `middleware`, `cli`, `WebSocket`, services, controllers, routes, repositories, models, and tests
-- `backend/services/**`
-- `backend/controllers/**`
-- `backend/routes/**`
-- `backend/tests/**`
-- `scripts/**`
-- `docs/**`
-- `backend/certs/**`
-- `README.md`
-
-To add a new blocked pattern, edit `scripts/release-manager.config.json` and add it to `blockedCommitPatterns`. Blocked patterns take precedence over warning and safe patterns.
-
-### Recommended GUI Flows
-
-Commit-only flow:
-
-1. Open the GUI.
-2. Refresh `Status`.
-3. Open `Commit`.
-4. Refresh files.
-5. Select safe files, or safe + warning files after review.
-6. Enter a commit message.
-7. Click `Commit Selected`.
-
-Build-only flow:
-
-1. Open `Build`.
-2. Run `Build Frontend`, `Build PHAR`, `Build Electron`, or `Full Local Build`.
-3. Run `Verify Artifacts`.
-
-Publish flow:
-
-1. Confirm `Status` shows synced versions and expected artifacts.
-2. Set `GH_TOKEN` before Electron or full publish.
-3. Use `Repo Only` for commit/tag/push without GitHub Release publishing.
-4. Use `Electron Only` for build + GitHub Release publishing.
-5. Use `All` for build + commit + tag + push + publish.
-
-Rollback flow:
-
-1. Open `Rollback`.
-2. Click `Refresh Commits`.
-3. Select the commit that should be undone.
-4. Click `Revert Selected`.
-5. Confirm the summary.
-6. If the revert succeeds, review the new rollback commit.
-7. Click `Push Rollback Commit` only after review.
-
-For multiple commits, enter `From` and `To` hashes and click `Revert Range`. The command uses `git revert`, so it creates new commit(s) instead of deleting pushed history.
-
-If conflicts happen:
-
-1. Resolve the conflicts manually in the working tree.
-2. Use `Continue Revert` to finish, or `Abort Revert` to cancel.
-3. Do not push until the rollback commit is complete and reviewed.
-
-Never commit runtime data, logs, environment files, caches, database files, backups, uploads, `node_modules`, `vendor`, or `dist-electron` artifacts.
-
-## Usage
+PHP code/migrations ship as one **backend/backend.phar** file. A PHP change replaces that artifact as a unit. This is a file-level delta, not a binary patch within PHAR/EXE files. Electron changes require Setup.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version X.Y.Z
-powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version X.Y.Z -Mode build
-powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version X.Y.Z -Mode repo
-powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version X.Y.Z -Mode electron
-powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version X.Y.Z -Mode all
+$env:PHP_BINARY = 'C:\xampp\php\php.exe' # or PHP on PATH
+& $env:PHP_BINARY scripts/verify-release-channels.php
+node scripts/verify-update-channel-policy.cjs
+node scripts/verify-delta-flow.mjs
 ```
 
-## Modes
+Isolated acceptance builds/signs real ZIPs for stable, beta and beta-to-stable promotion; stages via PHP; applies via PHP and Electron handoff; checks exact resulting hashes and unchanged artifact/data hashes, timestamps and identity. It tests new/deleted files, rollback, corrupt signature/payload rejection and wrong baselines. It never opens the live app/database.
 
-- `build`: updates version files, builds the frontend, rebuilds `backend/backend.phar`, and builds the NSIS installer. It does not push git changes or publish a GitHub Release.
-- `repo`: updates version files, builds the frontend and PHAR, commits release files, tags `vX.Y.Z`, and pushes the commit and tag. It does not publish Electron artifacts.
-- `electron`: updates version files, builds the frontend, PHAR, and NSIS installer, then publishes Electron artifacts with `electron-builder`. It does not push source commits, and it refuses to publish if `package.json` or `version.json` has uncommitted changes.
-- `all`: runs the full source and Electron release flow in this order: version update, frontend build, PHAR build, Electron installer build, artifact verification, git commit, git tag, push commit, push tag, and GitHub Release publish.
-
-## GitHub Token
-
-Only publishing modes require `GH_TOKEN`: `electron` and `all`.
-
-```powershell
-$env:GH_TOKEN = '<github-token-with-release-access>'
-```
-
-The script refuses `electron` and `all` modes when `GH_TOKEN` is missing.
-
-## Version Sync
-
-`package.json` is the Electron runtime version source used by `app.getVersion()`. `version.json` is the backend update-check metadata read by `/api/v1/update/check`. Keep both files on the same `X.Y.Z` version so the installed app, GitHub detection, and Electron updater all agree.
-
-The release manager also updates configured text version references from `scripts/release-manager.config.json`, including the `README.md` version badge.
-
-Configured text files are read and written as UTF-8 so Arabic documentation remains readable when version references are updated.
-
-## PHAR Before Packaging
-
-`backend/backend.phar` must be rebuilt before Electron packaging because the packaged app ships the PHAR. The script verifies that the PHAR contains:
-
-- `version.json`
-- `certs/cacert.pem`
-
-The CA bundle is required for packaged GitHub HTTPS checks.
-
-## Electron Artifacts
-
-The script verifies the release output contains:
-
-- `dist-electron/latest.yml`
-- NSIS installer `.exe` for the requested version
-- matching `.blockmap`
-- `dist-electron/win-unpacked/resources/app.asar.unpacked/backend/backend.phar`
-- `dist-electron/win-unpacked/resources/app.asar.unpacked/backend/certs/cacert.pem`
-
-`electron-updater` needs `latest.yml`, the installer, and the blockmap attached to the GitHub Release.
-
-## Git Hygiene
-
-The script warns if tracked `backend/.phpunit.result.cache` has local modifications. Do not commit that cache file unless the change is intentional; it is usually test-run noise.
-
-## Installed Update Verification
-
-Electron-updater must be verified from an installed previous NSIS version. Do not use `dist-electron/win-unpacked` for final update verification, because win-unpacked does not exercise the installed updater path.
-
-To verify an update:
-
-1. Install the previous version normally from its NSIS installer.
-2. Publish the new release with `scripts/release.ps1 -Version X.Y.Z -Mode electron` or `-Mode all`.
-3. Open the installed previous version.
-4. Go to Settings > System & Maintenance.
-5. Click Check Updates and confirm the backend checker sees the new version.
-6. Click `تحديث الآن`.
-7. Confirm download progress, `ready_to_install`, and the restart confirmation.
-8. Approve restart/install.
-9. After relaunch, confirm `app.getVersion()` reports the new version and Check Updates reports no update available.
+For a complete build/sign/validation without publishing, run Signed delta release manually against an existing delta tag with `publish` unchecked.

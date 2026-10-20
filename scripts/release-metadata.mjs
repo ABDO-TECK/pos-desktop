@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+const version = JSON.parse(fs.readFileSync('version.json', 'utf8'));
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const tag = process.argv[2] || `v${version.version}`;
+if (!/^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(tag) || tag !== `v${version.version}`) throw Error('Tag/version mismatch.');
+const channel = tag.includes('-beta.') ? 'beta' : tag.includes('-rc.') ? 'rc' : 'stable';
+const mode = version.release_type || 'setup';
+if (!['setup', 'delta'].includes(mode)) throw Error('release_type must be setup or delta.');
+if (version.channel !== channel) throw Error('version.json channel must match tag.');
+if (mode === 'setup' && pkg.version !== version.version) throw Error('Setup package version must match target.');
+const baselines = version.delta_baseline_tags || [];
+if (mode === 'delta' && (!Array.isArray(baselines) || !baselines.length || baselines.length > 10 || baselines.some(tag => !/^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(tag)))) throw Error('Provide 1-10 explicit delta_baseline_tags.');
+const values = { mode, channel, version: version.version, prerelease: String(channel !== 'stable'), baselines: JSON.stringify(baselines) };
+if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n');
+console.log(JSON.stringify(values));

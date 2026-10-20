@@ -1,7 +1,9 @@
 const { app, dialog, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { assessReleaseCompatibility } = require('../utils/release-version-policy');
-const { getDataDir } = require('../utils/paths');
+const { getDataDir, getAppUnpackedPath } = require('../utils/paths');
+const { readAppVersion } = require('../utils/migration/metadata');
+const { readUpdateChannel, selectSetupRelease } = require('../utils/update-channel-policy');
 const {
   acquireUpdateLock,
   heartbeatUpdateLock,
@@ -224,6 +226,25 @@ async function checkForUpdates() {
 
   try {
     publishStatus('checking', { error: null });
+    const channel = readUpdateChannel(getDataDir(), getAppUnpackedPath());
+    const response = await fetch('https://api.github.com/repos/ABDO-TECK/pos-desktop/releases?per_page=100', {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'POS-Desktop-Updater' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error(`GitHub Setup discovery failed: HTTP ${response.status}`);
+    const releases = await response.json();
+    if (!Array.isArray(releases)) throw new Error('Invalid GitHub release list.');
+    const release = selectSetupRelease(releases, channel, readAppVersion());
+    if (!release) {
+      publishStatus('update_not_available', { updateInfo: null, canInstall: false });
+      return;
+    }
+    const metadata = release.assets.find(asset => ['latest.yml', 'beta.yml', 'rc.yml'].includes(asset.name));
+    const baseUrl = `https://github.com/ABDO-TECK/pos-desktop/releases/download/${encodeURIComponent(release.tag_name)}/`;
+    autoUpdater.setFeedURL({ provider: 'generic', url: baseUrl });
+    autoUpdater.channel = metadata.name.slice(0, -4);
+    autoUpdater.allowPrerelease = channel !== 'stable';
+    autoUpdater.allowDowngrade = false;
     await autoUpdater.checkForUpdates();
     return status;
   } catch (err) {

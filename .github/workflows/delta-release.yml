@@ -1,0 +1,117 @@
+name: Signed delta release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing delta tag (vX.Y.Z or vX.Y.Z-beta.N)
+        required: true
+      publish:
+        description: Publish verified assets (otherwise validation only)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: delta-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.release.outputs.mode }}
+      channel: ${{ steps.release.outputs.channel }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: release
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: node scripts/release-metadata.mjs "$RELEASE_TAG"
+  build:
+    needs: metadata
+    if: needs.metadata.outputs.mode == 'delta'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3
+          coverage: none
+      - name: Build and verify application artifacts
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run frontend:build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run build:phar
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-phar-runtime.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-release-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-channel-policy.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-delta-flow.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Generate and verify signed packages for every supported baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_CHANNEL: ${{ needs.metadata.outputs.channel }}
+        run: ./scripts/build-delta-release.ps1 -Tag $env:RELEASE_TAG -Channel $env:RELEASE_CHANNEL
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-delta
+          path: release-assets/*
+          if-no-files-found: error
+  publish:
+    needs: [metadata, build]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-delta
+          path: release-assets
+      - name: Publish signed assets on the same repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--latest=false)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          mv release-assets/release-notes.md release-notes.md
+          gh release create "$RELEASE_TAG" release-assets/* --repo "$REPOSITORY" --verify-tag --title "POS Desktop $RELEASE_TAG" --notes-file release-notes.md "${flags[@]}"

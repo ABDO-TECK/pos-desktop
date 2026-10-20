@@ -68,6 +68,19 @@ class UpdateManifestService
         $errors = [];
         $seenPaths = [];
 
+        if (isset($manifest['from_version']) && (!is_string($manifest['from_version']) || !$this->isValidSemver($manifest['from_version']))) {
+            $errors[] = 'Manifest from_version is invalid.';
+        }
+        if (isset($manifest['baseline_files'])) {
+            if (!is_array($manifest['baseline_files'])) {
+                $errors[] = 'Manifest baseline_files must be a path/hash map.';
+            } else {
+                foreach ($manifest['baseline_files'] as $path => $hash) {
+                    if (!is_string($path) || !is_string($hash) || !$this->isValidSha256($hash)) $errors[] = 'Invalid baseline file hash.';
+                }
+            }
+        }
+
         // Required version string
         if (empty($manifest['version']) || !is_string($manifest['version'])) {
             $errors[] = 'Manifest is missing a valid "version" string.';
@@ -339,6 +352,18 @@ class UpdateManifestService
      * @param bool $allowDowngrade Whether to allow reinstalling same/lower version
      * @return array{compatible: bool, reason: string|null}
      */
+    public function checkReleaseAssociation(array $manifest, string $targetVersion, string $tag, string $clientChannel): array
+    {
+        if (($manifest['version'] ?? null) !== $targetVersion || ltrim($tag, 'vV') !== $targetVersion) {
+            return ['compatible' => false, 'reason' => 'Signed manifest version does not match the selected release tag.'];
+        }
+        $releaseChannel = str_contains($targetVersion, '-beta.') ? 'beta' : (str_contains($targetVersion, '-rc.') ? 'rc' : 'stable');
+        if (($manifest['channel'] ?? 'stable') !== $releaseChannel) {
+            return ['compatible' => false, 'reason' => 'Signed manifest channel does not match the selected release tag.'];
+        }
+        return $this->checkChannelCompatibility($clientChannel, $releaseChannel);
+    }
+
     public function checkVersionCompatibility(
         string $currentVersion,
         array $manifest,
@@ -346,6 +371,10 @@ class UpdateManifestService
     ): array {
         $targetVersion = $manifest['version'] ?? '0.0.0';
         $minimumVersion = $manifest['minimum_version'] ?? null;
+
+        if (isset($manifest['from_version']) && $manifest['from_version'] !== $currentVersion) {
+            return ['compatible' => false, 'reason' => 'Delta requires the exact baseline version ' . $manifest['from_version'] . '.'];
+        }
 
         if (!$allowDowngrade && version_compare($targetVersion, $currentVersion, '<=')) {
             return [
@@ -463,6 +492,10 @@ class UpdateManifestService
     {
         $unsafePaths = [];
 
+        foreach (array_keys($manifest['baseline_files'] ?? []) as $path) {
+            if (!is_string($path) || !$this->isPathSafe($path, $rootDir)) $unsafePaths[] = (string) $path;
+        }
+
         foreach ($manifest['files'] ?? [] as $file) {
             $path = $file['path'] ?? '';
             if (!$this->isPathSafe($path, $rootDir)) {
@@ -489,6 +522,14 @@ class UpdateManifestService
      * @param string $expectedHash Expected 64-char hex SHA-256 hash
      * @return bool
      */
+    public function verifyBaselineFiles(string $rootDir, array $manifest): bool
+    {
+        foreach ($manifest['baseline_files'] ?? [] as $relative => $hash) {
+            if (!$this->isPathSafe($relative, $rootDir) || !$this->verifyFileHash($rootDir . '/' . $relative, $hash)) return false;
+        }
+        return true;
+    }
+
     public function verifyFileHash(string $filePath, string $expectedHash): bool
     {
         if (!is_file($filePath) || !is_readable($filePath)) {

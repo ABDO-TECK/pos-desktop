@@ -35,3 +35,7 @@ Workflow `Windows Setup and first release` يبني ويفحص الحزمة عل
 السورس لا يتضمن قواعد بيانات تشغيل أو كلمات مرور أو مفاتيح خاصة. تظهر بيانات المدير الأولية على شاشة أول تشغيل ويجب تغيير كلمة المرور. بيانات الأعمال خارج مجلد التثبيت، داخل `%PROGRAMDATA%\POS System` أو مسار المستخدم البديل عند تعذر الكتابة؛ إعدادات الجهاز داخل `%APPDATA%\POS System`. أنشئ نسخة احتياطية من الإعدادات قبل ترقية تثبيت قائم.
 
 التجارب المحلية نُفذت على قاعدة معزولة وأكدت بقاء بيانات التشغيل الحالية دون تغيير. فُحص البيع النقدي والآجل والحجز وعكس العمليات، والنسخ الاحتياطي والاستعادة، وإيصالات PDF بمقاسي A4 و80mm. الطباعة الورقية تتطلب طابعة وتعريفا مناسبا، ولم تُختبر على جهاز فعلي في هذا الفحص.
+
+## Update releases
+
+Stable and beta updates share this repository. See [publishing and delta verification](docs/release.md) for tags, signed per-baseline assets and the v0.0.2 Setup prerequisite. Delta replaces changed deployed files only; PHP changes replace the compiled backend.phar as one artifact. Device configuration and business databases are excluded.

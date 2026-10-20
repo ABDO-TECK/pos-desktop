@@ -67,10 +67,12 @@ function readJsonFile(absolutePath, label) {
 }
 
 function parseVersion(value, label) {
-  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+$/.test(value)) {
+  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(value)) {
     fail(`${label} must be a semantic version in X.Y.Z form`);
   }
-  return value.split('.').map(Number);
+  const [main, prerelease] = value.split('-');
+  const [prereleaseLabel, number] = (prerelease || '').split('.');
+  return [...main.split('.').map(Number), prereleaseLabel === 'beta' ? 0 : prereleaseLabel === 'rc' ? 1 : 2, Number(number || 0)];
 }
 
 function compareVersions(left, right) {
@@ -160,7 +162,7 @@ if (!['delta', 'full'].includes(mode)) {
 }
 
 const tag = requireArgument('tag');
-const tagMatch = /^v(\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.exec(tag);
+const tagMatch = /^v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?)$/.exec(tag);
 if (!tagMatch) {
   fail(`tag '${tag}' is not a supported vX.Y.Z tag`);
 }
@@ -169,12 +171,11 @@ if (tagMatch[1] !== targetVersion) {
 }
 
 const releaseChannel = requireArgument('release-channel');
-if (!['prerelease', 'stable'].includes(releaseChannel)) {
+if (!['prerelease', 'stable', 'beta', 'rc'].includes(releaseChannel)) {
   fail(`release channel '${releaseChannel}' is invalid`);
 }
-if (targetVersion.startsWith('0.') && releaseChannel === 'stable') {
-  fail(`v0 release '${tag}' must be published as a prerelease`);
-}
+const expectedChannel = targetVersion.includes('-beta.') ? 'beta' : targetVersion.includes('-rc.') ? 'rc' : 'stable';
+if (releaseChannel !== 'prerelease' && releaseChannel !== expectedChannel) fail('Release channel does not match tag.');
 
 const headCommit = resolveGitRef('HEAD', 'checked-out HEAD');
 const tagCommit = resolveGitRef(tag, 'release tag');
@@ -196,9 +197,8 @@ if (mode === 'delta') {
   if (compareVersions(targetVersion, baselineVersion) <= 0) {
     fail(`target version '${targetVersion}' must be greater than baseline '${baselineVersion}'`);
   }
-  if (rootPackage.version !== baselineVersion) {
-    fail(`Delta desktop package version '${rootPackage.version}' must match baseline '${baselineVersion}'`);
-  }
+  // The runtime package remains at its last Setup version. A beta baseline may
+  // already carry newer delta artifacts; the inventory verifies the shell.
 } else if (rootPackage.version !== targetVersion) {
   fail(`full release package version '${rootPackage.version}' must match target '${targetVersion}'`);
 }

@@ -1,21 +1,7 @@
-# Windows release signing checklist
+# Release signing
 
-Production Windows publishing uses electron-builder's supported `CSC_LINK` and
-`CSC_KEY_PASSWORD` environment contract. CI receives those as GitHub Secrets;
-the expected certificate subject is supplied as the non-secret
-`WINDOWS_SIGNING_PUBLISHER` repository variable. No certificate file, password,
-or key is stored in this repository.
+Current Windows Setup is unsigned Authenticode, as stated in release notes. verify-desktop-release.ps1 -RequireAuthenticode -ExpectedPublisher remains available for future certificate rollout; current CI does not claim trusted publisher status.
 
-1. Build frontend, PHAR, and desktop runtime.
-2. Require signing configuration before packaging or publishing.
-3. Let electron-builder sign the unpacked application executable and NSIS
-   installer with SHA-256 and its timestamp-capable Windows signing flow.
-4. Validate the final signed installer against `latest.yml` size and SHA-512.
-5. Verify installer and application Authenticode status, publisher, and
-   timestamp before upload.
-6. Validate Delta `manifest.json` and `manifest.sig` independently with the
-   RSA update key before upload.
+Delta updates require RSA-2048-or-stronger SHA-256 signatures. The existing update private key is stored as UPDATE_PRIVATE_KEY in Actions secrets on ABDO-TECK/pos-desktop and matches backend/certs/update_public_key.pem. No private key is committed or published. Repository migration does not rotate this key or remove verification.
 
-`npm run electron:build` is intentionally available for unsigned local builds.
-`npm run electron:publish` and the release workflow fail before packaging when
-the production signing inputs are unavailable.
+The builder signs exact manifest bytes and verifies the signature immediately. The package verifier checks ZIP entries against signed SHA-256 hashes. The app binds signed target version/channel to the selected release and checks installed baseline hashes before changing files. Keep each baseline-specific manifest and signature together; see [release.md](release.md).

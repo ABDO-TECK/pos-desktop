@@ -11,13 +11,14 @@ if(forbidden.length)throw Error('Unexpected private/build files in ASAR: '+forbi
 for(const rel of ['electron/main.js','electron/preload.js','electron/utils/receipt-print-window.js','version.json']){
  if(!entries.includes(rel))throw Error('Missing ASAR source: '+rel);
 }
-for(const rel of ['app.asar.unpacked/frontend/dist/index.html','app.asar.unpacked/backend/backend.phar','app.asar.unpacked/backend/certs/cacert.pem','app.asar.unpacked/database/pos_schema.sql','portable/php/php.exe','portable/mysql/bin/mysqld.exe','portable/java/bin/java.exe','portable/qz-tray/qz-tray.jar','portable/runtime-manifest.json','portable/printing-manifest.json']){
+for(const rel of ['app.asar.unpacked/version.json','app.asar.unpacked/frontend/dist/index.html','app.asar.unpacked/backend/backend.phar','app.asar.unpacked/backend/certs/cacert.pem','app.asar.unpacked/backend/certs/update_public_key.pem','app.asar.unpacked/database/pos_schema.sql','portable/php/php.exe','portable/mysql/bin/mysqld.exe','portable/java/bin/java.exe','portable/qz-tray/qz-tray.jar','portable/runtime-manifest.json','portable/printing-manifest.json']){
  if(!fs.existsSync(path.join(resources,rel)))throw Error('Missing packaged runtime: '+rel);
 }
 const v=JSON.parse(fs.readFileSync('version.json','utf8')).version;
 const setup=`POS-Desktop-Setup-${v}.exe`;
-for(const rel of [setup,setup+'.blockmap','latest.yml'])if(!fs.existsSync(path.join(out,rel)))throw Error('Missing release asset: '+rel);
-const names=[setup,setup+'.blockmap','latest.yml'];
+const metadata=v.includes('-beta.')?'beta.yml':v.includes('-rc.')?'rc.yml':'latest.yml';
+for(const rel of [setup,setup+'.blockmap',metadata])if(!fs.existsSync(path.join(out,rel)))throw Error('Missing release asset: '+rel);
+const names=[setup,setup+'.blockmap',metadata];
 const hashes=names.map(name=>crypto.createHash('sha256').update(fs.readFileSync(path.join(out,name))).digest('hex')+'  '+name).join('\n')+'\n';
 fs.writeFileSync(path.join(out,'SHA256SUMS.txt'),hashes);
 console.log(JSON.stringify({packageVerified:true,asarEntries:entries.length,requiredRuntimeFiles:true,releaseAssets:names}));
