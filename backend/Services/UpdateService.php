@@ -884,10 +884,10 @@ class UpdateService
         $requestTimeLimit = (int) ini_get('max_execution_time');
         try {
             // Windows counts download and filesystem I/O against PHP's HTTP
-            // execution limit. Stay below the coordination lease's five minutes while
-            // allowing its download, verification and recovery snapshot to finish.
-            if ($requestTimeLimit > 0 && $requestTimeLimit < 240) {
-                set_time_limit(240);
+            // execution limit. Downloads renew the coordination lease through progress
+            // callbacks; reserve additional time for verification and recovery snapshots.
+            if ($requestTimeLimit > 0 && $requestTimeLimit < 1200) {
+                set_time_limit(1200);
             }
             $lock->heartbeat('starting');
             $this->deltaUpdateService->setUpdateState('applying', [
@@ -914,7 +914,7 @@ class UpdateService
             return $result;
         } finally {
             $lock->release();
-            if ($requestTimeLimit > 0 && $requestTimeLimit < 240) {
+            if ($requestTimeLimit > 0 && $requestTimeLimit < 1200) {
                 set_time_limit($requestTimeLimit);
             }
         }
@@ -1314,9 +1314,11 @@ class UpdateService
                         ]];
                     }
 
-                    $output[] = '⚠️ تعذر إكمال تحميل ملفات التحديث الجزئي، الانتقال إلى التحديث الكامل كإجراء احتياطي...';
+                    return ['ok'=>false,
+                        'error'=>implode('; ', $downloadResult['errors'] ?: ['Delta download failed.']),
+                        'code'=>502, 'data'=>['logs'=>$output]];
                 } else {
-                    $output[] = "ℹ️ التحديث الجزئي غير متوافق: {$compat['reason']}. جاري الانتقال للتحديث الكامل...";
+                    return ['ok'=>false, 'error'=>$compat['reason'], 'code'=>409, 'data'=>['logs'=>$output]];
                 }
             }
         }
@@ -1324,6 +1326,10 @@ class UpdateService
         // ══════════════════════════════════════════════════════════════
         // Fallback: Full Git Package Update Mechanism
         // ══════════════════════════════════════════════════════════════
+        if (UpdateRuntimePaths::isPackagedPharDeployment($this->rootDir)) {
+            return ['ok'=>false, 'error'=>'A valid signed compatible delta package is required for this desktop installation.',
+                'code'=>422, 'data'=>['logs'=>$output]];
+        }
         $output[] = '🔄 تشغيل آلية التحديث الكامل الاحتياطية (Full Update)...';
 
         $expectedCommit = strtolower(trim(

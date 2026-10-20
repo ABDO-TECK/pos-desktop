@@ -122,7 +122,7 @@ export const applyUpdate = (force = false, deltaCapable = false) => api.post<Api
 }, {
   // Allow the server's bounded four-minute signed update and recovery snapshot
   // to finish before handing the verified files to Electron.
-  timeout: 300_000,
+  timeout: 1_260_000,
   hideGlobalError: true,
   headers: { 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 } as UpdateRequestConfig)

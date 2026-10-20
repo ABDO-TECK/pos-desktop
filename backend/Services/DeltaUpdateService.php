@@ -534,10 +534,12 @@ class DeltaUpdateService
 
         $zipPath = $stagingDir . '/delta_package.zip';
 
-        if ($provider !== null) {
+        $provider ??= new GitHubReleaseProvider(caCertPath: $this->resolveCurlCaBundlePath());
+        $provider->setDownloadProgress(function (): void { $this->setUpdateState('downloading'); });
+        try {
             $dlResult = $provider->downloadAssetFile($zipUrl, $zipPath);
-        } else {
-            $dlResult = $this->downloadFileHttp($zipUrl, $zipPath);
+        } finally {
+            $provider->setDownloadProgress(null);
         }
 
         if (!$dlResult['ok']) {
@@ -1527,42 +1529,10 @@ class DeltaUpdateService
 
     private function downloadFileHttp(string $url, string $destPath): array
     {
-        $fp = @fopen($destPath, 'w+b');
-        if (!$fp) {
-            return ['ok' => false, 'error' => "Cannot open destination file {$destPath} for writing."];
-        }
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_FILE           => $fp,
-            CURLOPT_TIMEOUT        => 30,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_USERAGENT      => 'ABDO-TECK-POS-DeltaUpdater/1.0',
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS      => 5,
-            CURLOPT_PROTOCOLS      => CURLPROTO_HTTPS,
-            CURLOPT_REDIR_PROTOCOLS=> CURLPROTO_HTTPS,
-        ]);
-
-        $certPath = $this->resolveCurlCaBundlePath();
-        if ($certPath !== null && $certPath !== '' && !str_starts_with($certPath, 'phar://') && is_file($certPath)) {
-            curl_setopt($ch, CURLOPT_CAINFO, $certPath);
-        }
-
-        $success = curl_exec($ch);
-        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr = curl_error($ch);
-        curl_close($ch);
-        fclose($fp);
-
-        if (!$success || $httpCode < 200 || $httpCode >= 400) {
-            @unlink($destPath);
-            $reason = $httpCode > 0 ? "HTTP {$httpCode}" : $curlErr;
-            return ['ok' => false, 'error' => "cURL download failed: {$reason}"];
-        }
-
-        return ['ok' => true, 'error' => null];
+        if (!$this->isAllowedUrl($url)) return ['ok'=>false, 'error'=>'Download host is not approved'];
+        return (new UpdateAssetDownloader($this->resolveCurlCaBundlePath()))->download(
+            $url, $destPath, function (): void { $this->setUpdateState('downloading'); }
+        );
     }
 
     public function isAllowedUrl(string $url): bool

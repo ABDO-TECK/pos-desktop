@@ -1,0 +1,27 @@
+<?php
+declare(strict_types=1);
+require __DIR__.'/../backend/vendor/autoload.php';
+$output=$argv[1]??'release-assets';
+if (!is_dir($output)) mkdir($output,0755,true);
+$key=getenv('UPDATE_PRIVATE_KEY');
+if (!$key) throw new RuntimeException('Signing key required');
+$private=openssl_pkey_get_private($key);
+if (!$private) throw new RuntimeException('Invalid signing key');
+$public=openssl_pkey_get_details($private);
+$pinned=file_get_contents(__DIR__.'/../backend/certs/update_public_key.pem');
+$pinnedDetails=openssl_pkey_get_details(openssl_pkey_get_public($pinned));
+if ($public['key'] !== $pinnedDetails['key']) throw new RuntimeException('Repair signing key does not match pinned updater key');
+$work=sys_get_temp_dir().'/repair-build-'.bin2hex(random_bytes(6));mkdir($work);
+$zip=new ZipArchive();$zip->open($work.'/repair-engine.zip',ZipArchive::CREATE);
+$zip->addFile(__DIR__.'/update-repair/repair.php','repair.php');
+$zip->addFile(__DIR__.'/../backend/Services/UpdateAssetDownloader.php','UpdateAssetDownloader.php');
+$zip->addFromString('update_public_key.pem',$pinned);
+$zip->close();
+openssl_sign(file_get_contents($work.'/repair-engine.zip'),$signature,$private,OPENSSL_ALGO_SHA256);
+file_put_contents($work.'/repair-engine.sig',base64_encode($signature));
+$xml='<RSAKeyValue><Modulus>'.base64_encode($public['rsa']['n']).'</Modulus><Exponent>'.base64_encode($public['rsa']['e']).'</Exponent></RSAKeyValue>';
+file_put_contents($work.'/Repair-POS.ps1',str_replace('@PUBLIC_KEY_XML@',$xml,file_get_contents(__DIR__.'/update-repair/Repair-POS.ps1')));
+file_put_contents($work.'/README.txt',"POS Desktop one-time signed update repair to 0.0.10-beta.2\r\n\r\nClose POS Desktop completely. Extract this ZIP. Run in PowerShell:\r\npowershell -NoProfile -File .\\Repair-POS.ps1\r\nFor another install folder add: -InstallRoot \"C:\\path\\to\\POS Desktop\"\r\nDo not uninstall or delete your database. This repair does not run migrations.\r\nThe launcher verifies the RSA-signed repair engine; the engine verifies the signed delta and exact installed baseline before replacing changed artifacts.\r\nRecovery files are retained in the printed TEMP directory. Reopen the app after success.\r\nDownload only from ABDO-TECK/pos-desktop-updates. This is RSA payload verification, not Windows Authenticode signing.\r\n");
+$outer=new ZipArchive();$path=$output.'/POS-Update-Repair-0.0.10-beta.2.zip';$outer->open($path,ZipArchive::CREATE|ZipArchive::OVERWRITE);
+foreach (['repair-engine.zip','repair-engine.sig','Repair-POS.ps1','README.txt'] as $file) $outer->addFile($work.'/'.$file,$file);
+$outer->close();echo "Built signed repair tool: $path\n";

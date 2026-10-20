@@ -1,0 +1,24 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+const php=process.env.PHP_BINARY||'php',lab=fs.mkdtempSync(path.join(os.tmpdir(),'pos-duplicate-zip-'));
+const {privateKey,publicKey}=crypto.generateKeyPairSync('rsa',{modulusLength:2048});
+const manifest={version:'0.0.2',minimum_version:'0.0.1',type:'delta',files:[{path:'backend/backend.phar',sha256:crypto.createHash('sha256').update('signed payload').digest('hex'),size:14}]};
+const bytes=JSON.stringify(manifest);
+fs.writeFileSync(path.join(lab,'manifest.json'),bytes);
+fs.writeFileSync(path.join(lab,'manifest.sig'),crypto.sign('RSA-SHA256',Buffer.from(bytes),privateKey).toString('base64'));
+fs.writeFileSync(path.join(lab,'test-public.pem'),publicKey.export({type:'spki',format:'pem'}));
+fs.writeFileSync(path.join(lab,'release-notes.md'),'Duplicate ZIP regression');
+const zipFile=path.join(lab,'delta-0.0.1-to-0.0.2.zip');
+const created=spawnSync(php,['-r',`$z=new ZipArchive();$z->open($argv[1],ZipArchive::CREATE);$z->addFromString('backend/backend.phar','signed payload');$z->close();`,zipFile],{encoding:'utf8',windowsHide:true});assert.equal(created.status,0,created.stderr);
+const original=fs.readFileSync(zipFile),eocd=original.length-22,offset=original.readUInt32LE(eocd+16),central=original.subarray(offset,eocd),end=Buffer.from(original.subarray(eocd));
+end.writeUInt16LE(2,8);end.writeUInt16LE(2,10);end.writeUInt32LE(central.length*2,12);
+const duplicate=Buffer.concat([original.subarray(0,offset),central,central,end]);fs.writeFileSync(zipFile,duplicate);fs.writeFileSync(path.join(lab,'delta.zip'),duplicate);
+// Public key is a verifier option, not a bundled release asset.
+const key=path.join(os.tmpdir(),path.basename(lab)+'.pem');fs.renameSync(path.join(lab,'test-public.pem'),key);
+const result=spawnSync(php,['scripts/verify-release-package.php',`--release-dir=${lab}`,'--target-version=0.0.2','--minimum-version=0.0.1',`--public-key=${key}`],{encoding:'utf8',windowsHide:true});
+assert.notEqual(result.status,0,'Verifier accepted duplicate signed artifact entries');assert.match(result.stderr,/Duplicate ZIP entry/);
+console.log('PASS release verification rejects duplicate ZIP paths before extraction');

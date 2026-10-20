@@ -13,6 +13,12 @@ class GitHubReleaseProvider
     private ?string $token;
     private ?string $caCertPath;
     private int $timeout;
+    private ?\Closure $downloadProgress = null;
+
+    public function setDownloadProgress(?\Closure $progress): void
+    {
+        $this->downloadProgress = $progress;
+    }
     /** @var list<string> */
     private array $allowedHosts;
 
@@ -446,48 +452,8 @@ class GitHubReleaseProvider
             return ['ok' => false, 'error' => "Cannot create target directory: {$destDir}"];
         }
 
-        $fp = @fopen($destPath, 'w+b');
-        if (!$fp) {
-            return ['ok' => false, 'error' => "Cannot open destination file for writing: {$destPath}"];
-        }
-
-        if ($this->caCertPath === null || !is_file($this->caCertPath) || str_starts_with($this->caCertPath, 'phar://')) {
-            fclose($fp);
-            @unlink($destPath);
-            return ['ok' => false, 'error' => 'Asset download failed: CA certificate bundle not found for TLS verification'];
-        }
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_FILE           => $fp,
-            CURLOPT_TIMEOUT        => 60,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_CAINFO         => $this->caCertPath,
-            CURLOPT_USERAGENT      => 'ABDO-TECK-POS-Updater/1.0',
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS      => 5,
-            CURLOPT_PROTOCOLS      => CURLPROTO_HTTPS,
-            CURLOPT_REDIR_PROTOCOLS=> CURLPROTO_HTTPS,
-        ]);
-
-        if ($this->token && trim($this->token) !== '') {
-            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . trim($this->token)]);
-        }
-
-        $success = curl_exec($ch);
-        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr = curl_error($ch);
-        curl_close($ch);
-        fclose($fp);
-
-        if (!$success || $httpCode < 200 || $httpCode >= 400) {
-            @unlink($destPath);
-            $reason = $httpCode > 0 ? "HTTP {$httpCode}" : $curlErr;
-            return ['ok' => false, 'error' => "Asset download failed: {$reason}"];
-        }
-
-        return ['ok' => true, 'error' => null];
+        return (new UpdateAssetDownloader($this->caCertPath, $this->token ?? ''))
+            ->download($url, $destPath, $this->downloadProgress);
     }
 
     /**

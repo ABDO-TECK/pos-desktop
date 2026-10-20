@@ -82,8 +82,12 @@ function verifyZip(string $zipPath, array $manifestFiles): void
             $zip->close();
             verifyFail("ZIP entry is absent from the signed manifest: {$path}");
         }
+        if (isset($zipPaths[$path])) {
+            $zip->close();
+            verifyFail("Duplicate ZIP entry: {$path}");
+        }
         $zipPaths[$path] = true;
-        $contents = $zip->getFromName($zipEntry);
+        $contents = $zip->getFromIndex($index);
         if ($contents === false) {
             $zip->close();
             verifyFail("Could not read ZIP entry: {$path}");

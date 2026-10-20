@@ -25,7 +25,7 @@ class SlowReleaseLookup extends App\Services\UpdateService
     public function fetchRemoteVersion(?string $channel = null, bool $force = false): ?array
     {
         $this->observedLimit = (int) ini_get('max_execution_time');
-        if ($this->observedLimit < 60 || $this->observedLimit >= App\Services\UpdateOperationLock::TTL_SECONDS) {
+        if ($this->observedLimit < 1200 || $this->observedLimit >= 1260) {
             throw new RuntimeException('Update inherits short HTTP budget: ' . $this->observedLimit);
         }
         usleep(1200000);
