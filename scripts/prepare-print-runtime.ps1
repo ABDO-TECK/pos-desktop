@@ -4,6 +4,16 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $printing = (Get-Content (Join-Path $PSScriptRoot 'desktop-runtime.json') -Raw | ConvertFrom-Json).printing
+function Get-ArchiveSha256([string] $Path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
 $buildTools = Join-Path $repoRoot 'build-tools'
 New-Item -ItemType Directory -Path $buildTools -Force | Out-Null
 if (-not $ArchivePath) {
@@ -12,7 +22,7 @@ if (-not $ArchivePath) {
         Invoke-WebRequest -Uri $printing.url -OutFile $ArchivePath
     }
 }
-if ((Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $printing.sha256) {
+if ((Get-ArchiveSha256 $ArchivePath) -ne $printing.sha256) {
     throw 'Printing runtime archive SHA-256 does not match the pinned vendor download.'
 }
 $work = Join-Path $buildTools ('printing-work-' + [Guid]::NewGuid().ToString('N'))
@@ -40,7 +50,7 @@ try {
     }
     & (Join-Path $javaTarget 'bin\java.exe') -version
     if ($LASTEXITCODE -ne 0) { throw 'Bundled Java cannot execute.' }
-    $record = @{ version=$printing.version; archiveSha256=$printing.sha256; jarSha256=(Get-FileHash (Join-Path $qzTarget 'qz-tray.jar') -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $record = @{ version=$printing.version; archiveSha256=$printing.sha256; jarSha256=(Get-ArchiveSha256 (Join-Path $qzTarget 'qz-tray.jar')) }
     $record | ConvertTo-Json | Set-Content (Join-Path $repoRoot 'portable\printing-manifest.json') -Encoding utf8
     Write-Host "Pinned QZ Tray $($printing.version) and bundled Java prepared."
 } finally {
