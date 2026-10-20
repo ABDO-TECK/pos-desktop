@@ -119,22 +119,39 @@ function Invoke-PosUninstall {
         return
     }
     $targets = @(Get-PosCleanupTargets -Roaming $env:APPDATA -Local $env:LOCALAPPDATA -Shared $env:PROGRAMDATA)
+    Write-Host 'Validating POS-owned data paths'
     foreach ($target in $targets) { Assert-PosTreeSafe $target }
     $prefix = $install.TrimEnd('\') + '\'
+    Write-Host 'Stopping remaining owned runtime processes'
     foreach ($process in Get-CimInstance Win32_Process) {
         if ($process.ExecutablePath -and $process.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and
             [IO.Path]::GetFileName($process.ExecutablePath) -in @('POS Desktop.exe','php.exe','mysqld.exe','mariadbd.exe','java.exe','javaw.exe')) {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
         }
     }
+    Write-Host 'Removing POS firewall rules'
     foreach ($name in @('POS System - SSL Port 8443','POS System - Embedded PHP','POS System - Main Executable','POS System - Web Port 8080')) {
         Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
     }
+    Write-Host 'Removing recorded POS printing trust and files'
     Remove-PosOwnedPrintingTrust -Targets $targets
+    Write-Host 'Removing POS database, configuration and caches'
     Invoke-PosDataRemoval -Targets $targets
     Write-Host 'POS data, configuration, device keys and caches removed'
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    try { Invoke-PosUninstall -InstallRoot $InstallRoot -Updated:$Updated } catch { Write-Error $_; exit 1 }
+    $diagnostic = Join-Path ([IO.Path]::GetTempPath()) ('pos-desktop-uninstall-' + [guid]::NewGuid() + '.log')
+    Start-Transcript -LiteralPath $diagnostic | Out-Null
+    try {
+        Invoke-PosUninstall -InstallRoot $InstallRoot -Updated:$Updated
+        Stop-Transcript | Out-Null
+        Remove-Item -LiteralPath $diagnostic -Force
+        exit 0
+    } catch {
+        Write-Host $_.Exception.Message
+        Write-Host "Uninstall diagnostic: $diagnostic"
+        Stop-Transcript | Out-Null
+        exit 1
+    }
 }

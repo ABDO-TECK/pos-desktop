@@ -8,12 +8,19 @@
   ; upgrade. Only an explicit uninstall may erase business data.
   ${IfNot} ${isUpdated}
     DetailPrint "Removing POS data and configuration..."
-    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\uninstall-data.ps1" -InstallRoot "$INSTDIR"'
+    ; NSIS is a 32-bit process. Use native 64-bit PowerShell so Windows
+    ; security modules and certificate stores use the installed x64 context.
+    StrCpy $R2 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+    ${IfNot} ${FileExists} "$R2"
+      StrCpy $R2 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+    ${EndIf}
+    nsExec::ExecToStack '"$R2" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\uninstall-data.ps1" -InstallRoot "$INSTDIR"'
     Pop $0
     Pop $1
     ${If} $0 != 0
       DetailPrint "$1"
-      MessageBox MB_ICONSTOP "POS data could not be fully removed. Close POS and retry uninstall with administrator access. Your installation has been retained."
+      MessageBox MB_ICONSTOP "POS data could not be fully removed. Your installation has been retained.$\r$\n$1" /SD IDOK
+      SetErrorLevel 1
       Abort
     ${EndIf}
   ${EndIf}

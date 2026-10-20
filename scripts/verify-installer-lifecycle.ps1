@@ -36,14 +36,18 @@ function Uninstall-Pos {
     $uninstaller = Join-Path $install 'Uninstall POS Desktop.exe'
     $process = Start-Process -FilePath $uninstaller -ArgumentList @('/S') -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(180000)) { throw 'Silent uninstall timed out' }
-    if ($process.ExitCode -ne 0) { throw "Uninstall failed: $($process.ExitCode)" }
+    $uninstallCode = $process.ExitCode
     $deadline = (Get-Date).AddSeconds(45)
     do {
         $left = @($targets | Where-Object { Test-Path -LiteralPath $_ })
         if (-not $left.Count -and -not (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))) { break }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
-    if ($left.Count) { throw "Uninstall retained managed data: $($left -join ', ')" }
+    if ($left.Count -or $uninstallCode -ne 0) {
+        Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'pos-desktop-uninstall-*.log' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $evidence }
+        @{exitCode=$uninstallCode;remaining=$left;installedHelperExists=(Test-Path -LiteralPath (Join-Path $install 'resources/uninstall-data.ps1'));installedExeExists=(Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'uninstall-failure.json')
+        throw "Uninstall retained managed data or failed (code $uninstallCode): $($left -join ', ')"
+    }
     if (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe')) { throw 'Uninstall retained installed application' }
     if ($printingTrust) {
         foreach ($file in $printingTrust.Files) {
