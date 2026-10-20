@@ -37,6 +37,19 @@ function getQZPrivateKeyPath() {
   return path.join(getCertsDir(), 'private-key.pem');
 }
 
+function preserveSSLProperties(qzTrayDir) {
+  const runtimeProperties = path.join(qzTrayDir, 'qz-tray.properties');
+  const savedProperties = path.join(getCertsDir(), 'qz-tray.properties');
+  // Setup replaces the runtime directory. Keep QZ's existing keystore
+  // configuration in device data, so it does not regenerate shared trust.
+  if (fs.existsSync(runtimeProperties)) {
+    fs.writeFileSync(savedProperties, fs.readFileSync(runtimeProperties), { mode: 0o600 });
+  } else if (fs.existsSync(savedProperties)) {
+    fs.copyFileSync(savedProperties, runtimeProperties);
+  }
+  return fs.existsSync(runtimeProperties);
+}
+
 /**
  * يتحقق من وجود الشهادات. إذا غير موجودة، يولّدها.
  * يُستدعى مرة واحدة من main.js قبل startQZTray.
@@ -54,7 +67,8 @@ async function ensureQZCerts(qzTrayDir, javaPath) {
     _copyOverrideCert(certPath, qzTrayDir);
     _publishCertificateForBrowser(certPath);
     
-    if (!fs.existsSync(flagPath)) {
+    const hasSSLProperties = preserveSSLProperties(qzTrayDir);
+    if (!fs.existsSync(flagPath) || !hasSSLProperties) {
       console.log('[QZ Certs] WSS SSL not installed silently. Installing now via QZ Tray certgen...');
       await installSSLcertSilently(qzTrayDir, javaPath, flagPath);
     }
@@ -150,6 +164,7 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
         try { fs.writeFileSync(flagPath, 'skipped', 'utf-8'); } catch {}
         resolve(false);
       } else {
+        preserveSSLProperties(qzTrayDir);
         // Record ownership only when POS created the shared QZ trust. An
         // independent QZ installation must survive removal of POS.
         if (createdByThisInstall && fs.existsSync(sharedRootCertificate)) {

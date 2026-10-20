@@ -92,6 +92,10 @@ $credentialHash = (Get-FileHash -LiteralPath $credentials).Hash
 Install-Pos
 if ((Get-FileHash -LiteralPath $credentials).Hash -ne $credentialHash -or -not (Test-Path -LiteralPath $sentinel)) { throw 'Upgrade altered persistent configuration/data' }
 Test-InstalledUi 'upgrade' 'existing' 19222
+foreach ($file in $ownership.files) {
+    $sharedFile = Join-Path $qzRoot $file.path
+    if (-not (Test-Path -LiteralPath $sharedFile) -or (Get-FileHash -LiteralPath $sharedFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Upgrade regenerated shared printing material: $($file.path)" }
+}
 Uninstall-Pos
 Remove-Item -LiteralPath $printingTrust.UnrelatedFile
 # The next install must claim only newly created QZ files in this remaining shared directory.

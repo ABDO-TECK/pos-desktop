@@ -92,6 +92,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           ./scripts/verify-uninstall-data.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-qz-upgrade.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-update-notifications.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-release-channels.php
