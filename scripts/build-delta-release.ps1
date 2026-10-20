@@ -11,10 +11,16 @@ foreach ($baselineTag in $version.delta_baseline_tags) {
     $baselineVersion = $baselineTag.Substring(1)
     $work = Join-Path $env:RUNNER_TEMP ('delta-' + $baselineVersion)
     New-Item -ItemType Directory -Path $work -Force | Out-Null
-    $inventoryReleaseTag = "baseline-$baselineTag"
-    gh release view $inventoryReleaseTag --repo $env:GITHUB_REPOSITORY --json tagName > $null 2>&1
-    if ($LASTEXITCODE) { $inventoryReleaseTag = $baselineTag }
-    gh release download $inventoryReleaseTag --repo $env:GITHUB_REPOSITORY --pattern deployment-inventory.json --dir $work
+    $baselineInventoryUrl = "https://raw.githubusercontent.com/ABDO-TECK/pos-desktop-updates/main/baselines/$baselineTag/deployment-inventory.json"
+    try {
+        $storedInventory = Invoke-WebRequest -Uri $baselineInventoryUrl -UseBasicParsing -ErrorAction Stop
+        [IO.File]::WriteAllBytes((Join-Path $work 'deployment-inventory.json'), $storedInventory.RawContentStream.ToArray())
+        $LASTEXITCODE = 0
+    } catch {
+        $responseProperty = $_.Exception.PSObject.Properties['Response']
+        if ($null -eq $responseProperty -or $null -eq $responseProperty.Value -or [int] $responseProperty.Value.StatusCode -ne 404) { throw }
+        gh release download $baselineTag --repo $env:GITHUB_REPOSITORY --pattern deployment-inventory.json --dir $work
+    }
     if ($LASTEXITCODE) { throw 'Baseline release has no deployment inventory; install/publish a new Setup baseline.' }
     $inventory = Join-Path $work 'deployment-inventory.json'
     $output = Join-Path $work 'package'

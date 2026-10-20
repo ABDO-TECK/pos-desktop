@@ -11,7 +11,7 @@ Setup 0.0.1 embeds application update revision 0.0.8. package.json and both lock
 
 Run Windows Setup release on the source commit. Leave publish false to build and validate an artifact first. The verified artifact includes the installer, blockmap, latest.yml, SHA256SUMS and deployment-inventory.json. Publishing requires the matching installer tag at that commit. New full Setup versions should exceed deployed application revisions to preserve the full-updater downgrade policy.
 
-The initial replacement v0.0.1 tag is archived before reuse. Its immutable source baseline alias v0.0.8 identifies the actual revision used by delta builds. The updates repository stores an inventory-only baseline-v0.0.8 release for this baseline; it is not an installable delta. The non-semantic baseline-v prefix excludes build inventories from client discovery; ordinary delta inventories still use their own version tags.
+The initial replacement v0.0.1 tag is archived before reuse. Its immutable source baseline alias v0.0.8 identifies the actual revision used by delta builds. The updates repository stores this inventory in baselines/v0.0.8/deployment-inventory.json, outside Releases. Build-only metadata never appears in client discovery; ordinary delta inventories remain attached to their own version releases.
 
 ## Stable and beta deltas
 
