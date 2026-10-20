@@ -69,8 +69,8 @@ jobs:
         run: |
           node scripts/validate-release-source.mjs --mode working-tree --root .
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            node scripts/validate-release-source.mjs --mode full --root . --tag $env:GITHUB_REF_NAME --release-channel '${{ needs.metadata.outputs.channel }}'
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -or '${{ inputs.publish }}' -eq 'true') {
+            node scripts/validate-release-source.mjs --mode full --root . --tag '${{ needs.metadata.outputs.tag }}' --release-channel '${{ needs.metadata.outputs.channel }}'
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           npm --prefix frontend run typecheck
