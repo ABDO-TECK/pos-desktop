@@ -10,6 +10,8 @@ const channel = tag.includes('-beta.') ? 'beta' : tag.includes('-rc.') ? 'rc' : 
 if (!['setup', 'delta'].includes(mode)) throw Error('release_type must be setup or delta.');
 if (version.channel !== channel) throw Error('version.json channel must match tag.');
 if (mode === 'setup' && pkg.version !== installerVersion) throw Error('Setup package version must match installer_version.');
+if (version.application_version && version.application_version !== version.version) throw Error('Application version fields must agree.');
+if (mode === 'setup' && version.version !== installerVersion) throw Error('Setup application version must match installer_version.');
 const baselines = version.delta_baseline_tags || [];
 if (mode === 'delta' && (!Array.isArray(baselines) || !baselines.length || baselines.length > 10 || baselines.some(tag => !/^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(tag)))) throw Error('Provide 1-10 explicit delta_baseline_tags.');
 const values = { mode, channel, tag, version: version.version, installer_version: installerVersion, prerelease: String(channel !== 'stable'), baselines: JSON.stringify(baselines) };

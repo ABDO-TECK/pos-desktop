@@ -3,6 +3,22 @@
 
 !include LogicLib.nsh
 
+!macro customUnInstall
+  ; electron-builder runs the previous uninstaller with --updated during an
+  ; upgrade. Only an explicit uninstall may erase business data.
+  ${IfNot} ${isUpdated}
+    DetailPrint "Removing POS data and configuration..."
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\uninstall-data.ps1" -InstallRoot "$INSTDIR"'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      DetailPrint "$1"
+      MessageBox MB_ICONSTOP "POS data could not be fully removed. Close POS and retry uninstall with administrator access. Your installation has been retained."
+      Abort
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 ; Pinned VC++ 2015-2022 x64 Redistributable Version: 14.44.35211.0
 !define PINNED_VC_MAJOR 14
 !define PINNED_VC_MINOR 44

@@ -90,6 +90,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-release-identity.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/verify-uninstall-data.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-update-notifications.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-release-channels.php
@@ -128,6 +130,17 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
           ./scripts/verify-desktop-release.ps1 -ReleaseDirectory dist-electron -Tag $tag
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify actual Setup install, upgrade, uninstall and fresh reinstall
+        shell: pwsh
+        run: ./scripts/verify-installer-lifecycle.ps1
+      - name: Save installer acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-acceptance
+          path: ${{ runner.temp }}/pos-installer-evidence
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Start packaged app on the clean runner
         shell: pwsh
         run: ./scripts/smoke-packaged-app.ps1

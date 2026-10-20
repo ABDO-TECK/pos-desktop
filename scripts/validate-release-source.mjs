@@ -146,6 +146,9 @@ const versionData = readJson('version.json');
 const rootPackage = readJson('package.json');
 const frontendPackage = readJson('frontend/package.json');
 const targetVersion = ensureVersionFields(versionData);
+if ((versionData.release_type || 'setup') === 'setup' && targetVersion !== rootPackage.version) {
+  fail('Full Setup application and installer versions must agree');
+}
 
 if (rootPackage.version !== frontendPackage.version) {
   fail(`package.json (${rootPackage.version}) and frontend/package.json (${frontendPackage.version}) versions differ`);

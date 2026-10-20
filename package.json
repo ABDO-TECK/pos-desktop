@@ -34,6 +34,10 @@
     ],
     "extraResources": [
       {
+        "from": "build/uninstall-data.ps1",
+        "to": "uninstall-data.ps1"
+      },
+      {
         "from": "portable",
         "to": "portable",
         "filter": [
@@ -51,7 +55,7 @@
       "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false,
+      "deleteAppDataOnUninstall": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
@@ -71,7 +75,8 @@
           ]
         }
       ],
-      "signAndEditExecutable": false
+      "icon": "electron/assets/icon.ico",
+      "signExecutable": false
     },
     "publish": [
       {

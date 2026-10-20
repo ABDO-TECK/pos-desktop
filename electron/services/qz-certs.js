@@ -114,6 +114,8 @@ async function ensureQZCerts(qzTrayDir, javaPath) {
  */
 function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
   return new Promise((resolve) => {
+    const sharedRootCertificate = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'qz', 'ssl', 'root-ca.crt');
+    const createdByThisInstall = !fs.existsSync(sharedRootCertificate);
     // بناء المسارات
     const javaWinPath = javaPath.replace(/\//g, '\\');
     const qzTrayJarPath = path.join(qzTrayDir, 'qz-tray.jar').replace(/\//g, '\\');
@@ -137,6 +139,14 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
         try { fs.writeFileSync(flagPath, 'skipped', 'utf-8'); } catch {}
         resolve(false);
       } else {
+        // Record ownership only when POS created the shared QZ trust. An
+        // independent QZ installation must survive removal of POS.
+        if (createdByThisInstall && fs.existsSync(sharedRootCertificate)) {
+          const certificate = new crypto.X509Certificate(fs.readFileSync(sharedRootCertificate));
+          fs.writeFileSync(path.join(getCertsDir(), '..', 'qz-shared-install.json'), JSON.stringify({
+            rootSha256: certificate.fingerprint256.replace(/:/g, '').toLowerCase(),
+          }));
+        }
         console.log('[QZ Certs] SSL cert installed silently successfully.');
         fs.writeFileSync(flagPath, 'installed', 'utf-8');
         resolve(true);

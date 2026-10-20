@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { listPackage } from '@electron/asar';
 const root=process.cwd(), out=path.join(root,'dist-electron');
 const resources=path.join(out,'win-unpacked/resources');
+if(!fs.existsSync(path.join(resources,'uninstall-data.ps1')))throw Error('Missing installed data-removal helper');
 const archive=path.join(resources,'app.asar');
 const entries=listPackage(archive).map(p=>p.replaceAll('\\','/').replace(/^\//,''));
 const forbidden=entries.filter(p=>/^(?:release|certs|docs|scripts|\.github|\.git)(?:\/|$)|(?:^|\/)(?:\.env|db_credentials\.json|cookies\.json|private[-_]key\.pem)(?:\/|$)|\.(?:pfx|p12|key)$/.test(p));

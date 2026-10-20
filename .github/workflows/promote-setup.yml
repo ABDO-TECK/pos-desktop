@@ -27,7 +27,7 @@ jobs:
             if(ref.object.type!=='commit'||ref.object.sha!==run.head_sha)throw Error('Setup source tag must equal artifact build commit');
             const {data:source}=await github.rest.repos.getContent({owner,repo,path:'version.json',ref:run.head_sha});
             const metadata=JSON.parse(Buffer.from(source.content,'base64'));
-            if(metadata.installer_version!=='0.0.1'||metadata.version!=='0.0.8')throw Error('Unexpected initial Setup identity');
+            if(metadata.installer_version!=='0.0.1'||metadata.version!=='0.0.1'||metadata.application_version!=='0.0.1')throw Error('Unexpected initial Setup identity');
             core.info('Verified artifact provenance: '+run.head_sha);
       - uses: actions/download-artifact@v4
         with:
@@ -46,10 +46,15 @@ jobs:
           const fs=require('fs'),crypto=require('crypto'),assert=require('assert/strict');
           const expected=['POS-Desktop-Setup-0.0.1.exe','POS-Desktop-Setup-0.0.1.exe.blockmap','latest.yml','SHA256SUMS.txt','deployment-inventory.json'].sort();
           assert.deepEqual(fs.readdirSync('.').sort(),expected);
-          assert.equal(JSON.parse(fs.readFileSync('deployment-inventory.json')).version,'0.0.8');
+          assert.equal(JSON.parse(fs.readFileSync('deployment-inventory.json')).version,'0.0.1');
           const metadata=fs.readFileSync('latest.yml','utf8'),bytes=fs.readFileSync('POS-Desktop-Setup-0.0.1.exe');
           assert.match(metadata,/^version: 0\.0\.1\s*$/m);
           assert.ok(metadata.includes(crypto.createHash('sha512').update(bytes).digest('base64')));
           NODE
-          printf '%s\n' 'Complete Windows x64 Setup 0.0.1, application update revision 0.0.8, rebuilt with current fixes.' '' 'Signed stable and beta deltas are delivered from https://github.com/ABDO-TECK/pos-desktop-updates.' '' 'Includes embedded PHP, MariaDB, Java and QZ Tray. Business databases and device credentials are outside the install directory.' '' 'This installer has no Windows Authenticode publisher certificate. Physical printer output is not part of automated acceptance.' > ../release-notes.md
-          gh release create v0.0.1 ./* --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title 'POS Desktop Setup v0.0.1' --notes-file ../release-notes.md
+          printf '%s\n' 'Complete Windows x64 Setup and application version 0.0.1, rebuilt with current fixes.' '' 'Manual uninstall deletes POS business data, settings and device keys. Upgrades retain data. Reinstall after uninstall creates a fresh administrator and a temporary password.' '' 'Includes POS branding and embedded PHP, MariaDB, Java and QZ Tray. Signed stable and beta deltas use pos-desktop-updates.' '' 'This installer has no Windows Authenticode publisher certificate. Physical printer output is not part of automated acceptance.' > ../release-notes.md
+          if gh release view v0.0.1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.0.1 ./* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v0.0.1 --repo "$GITHUB_REPOSITORY" --latest --title 'POS Desktop Setup v0.0.1' --notes-file ../release-notes.md
+          else
+            gh release create v0.0.1 ./* --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title 'POS Desktop Setup v0.0.1' --notes-file ../release-notes.md
+          fi
