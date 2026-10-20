@@ -34,9 +34,15 @@ function Test-InstalledUi {
 }
 function Uninstall-Pos {
     $uninstaller = Join-Path $install 'Uninstall POS Desktop.exe'
-    $process = Start-Process -FilePath $uninstaller -ArgumentList @('/S') -WindowStyle Hidden -PassThru
+    # NSIS otherwise starts a temporary child and returns its bootstrap's
+    # code immediately. Run our own temporary copy with _?= last so waiting
+    # and ExitCode refer to the actual uninstallation process.
+    $uninstallerCopy = Join-Path $evidence ('uninstall-' + [guid]::NewGuid() + '.exe')
+    Copy-Item -LiteralPath $uninstaller -Destination $uninstallerCopy
+    $process = Start-Process -FilePath $uninstallerCopy -ArgumentList @('/S','/currentuser',"_?=$install") -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(180000)) { throw 'Silent uninstall timed out' }
     $uninstallCode = $process.ExitCode
+    Remove-Item -LiteralPath $uninstallerCopy -Force
     $deadline = (Get-Date).AddSeconds(45)
     do {
         $left = @($targets | Where-Object { Test-Path -LiteralPath $_ })
