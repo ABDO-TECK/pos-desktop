@@ -106,7 +106,11 @@ function Remove-PosOwnedPrintingTrust {
         foreach ($file in $owner.files) {
             $absolute = Join-Path $qzRoot $file.path
             if (Test-Path -LiteralPath $absolute) {
-                if ((Get-FileHash -LiteralPath $absolute -Algorithm SHA256).Hash.ToLowerInvariant() -eq $file.sha256) {
+                $stream = [IO.File]::OpenRead($absolute)
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { $fileHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+                finally { $sha.Dispose(); $stream.Dispose() }
+                if ($fileHash -eq $file.sha256) {
                     Remove-Item -LiteralPath $absolute -Force
                 } else { Write-Warning "Retained changed shared QZ file: $($file.path)" }
             }

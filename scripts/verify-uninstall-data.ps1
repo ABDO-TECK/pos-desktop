@@ -59,7 +59,11 @@ try {
         $ownedFiles += @{path='ssl/changed.key';sha256=('0' * 64)}
         @{rootSha256=$fingerprint;rootCertificateBase64=$originalCertificate;files=$ownedFiles} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $receiptRoot 'qz-shared-install.json')
         Set-Content -LiteralPath (Join-Path $qz 'ssl/root-ca.crt') -Value 'rotated by another application'
-        Remove-PosOwnedPrintingTrust -Targets @($receiptRoot)
+        # NSIS may inherit a PowerShell 7 module path while launching Windows
+        # PowerShell 5.1. Shared-file verification must not require Get-FileHash.
+        function Get-FileHash { throw 'Get-FileHash unavailable in the uninstall host' }
+        try { Remove-PosOwnedPrintingTrust -Targets @($receiptRoot) }
+        finally { Remove-Item Function:Get-FileHash }
         if (-not (Test-Path -LiteralPath (Join-Path $qz 'ssl/root-ca.crt'))) { throw 'FAIL: QZ cleanup deleted a rotated shared root' }
         if (-not (Test-Path -LiteralPath (Join-Path $qz 'unrelated.txt'))) { throw 'FAIL: QZ cleanup deleted an unrecorded shared file' }
         if (-not (Test-Path -LiteralPath (Join-Path $qz 'ssl/changed.key'))) { throw 'FAIL: QZ cleanup deleted a changed shared file' }
