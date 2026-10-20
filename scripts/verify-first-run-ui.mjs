@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 if (process.env.GITHUB_ACTIONS !== 'true') throw Error('Installer UI verification is restricted to an ephemeral GitHub runner');
 const [port, expectation, receipt] = process.argv.slice(2);
 const until = Date.now() + 240_000;
@@ -58,6 +59,25 @@ if (expectation === 'fresh') {
 }
 fs.writeFileSync(receipt, JSON.stringify(result, null, 2));
 console.log(`PASS: installed UI version 0.0.1, ${expectation === 'fresh' ? 'new temporary credentials visible' : 'existing administrator retained'}`);
+// Printing starts in the background after the login UI. Do not quit while
+// its certificate setup is still running, or the ownership receipt cannot
+// be written and the following uninstall test would be premature.
+const printingDeadline = Date.now() + 120_000;
+let printingReady = false;
+while (Date.now() < printingDeadline) {
+  printingReady = await new Promise(resolve => {
+    const socket = net.connect({ host: '127.0.0.1', port: 8182 });
+    socket.setTimeout(1000);
+    const finish = ready => { socket.destroy(); resolve(ready); };
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.once('timeout', () => finish(false));
+  });
+  if (printingReady) break;
+  await new Promise(resolve => setTimeout(resolve, 1000));
+}
+assert.ok(printingReady, 'Printing service did not finish background initialization');
+console.log('PASS: printing service finished background initialization');
 // Close the app via Chromium so Electron runs its normal service shutdown.
 socket.send(JSON.stringify({ id: ++sequence, method: 'Browser.close' }));
 socket.close();

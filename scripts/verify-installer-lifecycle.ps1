@@ -13,7 +13,8 @@ $targets = @(Get-PosCleanupTargets -Roaming $env:APPDATA -Local $env:LOCALAPPDAT
 $printingTrust = $null
 foreach ($target in $targets) { if (Test-Path -LiteralPath $target) { throw "Runner contains pre-existing POS data: $target" } }
 function Install-Pos {
-    $process = Start-Process -FilePath $installer -ArgumentList @('/S','/currentuser',"/D=$install") -WindowStyle Hidden -PassThru -Wait
+    $process = Start-Process -FilePath $installer -ArgumentList @('/S','/currentuser',"/D=$install") -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(180000)) { throw 'Silent Setup timed out' }
     if ($process.ExitCode -ne 0) { throw "Setup failed: $($process.ExitCode)" }
     if (-not (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))) { throw 'Installed executable missing' }
 }
@@ -33,7 +34,8 @@ function Test-InstalledUi {
 }
 function Uninstall-Pos {
     $uninstaller = Join-Path $install 'Uninstall POS Desktop.exe'
-    $process = Start-Process -FilePath $uninstaller -ArgumentList @('/S') -WindowStyle Hidden -PassThru -Wait
+    $process = Start-Process -FilePath $uninstaller -ArgumentList @('/S') -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(180000)) { throw 'Silent uninstall timed out' }
     if ($process.ExitCode -ne 0) { throw "Uninstall failed: $($process.ExitCode)" }
     $deadline = (Get-Date).AddSeconds(45)
     do {
