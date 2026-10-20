@@ -1,21 +1,20 @@
 {
-  "version": "0.0.1",
-  "application_version": "0.0.1",
+  "version": "0.0.10-beta.1",
+  "application_version": "0.0.10-beta.1",
   "update_engine_version": "1.0.0",
-  "channel": "stable",
+  "channel": "beta",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
   "release_generation": 3,
-  "released_at": "2026-10-20",
+  "released_at": "2026-10-21",
   "changelog": [
-    "Complete Setup and application version 0.0.1 with all current fixes.",
-    "Manual uninstall removes POS data; upgrades preserve it. Reinstall starts fresh.",
-    "Application, installer and shortcut icons use the POS logo.",
-    "Signed stable and beta deltas are delivered by pos-desktop-updates.",
-    "Includes bounded restart notifications, Windows update timeouts and device certificate preservation."
+    "Phone access stays enabled while navigating across settings and all application pages.",
+    "The explicit LAN preference is restored when the desktop app reopens.",
+    "Branded accessible phone-access switch with clear pending and failure states."
   ],
   "requires_npm_install": false,
-  "update_channel": "stable",
-  "release_type": "setup",
+  "update_channel": "beta",
+  "release_type": "delta",
+  "delta_baseline_tags": ["v0.0.1"],
   "installer_version": "0.0.1"
 }

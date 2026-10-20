@@ -1,0 +1,58 @@
+.accessPanel {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.accessControl { display: flex; align-items: center; gap: 0.85rem; }
+.accessIcon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  color: var(--primary-d);
+  background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+}
+.accessText { flex: 1; min-width: 0; }
+.accessText strong { color: var(--text); font-size: 0.95rem; }
+.accessText p { margin-top: 0.25rem; font-size: 0.8rem; line-height: 1.6; color: var(--text-muted); }
+.accessSwitch {
+  position: relative;
+  flex-shrink: 0;
+  width: 56px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 180ms ease, border-color 180ms ease;
+}
+.accessSwitch[aria-checked='true'] { background: var(--primary-d); border-color: var(--primary-d); }
+.accessSwitch:focus-visible { outline: 3px solid var(--primary); outline-offset: 4px; }
+.accessSwitch:disabled { cursor: progress; opacity: 0.7; }
+.switchThumb {
+  position: absolute;
+  top: 3px;
+  inset-inline-start: 3px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+  transition: inset-inline-start 180ms ease, color 180ms ease;
+}
+.accessSwitch[aria-checked='true'] .switchThumb { inset-inline-start: 27px; color: var(--primary-d); }
+.accessStatus { display: flex; align-items: center; gap: 0.45rem; margin: 0.85rem 0 0; color: var(--text-muted); font-size: 0.8rem; }
+.statusDot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--text-muted); }
+.statusDot[data-enabled='true'] { background: var(--primary-d); }
+.accessWarning { margin: 0.7rem 0 0; padding: 0.65rem 0.8rem; border-radius: 8px; color: var(--text); background: color-mix(in srgb, var(--warning) 12%, var(--surface)); font-size: 0.8rem; line-height: 1.6; }
+.loadingIcon { animation: lan-spin 900ms linear infinite; }
+@keyframes lan-spin { to { transform: rotate(360deg); } }
+@media (max-width: 480px) { .accessControl { gap: 0.6rem; } .accessIcon { display: none; } }
+@media (prefers-reduced-motion: reduce) { .accessSwitch, .switchThumb { transition: none; } .loadingIcon { animation: none; } }

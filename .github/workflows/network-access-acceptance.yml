@@ -1,0 +1,68 @@
+name: Phone access beta acceptance
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/lan-access-beta
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Build and test frontend
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-network-access.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run frontend:build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Prepare exact published Setup shell with candidate frontend
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $lab = Join-Path $env:RUNNER_TEMP 'phone-access-lab'
+          New-Item -ItemType Directory -Path $lab | Out-Null
+          gh release download v0.0.1 --repo ABDO-TECK/pos-desktop --pattern POS-Desktop-Setup-0.0.1.exe --dir $lab
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $setup = Join-Path $lab 'POS-Desktop-Setup-0.0.1.exe'
+          if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a') { throw 'Published Setup changed from the supported baseline' }
+          $seven = Join-Path $PWD 'node_modules/electron-winstaller/vendor/7z.exe'
+          & $seven e $setup '$PLUGINSDIRapp-64.7z' "-o$lab" -y
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $application = Join-Path $lab 'app'
+          & $seven x (Join-Path $lab 'app-64.7z') "-o$application" -y
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $dist = [IO.Path]::GetFullPath((Join-Path $application 'resources/app.asar.unpacked/frontend/dist'))
+          if (-not $dist.StartsWith([IO.Path]::GetFullPath($lab) + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe lab target' }
+          if ((Get-Item -LiteralPath $dist -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Lab frontend is a reparse target' }
+          Remove-Item -LiteralPath $dist -Recurse -Force
+          Copy-Item -LiteralPath frontend/dist -Destination $dist -Recurse
+          Copy-Item -LiteralPath version.json -Destination (Join-Path $application 'resources/app.asar.unpacked/version.json')
+      - name: Verify real UI and local-network HTTPS on isolated Windows
+        shell: pwsh
+        run: node scripts/verify-network-access-ui.mjs "$env:RUNNER_TEMP/phone-access-lab/app" "$env:RUNNER_TEMP/phone-access-evidence"
+      - name: Save acceptance and UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-access-acceptance
+          path: ${{ runner.temp }}/phone-access-evidence
+          if-no-files-found: ignore
+          retention-days: 14

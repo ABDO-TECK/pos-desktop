@@ -1,0 +1,75 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const root = path.resolve(process.argv[2] || '.');
+const require = createRequire(path.join(root, 'frontend/package.json'));
+const ts = require('typescript');
+const file = path.join(root, 'frontend/src/store/networkAccessStore.ts');
+assert.ok(fs.existsSync(file), 'LAN state must live outside the settings tab');
+const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const storage = new Map();
+let enables = 0, disables = 0, failDisable = false, failEnable = false, releaseEnable;
+const result = enabled => ({ enabled, port: 8443, protocol: 'https', firewallConfigured: true });
+function boot(protocol = 'app:') {
+  const exports = {};
+  vm.runInNewContext(code, { exports, require, console, window: { location: { protocol }, posRuntime: {
+    enableLanAccess: async () => { enables++; if (releaseEnable) return new Promise(resolve => { releaseEnable = resolve; }); return failEnable ? { ...result(false), error: 'Real enable failure' } : result(true); },
+    disableLanAccess: async () => { disables++; if (failDisable) throw Error('Real IPC failure'); return result(false); },
+  } }, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } });
+  return exports.default;
+}
+const store = boot();
+await store.getState().initialize();
+assert.equal(enables, 0, 'A new installation must not opt into LAN automatically');
+await store.getState().setEnabled(true);
+assert.equal(store.getState().access.enabled, true);
+const unsubscribe = store.subscribe(() => {}); unsubscribe();
+assert.equal(store.getState().access.enabled, true, 'Leaving the tab must preserve active state');
+await store.getState().initialize();
+assert.equal(enables, 1, 'Returning to settings must not reopen the service');
+assert.ok([...storage.values()].includes('true'), 'Explicit opt-in must be persisted');
+const reopened = boot();
+await Promise.all([reopened.getState().initialize(), reopened.getState().initialize()]);
+assert.equal(enables, 2, 'Reopening the app restores opt-in exactly once');
+assert.equal(reopened.getState().access.enabled, true);
+failDisable = true;
+await reopened.getState().setEnabled(false);
+assert.equal(reopened.getState().access.enabled, true, 'Failed shutdown must not claim access is off');
+assert.ok(reopened.getState().access.error, 'A real IPC failure must be visible');
+assert.ok([...storage.values()].includes('true'));
+failDisable = false;
+await reopened.getState().setEnabled(false);
+assert.equal(reopened.getState().access.enabled, false);
+assert.ok([...storage.values()].includes('false'));
+const afterDisable = boot(); await afterDisable.getState().initialize();
+assert.equal(enables, 2, 'A deliberate shutdown must survive app restart');
+failEnable = true;
+await afterDisable.getState().setEnabled(true);
+assert.equal(afterDisable.getState().access.enabled, false);
+assert.equal(afterDisable.getState().access.error, 'Real enable failure');
+failEnable = false;
+releaseEnable = true;
+const pending = afterDisable.getState().setEnabled(true);
+assert.equal(afterDisable.getState().loading, true);
+assert.equal(afterDisable.getState().access.enabled, false, 'Pending is not success');
+await afterDisable.getState().setEnabled(true);
+assert.equal(enables, 4, 'Repeated clicks must not race service operations');
+releaseEnable(result(true)); releaseEnable = null;
+await pending;
+assert.equal(afterDisable.getState().loading, false);
+assert.equal(afterDisable.getState().access.enabled, true);
+await boot('https:').getState().initialize();
+assert.equal(enables, 4, 'A phone browser must not operate the desktop bridge');
+assert.equal(disables, 2);
+failEnable = true;
+const failedRestore = boot(); await failedRestore.getState().initialize();
+assert.equal(failedRestore.getState().access.enabled, false);
+assert.equal(failedRestore.getState().preferredEnabled, true, 'Failed restoration must distinguish remembered opt-in from runtime state');
+await failedRestore.getState().setEnabled(false);
+assert.equal(failedRestore.getState().preferredEnabled, false, 'User can cancel remembered opt-in even when startup failed');
+const cancelledRestore = boot(); await cancelledRestore.getState().initialize();
+assert.equal(enables, 5, 'Cancelled restore must not silently enable on the next restart');
+console.log('PASS: global LAN state, restart preference, default opt-out, concurrent clicks and real failure visibility');

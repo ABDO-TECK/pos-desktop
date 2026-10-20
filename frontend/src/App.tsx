@@ -11,6 +11,7 @@ import ForcePasswordChangeModal from './components/common/ForcePasswordChangeMod
 import { useInventorySSE } from './hooks/useInventorySSE'
 import { ConflictResolutionDialog } from './components/ConflictResolutionDialog'
 import { useConfirmStore } from './store/confirmStore'
+import NetworkAccessManager from './components/NetworkAccessManager'
 
 /**
  * Retry wrapper for lazy imports — handles transient network/SSL failures.
@@ -133,6 +134,7 @@ function AppShell() {
 
   return (
     <BrowserRouter>
+      <NetworkAccessManager />
       <ForcePasswordChangeModal />
       <ConfirmModal />
       <Toaster position="top-center" toastOptions={{ style: toastStyle }} />

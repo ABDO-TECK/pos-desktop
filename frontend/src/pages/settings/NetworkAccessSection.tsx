@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Wifi, Copy, Check, HelpCircle, QrCode } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Wifi, Copy, Check, HelpCircle, QrCode, LoaderCircle, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { getNetworkInfo } from '../../api/endpoints'
 import SectionTitle from '../../components/common/SectionTitle'
 import LocalQrCode from '../../components/LocalQrCode'
+import useNetworkAccessStore from '../../store/networkAccessStore'
+import { useConfirmStore } from '../../store/confirmStore'
+import styles from './NetworkAccessSection.module.css'
 
 interface NetworkInfoData {
   ips: string[]
@@ -11,26 +14,15 @@ interface NetworkInfoData {
   protocol: string
 }
 
-interface LanAccessData {
-  enabled: boolean
-  port: number
-  protocol: 'https'
-  firewallConfigured?: boolean
-  firewallRequired?: boolean
-  error?: string
-}
-
 export default function NetworkAccessSection() {
   const [loading, setLoading] = useState(true)
   const [networkInfo, setNetworkInfo] = useState<NetworkInfoData | null>(null)
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
-  const [lanAccess, setLanAccess] = useState<LanAccessData>({
-    enabled: false,
-    port: 8443,
-    protocol: 'https',
-    error: 'لم يتم تفعيل الوصول من الهاتف. اضغط تفعيل عند الحاجة فقط.',
-  })
-  const [lanAccessLoading, setLanAccessLoading] = useState(false)
+  const lanAccess = useNetworkAccessStore(state => state.access)
+  const lanAccessLoading = useNetworkAccessStore(state => state.loading)
+  const preferredEnabled = useNetworkAccessStore(state => state.preferredEnabled)
+  const setEnabled = useNetworkAccessStore(state => state.setEnabled)
+  const confirm = useConfirmStore(state => state.confirm)
   const [selectedIdx, setSelectedIdx] = useState(0)
 
   useEffect(() => {
@@ -54,64 +46,13 @@ export default function NetworkAccessSection() {
       })
   }, [])
 
-  const requestLanAccess = useCallback(async () => {
-    const enableLanAccess = window.posRuntime?.enableLanAccess
-    if (typeof enableLanAccess !== 'function') {
-      setLanAccess({
-        enabled: false,
-        port: 8443,
-        protocol: 'https',
-        error: 'يجب تشغيل هذا الخيار من تطبيق سطح المكتب لفتح الوصول من الهاتف.',
-      })
-      return
-    }
-
-    setLanAccessLoading(true)
-    try {
-      const result = await enableLanAccess()
-      setLanAccess(result)
-    } catch (error) {
-      console.error('[LAN] Failed to enable phone access:', error)
-      setLanAccess({
-        enabled: false,
-        port: 8443,
-        protocol: 'https',
-        error: 'تعذر تفعيل الوصول من الهاتف. تحقق من إعدادات جدار الحماية.',
-      })
-    } finally {
-      setLanAccessLoading(false)
-    }
-  }, [])
-
-  const handleEnableLanAccess = useCallback(async () => {
-    if (!window.confirm('Enable HTTPS access from devices on the local network?')) {
-      return
-    }
-    await requestLanAccess()
-  }, [requestLanAccess])
-
-  const handleDisableLanAccess = useCallback(async () => {
-    const disableLanAccess = window.posRuntime?.disableLanAccess
-    if (typeof disableLanAccess !== 'function') return
-    if (!window.confirm('Disable HTTPS access from devices on the local network?')) {
-      return
-    }
-
-    setLanAccessLoading(true)
-    try {
-      setLanAccess(await disableLanAccess())
-    } catch (error) {
-      console.error('[LAN] Failed to disable phone access:', error)
-      setLanAccess({
-        enabled: true,
-        port: 8443,
-        protocol: 'https',
-        error: 'تعذر إيقاف الوصول من الهاتف. تحقق من إعدادات جدار الحماية.',
-      })
-    } finally {
-      setLanAccessLoading(false)
-    }
-  }, [])
+  const handleToggleLanAccess = async (enabled = !lanAccess.enabled) => {
+    if (lanAccessLoading) return
+    const accepted = await confirm(enabled
+      ? 'تفعيل وصول الهاتف والأجهزة المتصلة بنفس الشبكة إلى النظام عبر HTTPS؟'
+      : 'إيقاف وصول الهاتف والأجهزة المتصلة بالشبكة إلى النظام؟')
+    if (accepted) await setEnabled(enabled)
+  }
 
   const handleCopy = (url: string) => {
     navigator.clipboard.writeText(url)
@@ -155,7 +96,7 @@ export default function NetworkAccessSection() {
         type: 'electron-https',
         note: lanAccess?.enabled
           ? 'افتح هذا الرابط من هاتف متصل بنفس شبكة Wi‑Fi. قد تحتاج إلى قبول الشهادة المحلية في أول زيارة.'
-          : 'جاري تفعيل خدمة الوصول المحلي. أعد المحاولة بعد السماح للتطبيق في جدار حماية Windows.',
+          : 'فعّل الوصول من المفتاح أعلاه لاستخدام هذا الرابط من الهاتف.',
       })
     } else if (currentPort === '5173') {
       // Vite development server
@@ -202,42 +143,46 @@ export default function NetworkAccessSection() {
       </p>
 
       {isElectron && (
-        <div
-          aria-live="polite"
-          style={{
-            padding: '0.75rem 1rem',
-            borderRadius: '8px',
-            backgroundColor: lanAccess?.enabled ? 'rgba(34, 197, 94, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-            border: `1px solid ${lanAccess?.enabled ? 'rgba(34, 197, 94, 0.25)' : 'rgba(245, 158, 11, 0.25)'}`,
-            color: lanAccess?.enabled ? 'var(--success, #16a34a)' : 'var(--warning, #b45309)',
-            fontSize: '0.82rem',
-          }}
-        >
-          {lanAccessLoading ? (
-            'جاري تحديث حالة الوصول المحلي الآمن…'
-          ) : lanAccess.enabled ? (
-            <>
-              تم تفعيل الوصول من الهاتف على المنفذ {lanAccess.port}.
-              {lanAccess.firewallRequired && ' اسمح للتطبيق عبر جدار حماية Windows ثم اضغط إعادة المحاولة.'}
-              <button
-                type="button"
-                onClick={() => void handleDisableLanAccess()}
-                style={{ marginInlineStart: '0.75rem' }}
-              >
-                إيقاف الوصول
-              </button>
-            </>
-          ) : (
-            <>
-              {lanAccess.error || 'لم يتم تفعيل الوصول من الهاتف.'}
-              <button
-                type="button"
-                onClick={() => void handleEnableLanAccess()}
-                style={{ marginInlineStart: '0.75rem' }}
-              >
-                تفعيل الوصول
-              </button>
-            </>
+        <div className={styles.accessPanel}>
+          <div className={styles.accessControl}>
+            <span className={styles.accessIcon}><Wifi size={21} /></span>
+            <div className={styles.accessText}>
+              <strong id="lan-access-label">الوصول من الهاتف</strong>
+              <p id="lan-access-description">يستمر في كل صفحات النظام، ويُحفظ اختيارك عند إعادة تشغيل البرنامج.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={lanAccess.enabled}
+              aria-labelledby="lan-access-label"
+              aria-describedby="lan-access-description"
+              aria-busy={lanAccessLoading}
+              disabled={lanAccessLoading}
+              className={styles.accessSwitch}
+              onClick={() => void handleToggleLanAccess()}
+            >
+              <span className={styles.switchThumb}>
+                {lanAccessLoading ? <LoaderCircle size={13} className={styles.loadingIcon} /> : lanAccess.enabled ? <Check size={13} /> : <X size={13} />}
+              </span>
+            </button>
+          </div>
+          <p className={styles.accessStatus} role="status">
+            <span className={styles.statusDot} data-enabled={lanAccess.enabled} />
+            {lanAccessLoading ? 'جاري تحديث حالة الوصول…' : lanAccess.enabled
+              ? `الوصول مفعّل عبر HTTPS على المنفذ ${lanAccess.port}`
+              : 'الوصول متوقف — فعّله عند الحاجة للاتصال من الهاتف'}
+          </p>
+          {(lanAccess.error || lanAccess.firewallRequired) && (
+            <p className={styles.accessWarning} role="alert">
+              {lanAccess.error || (lanAccess.enabled
+                ? 'خدمة الوصول تعمل، لكن إعداد جدار الحماية لم يكتمل. اسمح للتطبيق على الشبكة الخاصة.'
+                : 'تم إيقاف الوصول، لكن تعذرت إزالة قاعدة جدار الحماية.')}
+            </p>
+          )}
+          {!lanAccess.enabled && preferredEnabled && !lanAccessLoading && (
+            <button type="button" className="btn btn-ghost" onClick={() => void handleToggleLanAccess(false)}>
+              إلغاء التفعيل التلقائي المحفوظ
+            </button>
           )}
         </div>
       )}
