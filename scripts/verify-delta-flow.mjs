@@ -35,6 +35,7 @@ for (const [channel, version, baselineVersion, name] of [['beta', '0.0.3-beta.1'
   write(path.join(root, 'frontend/dist/index.html'), 'old frontend');
   write(path.join(root, 'frontend/dist/keep.js'), 'unchanged javascript');
   write(path.join(root, 'frontend/dist/remove.js'), 'obsolete javascript');
+  write(path.join(root, 'frontend/dist/digital-certificate.txt'), 'build-runner generated printing certificate');
   write(path.join(root, 'frontend/src/app.ts'), 'old source');
   write(path.join(root, 'version.json'), JSON.stringify({ version: baselineVersion, update_engine_version: '1.0.0', channel: baselineVersion.includes('-beta.') ? 'beta' : 'stable' }));
   run('git', ['init', '-q'], root);
@@ -51,9 +52,11 @@ for (const [channel, version, baselineVersion, name] of [['beta', '0.0.3-beta.1'
   }
   const sentinel = path.join(deployed, 'backend/storage/business.db');
   write(sentinel, 'business data must stay identical');
+  const deviceCertificate = path.join(deployed, 'frontend/dist/digital-certificate.txt');
+  write(deviceCertificate, 'this device printing certificate must stay identical');
   const keep = path.join(deployed, 'frontend/dist/keep.js');
-  for (const file of [keep, sentinel]) fs.utimesSync(file, new Date('2020-01-01'), new Date('2020-01-01'));
-  const before = [keep, sentinel].map(file => ({ hash: hash(file), mtime: fs.statSync(file).mtimeMs, ino: fs.statSync(file).ino }));
+  for (const file of [keep, sentinel, deviceCertificate]) fs.utimesSync(file, new Date('2020-01-01'), new Date('2020-01-01'));
+  const before = [keep, sentinel, deviceCertificate].map(file => ({ hash: hash(file), mtime: fs.statSync(file).mtimeMs, ino: fs.statSync(file).ino }));
   write(path.join(root, 'frontend/dist/index.html'), 'new frontend');
   write(path.join(root, 'frontend/dist/add.js'), 'new javascript');
   fs.unlinkSync(path.join(root, 'frontend/dist/remove.js'));
@@ -107,7 +110,7 @@ echo json_encode(['snapshot'=>$backup['snapshot_path']]);
   assert.equal(applied.ok, true, applied.error);
   for (const entry of manifest.files) assert.equal(hash(path.join(deployed, entry.path)), entry.sha256);
   assert.equal(fs.existsSync(path.join(deployed, 'frontend/dist/remove.js')), false);
-  [keep, sentinel].forEach((file, index) => assert.deepEqual({ hash: hash(file), mtime: fs.statSync(file).mtimeMs, ino: fs.statSync(file).ino }, before[index], 'untouched file identity, time and bytes must stay identical'));
+  [keep, sentinel, deviceCertificate].forEach((file, index) => assert.deepEqual({ hash: hash(file), mtime: fs.statSync(file).mtimeMs, ino: fs.statSync(file).ino }, before[index], 'untouched file identity, time and bytes must stay identical'));
   handoff.rollback(applied.plan);
   assert.equal(fs.readFileSync(path.join(deployed, 'frontend/dist/index.html'), 'utf8'), 'old frontend');
   assert.equal(fs.existsSync(path.join(deployed, 'frontend/dist/add.js')), false);
@@ -128,6 +131,8 @@ echo json_encode(['snapshot'=>$backup['snapshot_path']]);
   for (const entry of manifest.files) assert.equal(hash(path.join(deployed, entry.path)), entry.sha256, 'PHP must preserve exact signed bytes');
   assert.equal(fs.statSync(keep).mtimeMs, before[0].mtime);
   assert.equal(fs.statSync(sentinel).mtimeMs, before[1].mtime);
+  assert.equal(hash(deviceCertificate), before[2].hash);
+  assert.equal(fs.statSync(deviceCertificate).mtimeMs, before[2].mtime);
   checks.push({ channel, version, baselineVersion, replacements: manifest.files.map(f => f.path), deleted: manifest.deleted_files, unchangedFilesPreserved: true, phpApplyVerified: true, rollback: true, corruptPayloadRejected: true, corruptSignatureRejected: true, wrongBaselineRejected: true });
 }
 const report = JSON.stringify({ ok: true, lab, checks }, null, 2);
