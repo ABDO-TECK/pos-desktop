@@ -1,22 +1,20 @@
 {
-  "version": "0.0.6",
-  "application_version": "0.0.6",
+  "version": "0.0.7",
+  "application_version": "0.0.7",
   "update_engine_version": "1.0.0",
   "channel": "stable",
-  "minimum_supported_version": "0.0.4",
+  "minimum_supported_version": "0.0.6",
   "release_series": "v0",
   "release_generation": 2,
   "released_at": "2026-10-20",
   "changelog": [
-    "Quiet expected connectivity interruptions during desktop delta handoff with one restart progress notice.",
-    "Pause overlapping progress polls and show genuine install, server and restart-timeout errors immediately.",
-    "No business logic, schema, printing key or Electron shell changes."
+    "Signed delta acceptance from notification-safe updater0.0.6.",
+    "Release metadata only; no business-data, schema or desktop shell changes."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
   "release_type": "delta",
   "delta_baseline_tags": [
-    "v0.0.4",
-    "v0.0.5"
+    "v0.0.6"
   ]
 }
