@@ -76,9 +76,22 @@ function Remove-PosOwnedPrintingTrust {
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($cert.RawData))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
         if ($owner.rootSha256 -ne $hash) { throw 'QZ ownership certificate does not match its receipt' }
-        foreach ($store in @('Cert:\CurrentUser\Root', 'Cert:\LocalMachine\Root')) {
-            $entry = Join-Path $store $cert.Thumbprint
-            if (Test-Path -LiteralPath $entry) { Remove-Item -LiteralPath $entry -Force }
+        # Do not depend on the PowerShell Cert: provider. Windows PowerShell
+        # launched from a PS7/NSIS environment can fail its module autoload
+        # with duplicate extended type data, leaving that drive unavailable.
+        foreach ($location in @('CurrentUser','LocalMachine')) {
+            $trustStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', [Security.Cryptography.X509Certificates.StoreLocation]$location)
+            try {
+                $trustStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                $trustedCertificates = $trustStore.Certificates.Find([Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $cert.Thumbprint, $false)
+                $trustStore.Close()
+                if ($trustedCertificates.Count) {
+                    $trustStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                    foreach ($trusted in $trustStore.Certificates.Find([Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $cert.Thumbprint, $false)) {
+                        $trustStore.Remove($trusted)
+                    }
+                }
+            } finally { $trustStore.Close(); $trustStore.Dispose() }
         }
         $cert.Dispose()
         foreach ($file in $owner.files) {
