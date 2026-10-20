@@ -52,6 +52,7 @@ function Uninstall-Pos {
         foreach ($store in @('Cert:\CurrentUser\Root','Cert:\LocalMachine\Root')) {
             if (Test-Path -LiteralPath (Join-Path $store $printingTrust.Thumbprint)) { throw 'Uninstall retained the owned printing root certificate' }
         }
+        if (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\EnterpriseCertificates\Root\Certificates\$($printingTrust.Thumbprint)") { throw 'Uninstall retained the owned Enterprise printing root certificate' }
         if (-not (Test-Path -LiteralPath $printingTrust.UnrelatedFile)) { throw 'Uninstall deleted unrelated shared QZ data' }
     }
 }
@@ -71,6 +72,7 @@ $ownership = Get-Content -LiteralPath $receipts[0] -Raw | ConvertFrom-Json
 $qzRoot = Join-Path $env:PROGRAMDATA 'qz'
 $rootCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Join-Path $qzRoot 'ssl/root-ca.crt'))
 $printingTrust = @{ Thumbprint=$rootCert.Thumbprint; Files=@($ownership.files | ForEach-Object { Join-Path $qzRoot $_.path }); UnrelatedFile=(Join-Path $qzRoot 'unrelated-acceptance.txt') }
+if (-not (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\EnterpriseCertificates\Root\Certificates\$($printingTrust.Thumbprint)")) { throw 'Printing root was not installed in the expected Enterprise trust store' }
 $rootCert.Dispose()
 Set-Content -LiteralPath $printingTrust.UnrelatedFile -Value 'unrelated shared data must survive'
 $sentinel = Join-Path $env:PROGRAMDATA 'POS System/acceptance-preserve.txt'
@@ -92,6 +94,7 @@ if ($receipt.Count -ne 1) { throw 'Reinstall did not record its new printing tru
 $ownership = Get-Content -LiteralPath $receipt[0] -Raw | ConvertFrom-Json
 $rootCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Join-Path $qzRoot 'ssl/root-ca.crt'))
 $printingTrust = @{Thumbprint=$rootCert.Thumbprint;Files=@($ownership.files | ForEach-Object { Join-Path $qzRoot $_.path });UnrelatedFile=(Join-Path $qzRoot 'unrelated-acceptance.txt')}
+if (-not (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\EnterpriseCertificates\Root\Certificates\$($printingTrust.Thumbprint)")) { throw 'Reinstalled printing root is missing from Enterprise trust' }
 $rootCert.Dispose()
 Set-Content -LiteralPath $printingTrust.UnrelatedFile -Value 'keep this shared fixture too'
 $first = Get-Content (Join-Path $evidence 'first-install.json') -Raw | ConvertFrom-Json

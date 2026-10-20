@@ -1,0 +1,56 @@
+name: Recheck verified Setup lifecycle
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Windows Setup build to recheck without rebuilding its bytes
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bind the installer to unchanged product source
+        uses: actions/github-script@v7
+        env:
+          CANDIDATE_RUN: ${{ inputs.run_id }}
+        with:
+          script: |
+            if(!/^\d+$/.test(process.env.CANDIDATE_RUN))throw Error('Invalid run');
+            const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:Number(process.env.CANDIDATE_RUN)});
+            if(run.conclusion!=='success'||run.path!=='.github/workflows/windows-setup.yml')throw Error('Expected successful Setup validation');
+            await exec.exec('git',['diff','--exit-code',run.head_sha,'HEAD','--','electron','build','version.json','package.json','package-lock.json','frontend','backend','database','portable','scripts/desktop-runtime.json']);
+            core.exportVariable('CANDIDATE_SHA',run.head_sha);
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-setup
+          path: dist-electron
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Check archived installer hashes
+        shell: pwsh
+        run: |
+          foreach($line in Get-Content dist-electron/SHA256SUMS.txt){
+            if($line -notmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$'){throw 'Invalid checksum line'}
+            if((Get-FileHash -LiteralPath (Join-Path dist-electron $Matches[2]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1]){throw 'Installer artifact hash mismatch'}
+          }
+      - name: Verify actual installer and physical Windows certificate stores
+        shell: pwsh
+        run: ./scripts/verify-installer-lifecycle.ps1
+      - name: Save acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-acceptance-recheck
+          path: ${{ runner.temp }}/pos-installer-evidence
+          if-no-files-found: ignore
+          retention-days: 14
