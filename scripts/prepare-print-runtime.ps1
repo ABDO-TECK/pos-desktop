@@ -2,6 +2,7 @@
 param([string] $SevenZip = '7z', [string] $ArchivePath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $printing = (Get-Content (Join-Path $PSScriptRoot 'desktop-runtime.json') -Raw | ConvertFrom-Json).printing
 function Get-ArchiveSha256([string] $Path) {

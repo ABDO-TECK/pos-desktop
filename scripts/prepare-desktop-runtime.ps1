@@ -5,6 +5,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $ManifestPath = Join-Path $RepoRoot 'scripts/desktop-runtime.json'
