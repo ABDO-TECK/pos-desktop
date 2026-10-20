@@ -12,7 +12,11 @@ function deploymentFiles(string $root): array
     }
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dist, FilesystemIterator::SKIP_DOTS)) as $file) {
         if ($file->isLink()) throw new RuntimeException('Deployment symlinks are not supported.');
-        if ($file->isFile()) $paths[] = substr(str_replace('\\', '/', $file->getPathname()), strlen($root) + 1);
+        // QZ creates a different public printing certificate on each device
+        // after installation. It is runtime state, never a release artifact.
+        if ($file->isFile() && $file->getFilename() !== 'digital-certificate.txt') {
+            $paths[] = substr(str_replace('\\', '/', $file->getPathname()), strlen($root) + 1);
+        }
     }
     sort($paths, SORT_STRING);
     $files = [];
