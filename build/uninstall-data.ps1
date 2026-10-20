@@ -63,6 +63,12 @@ function Remove-PosOwnedPrintingTrust {
         if (-not (Test-Path -LiteralPath $receipt) -or -not (Test-Path -LiteralPath $rootCert)) { continue }
         Assert-PosTreeSafe $qzRoot
         $owner = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+        if ($owner.PSObject.Properties.Name -notcontains 'files') { throw 'QZ ownership receipt has no file inventory' }
+        foreach ($file in $owner.files) {
+            if ([IO.Path]::IsPathRooted($file.path) -or $file.path -match '(^|[\\/])\.\.([\\/]|$)|:' -or $file.sha256 -notmatch '^[a-f0-9]{64}$') { throw 'Unsafe QZ ownership receipt' }
+            $absolute = [IO.Path]::GetFullPath((Join-Path $qzRoot $file.path))
+            if (-not $absolute.StartsWith($qzRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'QZ file is outside its shared directory' }
+        }
         $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($rootCert)
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($cert.RawData))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
@@ -72,7 +78,19 @@ function Remove-PosOwnedPrintingTrust {
             if (Test-Path -LiteralPath $entry) { Remove-Item -LiteralPath $entry -Force }
         }
         $cert.Dispose()
-        Remove-Item -LiteralPath $qzRoot -Recurse -Force
+        foreach ($file in $owner.files) {
+            $absolute = Join-Path $qzRoot $file.path
+            if (Test-Path -LiteralPath $absolute) {
+                if ((Get-FileHash -LiteralPath $absolute -Algorithm SHA256).Hash.ToLowerInvariant() -eq $file.sha256) {
+                    Remove-Item -LiteralPath $absolute -Force
+                } else { Write-Warning "Retained changed shared QZ file: $($file.path)" }
+            }
+        }
+        # Remove only empty directories, so later additions from other apps survive.
+        Get-ChildItem -LiteralPath $qzRoot -Directory -Recurse -Force | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+            if (-not @(Get-ChildItem -LiteralPath $_.FullName -Force).Count) { [IO.Directory]::Delete($_.FullName) }
+        }
+        if (-not @(Get-ChildItem -LiteralPath $qzRoot -Force).Count) { [IO.Directory]::Delete($qzRoot) }
         return
     }
 }

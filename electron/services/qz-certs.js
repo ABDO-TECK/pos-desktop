@@ -7,6 +7,15 @@ const sudo = require('@vscode/sudo-prompt');
 
 const CERTS_DIR_NAME = 'qz-certs';
 
+function listQzFiles(root, directory = root) {
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const file = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) throw new Error('QZ shared directory contains a symbolic link');
+    return entry.isDirectory() ? listQzFiles(root, file) : [path.relative(root, file).replace(/\\/g, '/')];
+  });
+}
+
 /**
  * يُرجع مسار مجلد الشهادات في userData.
  * مثال: C:\Users\abdmo\AppData\Roaming\pos-desktop\qz-certs\
@@ -116,6 +125,8 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
   return new Promise((resolve) => {
     const sharedRootCertificate = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'qz', 'ssl', 'root-ca.crt');
     const createdByThisInstall = !fs.existsSync(sharedRootCertificate);
+    const sharedDirectory = path.dirname(path.dirname(sharedRootCertificate));
+    const existingSharedFiles = new Set(createdByThisInstall ? listQzFiles(sharedDirectory) : []);
     // بناء المسارات
     const javaWinPath = javaPath.replace(/\//g, '\\');
     const qzTrayJarPath = path.join(qzTrayDir, 'qz-tray.jar').replace(/\//g, '\\');
@@ -145,6 +156,10 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
           const certificate = new crypto.X509Certificate(fs.readFileSync(sharedRootCertificate));
           fs.writeFileSync(path.join(getCertsDir(), '..', 'qz-shared-install.json'), JSON.stringify({
             rootSha256: certificate.fingerprint256.replace(/:/g, '').toLowerCase(),
+            files: listQzFiles(sharedDirectory).filter(file => !existingSharedFiles.has(file)).map(file => ({
+              path: file,
+              sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(sharedDirectory, file))).digest('hex'),
+            })),
           }));
         }
         console.log('[QZ Certs] SSL cert installed silently successfully.');
