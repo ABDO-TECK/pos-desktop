@@ -28,6 +28,9 @@ jobs:
             if(!/^\d+$/.test(process.env.CANDIDATE_RUN))throw Error('Invalid run');
             const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:Number(process.env.CANDIDATE_RUN)});
             if(run.conclusion!=='success'||run.path!=='.github/workflows/windows-setup.yml')throw Error('Expected successful Setup validation');
+            const changes=await exec.getExecOutput('git',['diff','--name-only',run.head_sha,'HEAD']);
+            const allowed=new Set(['.github/workflows/installer-acceptance.yml','scripts/verify-installer-lifecycle.ps1','scripts/verify-first-run-ui.mjs','scripts/verify-executable-icons.mjs']);
+            if(changes.stdout.trim().split(/\r?\n/).filter(Boolean).some(path=>!allowed.has(path)))throw Error('Only installer acceptance checks may differ from the artifact source');
             await exec.exec('git',['diff','--exit-code',run.head_sha,'HEAD','--','electron','build','version.json','package.json','package-lock.json','frontend','backend','database','portable','scripts/desktop-runtime.json']);
             core.exportVariable('CANDIDATE_SHA',run.head_sha);
       - uses: actions/download-artifact@v4
