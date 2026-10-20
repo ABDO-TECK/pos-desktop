@@ -1,21 +1,22 @@
 {
-  "version": "0.0.3-beta.2",
-  "application_version": "0.0.3-beta.2",
+  "version": "0.0.3",
+  "application_version": "0.0.3",
   "update_engine_version": "1.0.0",
-  "channel": "beta",
+  "channel": "stable",
   "minimum_supported_version": "0.0.2",
   "release_series": "v0",
   "release_generation": 2,
   "released_at": "2026-10-20",
   "changelog": [
-    "Signed GitHub delta delivery acceptance from v0.0.2.",
-    "Exclude per-device printing certificates from release inventories; preserve local certificates and unchanged files.",
-    "No sales logic or database schema changes."
+    "Signed GitHub delta delivery for stable and beta-to-stable promotion.",
+    "Preserve unchanged deployed files, business data and device-specific printing certificates.",
+    "Release metadata update only; no sales logic or database schema changes."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
   "release_type": "delta",
   "delta_baseline_tags": [
-    "v0.0.2"
+    "v0.0.2",
+    "v0.0.3-beta.2"
   ]
 }
