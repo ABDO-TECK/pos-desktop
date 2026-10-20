@@ -108,8 +108,9 @@ export const updateSettings = (data: Partial<AppSettings>) => api.post<ApiRespon
 
 // Updates
 type UpdateRequestConfig = AxiosRequestConfig & { hideGlobalError?: boolean }
-export const getUpdateStatus = (deltaCapable = false) => api.get<ApiResponse<UpdateStatusData>>('/updates/status', {
-  headers: { 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
+export const getUpdateStatus = (deltaCapable = false, config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateStatusData>>('/updates/status', {
+  ...config,
+  headers: { ...config?.headers, 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 })
 export const checkUpdate = (deltaCapable = false, config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateCheckResult>>('/updates/check', {
   ...config,
@@ -122,11 +123,12 @@ export const applyUpdate = (force = false, deltaCapable = false) => api.post<Api
   // Allow the server's bounded four-minute signed update and recovery snapshot
   // to finish before handing the verified files to Electron.
   timeout: 300_000,
+  hideGlobalError: true,
   headers: { 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
-})
-export const getUpdateHistory = () => api.get<ApiResponse<UpdateHistoryRecord[]>>('/updates/history')
+} as UpdateRequestConfig)
+export const getUpdateHistory = (config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateHistoryRecord[]>>('/updates/history', config)
 export const rollbackUpdate = (snapshotPath?: string) => api.post<ApiResponse<UpdateRollbackResult>>('/updates/rollback', snapshotPath ? { snapshot_path: snapshotPath } : null)
-export const getUpdateSnapshots = () => api.get<ApiResponse<UpdateSnapshot[]>>('/updates/snapshots')
+export const getUpdateSnapshots = (config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateSnapshot[]>>('/updates/snapshots', config)
 export const getUpdateJob = (id: number) => api.get<ApiResponse<UpdateJobResult>>(`/update/jobs/${id}`, { timeout: 15_000 })
 
 export const getUpdateChannel = () => api.get<ApiResponse<{ channel: string; available_channels: string[]; device_id: string }>>('/updates/channel')
@@ -154,9 +156,9 @@ export const purgeTelemetry = (days = 90) => api.post<ApiResponse<{ deleted_coun
 export const sendTelemetryEvent = (data: Record<string, unknown>) => api.post<ApiResponse<{ recorded: boolean }>>('/telemetry/updates', data)
 
 // Self-Healing & Recovery
-export const diagnoseUpdateRecovery = () => api.get<ApiResponse<RecoveryDiagnosisData>>('/admin/updates/recovery/diagnose')
+export const diagnoseUpdateRecovery = (config?: UpdateRequestConfig) => api.get<ApiResponse<RecoveryDiagnosisData>>('/admin/updates/recovery/diagnose', config)
 export const executeRecoveryAction = (action: string, snapshotPath?: string) => api.post<ApiResponse<RecoveryActionResult>>('/admin/updates/recovery/execute', { action, snapshot_path: snapshotPath })
-export const getRecoveryAuditLogs = (limit = 50) => api.get<ApiResponse<{ logs: RecoveryAuditEntry[]; total: number }>>('/admin/updates/recovery/audit', { params: { limit } })
+export const getRecoveryAuditLogs = (limit = 50, config?: UpdateRequestConfig) => api.get<ApiResponse<{ logs: RecoveryAuditEntry[]; total: number }>>('/admin/updates/recovery/audit', { ...config, params: { ...config?.params, limit } })
 export const runPostUpdateHealthCheck = (snapshotPath?: string) => api.post<ApiResponse<RecoveryHealthCheckResult>>('/admin/updates/recovery/health-check', { snapshot_path: snapshotPath })
 
 

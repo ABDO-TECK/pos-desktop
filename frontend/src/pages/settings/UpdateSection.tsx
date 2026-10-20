@@ -35,6 +35,7 @@ import useUpdateStore from '../../store/updateStore'
 import useCartStore from '../../store/cartStore'
 import { useConfirmStore } from '../../store/confirmStore'
 import SectionTitle from '../../components/common/SectionTitle'
+import { isUpdateRestarting, withUpdateRestart } from '../../utils/updateRestart'
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
   try {
@@ -94,11 +95,11 @@ export default function UpdateSection() {
   const loadStatusAndHistory = useCallback(async () => {
     try {
       const [statusRes, histRes, snapRes, diagRes, auditRes] = await Promise.allSettled([
-        getUpdateStatus(await hasDeltaHandoffCapability()),
-        getUpdateHistory(),
-        getUpdateSnapshots(),
-        diagnoseUpdateRecovery(),
-        getRecoveryAuditLogs(20),
+        getUpdateStatus(await hasDeltaHandoffCapability(), { hideGlobalError: true }),
+        getUpdateHistory({ hideGlobalError: true }),
+        getUpdateSnapshots({ hideGlobalError: true }),
+        diagnoseUpdateRecovery({ hideGlobalError: true }),
+        getRecoveryAuditLogs(20, { hideGlobalError: true }),
       ])
 
       if (statusRes.status === 'fulfilled' && statusRes.value.data?.data) {
@@ -185,9 +186,13 @@ export default function UpdateSection() {
   useEffect(() => {
     if (!applyingUpdate) return
 
+    let polling = false
     const interval = setInterval(async () => {
+      if (polling || isUpdateRestarting()) return
+      polling = true
       try {
-        const res = await getUpdateStatus(await hasDeltaHandoffCapability())
+        const res = await getUpdateStatus(await hasDeltaHandoffCapability(), { hideGlobalError: true })
+        if (isUpdateRestarting()) return
         if (res.data?.data) {
           setUpdateStatus(res.data.data)
           const state = res.data.data.update_state?.state
@@ -202,6 +207,8 @@ export default function UpdateSection() {
         }
       } catch {
         // Continue polling
+      } finally {
+        polling = false
       }
     }, 2000)
 
@@ -278,8 +285,18 @@ export default function UpdateSection() {
       }
 
       if (data?.requires_desktop_handoff && data.handoff_version) {
-        const handoff = await window.posRuntime?.applyStagedDelta(data.handoff_version)
-        if (!handoff?.ok) throw new Error(handoff?.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+        const version = data.handoff_version
+        const restartNotice = 'pos-update-restarting'
+        toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
+        try {
+          const handoff = await withUpdateRestart(async () => {
+            if (!window.posRuntime) throw new Error('خدمة تثبيت تحديث البرنامج غير متاحة.')
+            return window.posRuntime.applyStagedDelta(version)
+          })
+          if (!handoff.ok) throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+        } finally {
+          toast.dismiss(restartNotice)
+        }
       }
 
       toast.success('🎉 تم تطبيق التحديث بنجاح! جاري تنشيط النظام...')
@@ -293,7 +310,8 @@ export default function UpdateSection() {
       const msg = errData?.message || (error instanceof Error ? error.message : 'فشل تطبيق التحديث.')
       const logs = errData?.errors?.logs || errData?.data?.logs || [error instanceof Error ? error.message : 'Update failed']
       setUpdateLogs(logs)
-      await loadStatusAndHistory()
+      // The failure notice must not wait for an unavailable PHP server.
+      void loadStatusAndHistory()
 
       if (errData?.errors?.reason_code === 'update_in_progress') {
         toast.error(msg)

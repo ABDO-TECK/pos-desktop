@@ -1,5 +1,6 @@
 import axios, { InternalAxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
 import toast from 'react-hot-toast'
+import { shouldSuppressUpdateConnectionError } from '../utils/updateRestart'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -63,6 +64,8 @@ api.interceptors.response.use(
   (res: AxiosResponse) => res,
   async (err: AxiosError) => {
     const originalRequest = err.config as InternalAxiosRequestConfig & { _retry?: boolean }
+
+    if (shouldSuppressUpdateConnectionError(err)) return Promise.reject(err)
 
     // If the request was for update check, completely skip refresh, auth redirect, localStorage clear, and reload
     const isUpdateCheck = originalRequest?.url?.includes('/update/check') || err.config?.url?.includes('/update/check');
