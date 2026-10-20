@@ -21,11 +21,12 @@ In pos-desktop-updates run Signed delta release: source_ref is the exact source 
 
 Stable devices receive stable only; beta devices can receive beta and newer stable. update_channel.json is device state and is excluded from updates. Existing explicit pos/pos-desktop update endpoint settings are normalized in new code to pos-desktop-updates without changing device files. Custom repository settings remain supported.
 
-Historical deltas are copied byte-for-byte with signatures and original version/channel metadata. Historical Setup inventories remain private local evidence; only baseline inventories needed by builds are mirrored separately in the updates repository.
+Previous demonstration delta releases were archived offline and cleared at the owner's request after validating the complete Setup. The update repository retains only the current Setup baseline inventory and publishing configuration. Publish future releases for actual features or repairs; validation runs should leave publish false. Application revisions must remain monotonic: the next unused revision after the retired demonstration tags is 0.0.10 (or 0.0.10-beta.1), based on source tag v0.0.8.
 
 ## Integrity
 
 Only changed built artifacts enter the ZIP. Explicit obsolete managed paths enter deleted_files. The installed baseline, payload hashes, release channel and RSA signature are checked. PHP is deployed as one backend/backend.phar artifact; this is file-level delta, not an internal PHAR binary patch. Unchanged files retain their bytes, timestamps and file identities. Business databases, device configuration, credentials and device printing certificates are excluded. Electron or runtime changes require a complete Setup.
 
 Run verify-release-identity.mjs, verify-release-channels.php, verify-update-channel-policy.cjs and verify-delta-flow.mjs before publishing. Acceptance must also exercise actual signed GitHub assets against an isolated packaged copy before removing prior distribution assets.
+
 
