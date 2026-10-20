@@ -11,7 +11,7 @@ Setup 0.0.1 embeds application update revision 0.0.8. package.json and both lock
 
 Run Windows Setup release on the source commit. Leave publish false to build and validate an artifact first. The verified artifact includes the installer, blockmap, latest.yml, SHA256SUMS and deployment-inventory.json. Publishing requires the matching installer tag at that commit. New full Setup versions should exceed deployed application revisions to preserve the full-updater downgrade policy.
 
-The initial replacement v0.0.1 tag is archived before reuse. Its immutable source baseline alias v0.0.8 identifies the actual revision used by delta builds. The updates repository stores an inventory-only v0.0.8 release for this baseline; it is not an installable delta.
+The initial replacement v0.0.1 tag is archived before reuse. Its immutable source baseline alias v0.0.8 identifies the actual revision used by delta builds. The updates repository stores an inventory-only baseline-v0.0.8 release for this baseline; it is not an installable delta. The non-semantic baseline-v prefix excludes build inventories from client discovery; ordinary delta inventories still use their own version tags.
 
 ## Stable and beta deltas
 
@@ -28,3 +28,4 @@ Historical deltas are copied byte-for-byte with signatures and original version/
 Only changed built artifacts enter the ZIP. Explicit obsolete managed paths enter deleted_files. The installed baseline, payload hashes, release channel and RSA signature are checked. PHP is deployed as one backend/backend.phar artifact; this is file-level delta, not an internal PHAR binary patch. Unchanged files retain their bytes, timestamps and file identities. Business databases, device configuration, credentials and device printing certificates are excluded. Electron or runtime changes require a complete Setup.
 
 Run verify-release-identity.mjs, verify-release-channels.php, verify-update-channel-policy.cjs and verify-delta-flow.mjs before publishing. Acceptance must also exercise actual signed GitHub assets against an isolated packaged copy before removing prior distribution assets.
+

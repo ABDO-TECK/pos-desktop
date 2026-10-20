@@ -11,7 +11,10 @@ foreach ($baselineTag in $version.delta_baseline_tags) {
     $baselineVersion = $baselineTag.Substring(1)
     $work = Join-Path $env:RUNNER_TEMP ('delta-' + $baselineVersion)
     New-Item -ItemType Directory -Path $work -Force | Out-Null
-    gh release download $baselineTag --repo $env:GITHUB_REPOSITORY --pattern deployment-inventory.json --dir $work
+    $inventoryReleaseTag = "baseline-$baselineTag"
+    gh release view $inventoryReleaseTag --repo $env:GITHUB_REPOSITORY --json tagName > $null 2>&1
+    if ($LASTEXITCODE) { $inventoryReleaseTag = $baselineTag }
+    gh release download $inventoryReleaseTag --repo $env:GITHUB_REPOSITORY --pattern deployment-inventory.json --dir $work
     if ($LASTEXITCODE) { throw 'Baseline release has no deployment inventory; install/publish a new Setup baseline.' }
     $inventory = Join-Path $work 'deployment-inventory.json'
     $output = Join-Path $work 'package'
