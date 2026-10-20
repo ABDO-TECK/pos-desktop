@@ -119,9 +119,9 @@ export const applyUpdate = (force = false, deltaCapable = false) => api.post<Api
   ...(force ? { force: true } : {}),
   delta_capable: deltaCapable,
 }, {
-  // Allow the server's bounded ten-minute signed update and recovery snapshot
+  // Allow the server's bounded four-minute signed update and recovery snapshot
   // to finish before handing the verified files to Electron.
-  timeout: 660_000,
+  timeout: 300_000,
   headers: { 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 })
 export const getUpdateHistory = () => api.get<ApiResponse<UpdateHistoryRecord[]>>('/updates/history')
