@@ -76,10 +76,19 @@ function Remove-PosOwnedPrintingTrust {
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($cert.RawData))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
         if ($owner.rootSha256 -ne $hash) { throw 'QZ ownership certificate does not match its receipt' }
+        # QZ installed this exact thumbprint in the Enterprise physical root
+        # store. Remove it there first, avoiding inherited/read-only entries
+        # in the logical CurrentUser Root collection.
+        $enterpriseKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\EnterpriseCertificates\Root\Certificates\' + $cert.Thumbprint)
+        if ($enterpriseKey) {
+            $enterpriseKey.Dispose()
+            & (Join-Path $env:WINDIR 'System32/certutil.exe') -enterprise -delstore Root $cert.Thumbprint | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to remove the recorded POS Enterprise printing trust' }
+        }
         # Do not depend on the PowerShell Cert: provider. Windows PowerShell
         # launched from a PS7/NSIS environment can fail its module autoload
         # with duplicate extended type data, leaving that drive unavailable.
-        foreach ($location in @('CurrentUser','LocalMachine')) {
+        foreach ($location in @('LocalMachine','CurrentUser')) {
             $trustStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', [Security.Cryptography.X509Certificates.StoreLocation]$location)
             try {
                 $trustStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
