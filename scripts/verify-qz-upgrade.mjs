@@ -16,10 +16,15 @@ try {
   const saved = path.join(certs, 'qz-tray.properties'), deployed = path.join(runtime, 'qz-tray.properties');
   const properties = 'fixture SSL configuration, not real credentials';
   let elevations = 0;
+  let denyRuntimeWrite = false;
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync('electron/services/qz-certs.js', 'utf8'), {
-    module, console: { log() {}, warn() {}, error() {} }, process: { env: { PROGRAMDATA: shared } },
+    module, Buffer, console: { log() {}, warn() {}, error() {} }, process: { env: { PROGRAMDATA: shared } },
     require: id => id === 'electron' ? { app: { getPath: () => user } }
+      : id === 'fs' ? { ...fs, copyFileSync(source, destination) {
+        if (denyRuntimeWrite && destination === deployed) throw Object.assign(new Error('Program Files access denied'), { code: 'EACCES' });
+        fs.copyFileSync(source, destination);
+      } }
       : id === '../utils/paths' ? { getBackendDir: () => path.join(lab, 'backend') }
       : id === '@vscode/sudo-prompt' ? { exec(command, options, callback) {
         elevations++;
@@ -32,12 +37,18 @@ try {
   await ensure();
   assert.equal(fs.readFileSync(deployed, 'utf8'), properties, 'Setup upgrade must restore the existing SSL configuration');
   assert.equal(elevations, 0, 'Restoring preserved configuration must not regenerate certificates');
+  fs.unlinkSync(deployed);
+  denyRuntimeWrite = true;
+  await ensure();
+  assert.equal(fs.readFileSync(deployed, 'utf8'), properties, 'Machine-wide configuration restore must handle a protected installation directory');
+  assert.equal(elevations, 1, 'Only the protected configuration copy should request elevation');
+  denyRuntimeWrite = false;
   fs.unlinkSync(saved);
   await ensure();
   assert.equal(fs.readFileSync(saved, 'utf8'), properties, 'Existing runtime configuration must be preserved for the next Setup');
   fs.unlinkSync(saved); fs.unlinkSync(deployed);
   await ensure();
-  assert.equal(elevations, 1, 'An old installed flag must not hide missing SSL configuration');
+  assert.equal(elevations, 2, 'An old installed flag must not hide missing SSL configuration');
   assert.equal(fs.readFileSync(saved, 'utf8'), properties, 'Successful SSL setup must persist its configuration outside the installation');
   assert.equal(fs.readFileSync(path.join(shared, 'qz/ssl/root-ca.crt'), 'utf8'), 'preexisting external fixture');
   console.log('PASS: QZ SSL settings survive Setup replacement; missing configuration is repaired without deleting shared data');

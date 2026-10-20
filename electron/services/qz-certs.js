@@ -37,7 +37,7 @@ function getQZPrivateKeyPath() {
   return path.join(getCertsDir(), 'private-key.pem');
 }
 
-function preserveSSLProperties(qzTrayDir) {
+async function preserveSSLProperties(qzTrayDir) {
   const runtimeProperties = path.join(qzTrayDir, 'qz-tray.properties');
   const savedProperties = path.join(getCertsDir(), 'qz-tray.properties');
   // Setup replaces the runtime directory. Keep QZ's existing keystore
@@ -45,7 +45,21 @@ function preserveSSLProperties(qzTrayDir) {
   if (fs.existsSync(runtimeProperties)) {
     fs.writeFileSync(savedProperties, fs.readFileSync(runtimeProperties), { mode: 0o600 });
   } else if (fs.existsSync(savedProperties)) {
-    fs.copyFileSync(savedProperties, runtimeProperties);
+    try {
+      fs.copyFileSync(savedProperties, runtimeProperties);
+    } catch (error) {
+      if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+      // A machine-wide Setup runs elevated, but the app can run as a
+      // standard user. Elevate only this exact configuration-file copy.
+      const quote = value => "'" + value.replace(/'/g, "''") + "'";
+      const script = `$ErrorActionPreference='Stop'; [IO.File]::Copy(${quote(savedProperties)}, ${quote(runtimeProperties)}, $true)`;
+      const encoded = Buffer.from(script, 'utf16le').toString('base64');
+      const powershell = path.join(process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      await new Promise((resolve, reject) => sudo.exec(
+        `"${powershell}" -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`,
+        { name: 'POS System Installer' }, error => error ? reject(error) : resolve(),
+      ));
+    }
   }
   return fs.existsSync(runtimeProperties);
 }
@@ -67,7 +81,7 @@ async function ensureQZCerts(qzTrayDir, javaPath) {
     _copyOverrideCert(certPath, qzTrayDir);
     _publishCertificateForBrowser(certPath);
     
-    const hasSSLProperties = preserveSSLProperties(qzTrayDir);
+    const hasSSLProperties = await preserveSSLProperties(qzTrayDir);
     if (!fs.existsSync(flagPath) || !hasSSLProperties) {
       console.log('[QZ Certs] WSS SSL not installed silently. Installing now via QZ Tray certgen...');
       await installSSLcertSilently(qzTrayDir, javaPath, flagPath);
@@ -136,7 +150,7 @@ async function ensureQZCerts(qzTrayDir, javaPath) {
  * دالة التثبيت الصامت باستخدام صلاحيات المسؤول لتشغيل أمر certgen الخاص بـ QZ Tray
  */
 function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const sharedRootCertificate = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'qz', 'ssl', 'root-ca.crt');
     const createdByThisInstall = !fs.existsSync(sharedRootCertificate);
     const sharedDirectory = path.dirname(path.dirname(sharedRootCertificate));
@@ -158,13 +172,13 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
     };
 
     console.log('[QZ Certs] Requesting elevation for QZ Tray silent SSL install...');
-    sudo.exec(command, options, (error, stdout, stderr) => {
+    sudo.exec(command, options, async (error, stdout, stderr) => {
       if (error) {
         console.error('[QZ Certs] Failed to install SSL silently (User might have cancelled UAC):', error.message);
         try { fs.writeFileSync(flagPath, 'skipped', 'utf-8'); } catch {}
         resolve(false);
       } else {
-        preserveSSLProperties(qzTrayDir);
+        try { await preserveSSLProperties(qzTrayDir); } catch (error) { reject(error); return; }
         // Record ownership only when POS created the shared QZ trust. An
         // independent QZ installation must survive removal of POS.
         if (createdByThisInstall && fs.existsSync(sharedRootCertificate)) {
