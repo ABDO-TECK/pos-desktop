@@ -73,6 +73,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-phar-runtime.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-update-execution-budget.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-http-timeout.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-release-channels.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-update-channel-policy.cjs

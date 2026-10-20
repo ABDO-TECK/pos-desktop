@@ -80,6 +80,10 @@ jobs:
       - name: Verify stable and beta delta flows in isolated deployments
         shell: pwsh
         run: |
+          php scripts/verify-update-execution-budget.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-http-timeout.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-release-channels.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-update-channel-policy.cjs

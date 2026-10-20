@@ -881,7 +881,14 @@ class UpdateService
             );
         }
 
+        $requestTimeLimit = (int) ini_get('max_execution_time');
         try {
+            // Windows counts download and filesystem I/O against PHP's HTTP
+            // execution limit. Keep the signed update operation bounded while
+            // allowing its download, verification and recovery snapshot to finish.
+            if ($requestTimeLimit > 0 && $requestTimeLimit < 600) {
+                set_time_limit(600);
+            }
             $lock->heartbeat('starting');
             $this->deltaUpdateService->setUpdateState('applying', [
                 'operation' => 'backend_delta_apply',
@@ -907,6 +914,9 @@ class UpdateService
             return $result;
         } finally {
             $lock->release();
+            if ($requestTimeLimit > 0 && $requestTimeLimit < 600) {
+                set_time_limit($requestTimeLimit);
+            }
         }
     }
 
