@@ -60,7 +60,7 @@ function Remove-PosOwnedPrintingTrust {
     $rootCert = Join-Path $qzRoot 'ssl/root-ca.crt'
     foreach ($target in $Targets) {
         $receipt = Join-Path $target 'qz-shared-install.json'
-        if (-not (Test-Path -LiteralPath $receipt) -or -not (Test-Path -LiteralPath $rootCert)) { continue }
+        if (-not (Test-Path -LiteralPath $receipt)) { continue }
         Assert-PosTreeSafe $qzRoot
         $owner = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
         if ($owner.PSObject.Properties.Name -notcontains 'files') { throw 'QZ ownership receipt has no file inventory' }
@@ -69,10 +69,13 @@ function Remove-PosOwnedPrintingTrust {
             $absolute = [IO.Path]::GetFullPath((Join-Path $qzRoot $file.path))
             if (-not $absolute.StartsWith($qzRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'QZ file is outside its shared directory' }
         }
-        $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($rootCert)
+        # Use the original public certificate from the ownership receipt. A
+        # later consumer may rotate/delete the shared file; that must not
+        # block removal of POS or delete the replacement certificate.
+        $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($owner.rootCertificateBase64))
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = ([BitConverter]::ToString($sha.ComputeHash($cert.RawData))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
-        if ($owner.rootSha256 -ne $hash) { throw 'QZ trust changed since POS created it; refusing to remove shared trust' }
+        if ($owner.rootSha256 -ne $hash) { throw 'QZ ownership certificate does not match its receipt' }
         foreach ($store in @('Cert:\CurrentUser\Root', 'Cert:\LocalMachine\Root')) {
             $entry = Join-Path $store $cert.Thumbprint
             if (Test-Path -LiteralPath $entry) { Remove-Item -LiteralPath $entry -Force }
@@ -87,10 +90,12 @@ function Remove-PosOwnedPrintingTrust {
             }
         }
         # Remove only empty directories, so later additions from other apps survive.
-        Get-ChildItem -LiteralPath $qzRoot -Directory -Recurse -Force | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
-            if (-not @(Get-ChildItem -LiteralPath $_.FullName -Force).Count) { [IO.Directory]::Delete($_.FullName) }
+        if (Test-Path -LiteralPath $qzRoot) {
+            Get-ChildItem -LiteralPath $qzRoot -Directory -Recurse -Force | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+                if (-not @(Get-ChildItem -LiteralPath $_.FullName -Force).Count) { [IO.Directory]::Delete($_.FullName) }
+            }
+            if (-not @(Get-ChildItem -LiteralPath $qzRoot -Force).Count) { [IO.Directory]::Delete($qzRoot) }
         }
-        if (-not @(Get-ChildItem -LiteralPath $qzRoot -Force).Count) { [IO.Directory]::Delete($qzRoot) }
         return
     }
 }

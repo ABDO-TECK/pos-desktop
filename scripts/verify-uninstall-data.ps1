@@ -51,13 +51,16 @@ try {
         $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Join-Path $qz 'ssl/root-ca.crt'))
         $sha = [Security.Cryptography.SHA256]::Create()
         $fingerprint = ([BitConverter]::ToString($sha.ComputeHash($cert.RawData))).Replace('-', '').ToLowerInvariant()
+        $originalCertificate = [Convert]::ToBase64String($cert.RawData)
         $sha.Dispose(); $cert.Dispose()
         $receiptRoot = Join-Path $roots.Roaming 'POS Desktop'
         New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
         $ownedFiles = @('ssl/root-ca.crt','ssl/owned.key') | ForEach-Object { @{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $qz $_) -Algorithm SHA256).Hash.ToLowerInvariant()} }
         $ownedFiles += @{path='ssl/changed.key';sha256=('0' * 64)}
-        @{rootSha256=$fingerprint;files=$ownedFiles} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $receiptRoot 'qz-shared-install.json')
+        @{rootSha256=$fingerprint;rootCertificateBase64=$originalCertificate;files=$ownedFiles} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $receiptRoot 'qz-shared-install.json')
+        Set-Content -LiteralPath (Join-Path $qz 'ssl/root-ca.crt') -Value 'rotated by another application'
         Remove-PosOwnedPrintingTrust -Targets @($receiptRoot)
+        if (-not (Test-Path -LiteralPath (Join-Path $qz 'ssl/root-ca.crt'))) { throw 'FAIL: QZ cleanup deleted a rotated shared root' }
         if (-not (Test-Path -LiteralPath (Join-Path $qz 'unrelated.txt'))) { throw 'FAIL: QZ cleanup deleted an unrecorded shared file' }
         if (-not (Test-Path -LiteralPath (Join-Path $qz 'ssl/changed.key'))) { throw 'FAIL: QZ cleanup deleted a changed shared file' }
         if (Test-Path -LiteralPath (Join-Path $qz 'ssl/owned.key')) { throw 'FAIL: QZ cleanup retained an unchanged owned file' }

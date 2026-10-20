@@ -156,6 +156,7 @@ function installSSLcertSilently(qzTrayDir, javaPath, flagPath) {
           const certificate = new crypto.X509Certificate(fs.readFileSync(sharedRootCertificate));
           fs.writeFileSync(path.join(getCertsDir(), '..', 'qz-shared-install.json'), JSON.stringify({
             rootSha256: certificate.fingerprint256.replace(/:/g, '').toLowerCase(),
+            rootCertificateBase64: certificate.raw.toString('base64'),
             files: listQzFiles(sharedDirectory).filter(file => !existingSharedFiles.has(file)).map(file => ({
               path: file,
               sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(sharedDirectory, file))).digest('hex'),
