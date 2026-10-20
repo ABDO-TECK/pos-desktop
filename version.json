@@ -1,18 +1,19 @@
 {
-  "version": "0.0.4",
-  "application_version": "0.0.4",
+  "version": "0.0.8",
+  "application_version": "0.0.8",
   "update_engine_version": "1.0.0",
   "channel": "stable",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
-  "release_generation": 2,
+  "release_generation": 3,
   "released_at": "2026-10-20",
   "changelog": [
-    "Fix GUI update execution budget on Windows for signed downloads, verification and recovery snapshots.",
-    "Keep the frontend request open until desktop handoff; restore normal PHP request limits afterwards.",
-    "No sales logic, schema, business data or printing-key changes."
+    "Current complete Setup 0.0.1 with application revision 0.0.8.",
+    "Signed stable and beta deltas are delivered by pos-desktop-updates.",
+    "Includes bounded restart notifications, Windows update timeouts and device certificate preservation."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
-  "release_type": "setup"
+  "release_type": "setup",
+  "installer_version": "0.0.1"
 }

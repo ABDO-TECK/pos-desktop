@@ -2,7 +2,7 @@
 param([Parameter(Mandatory)][string] $Tag, [ValidateSet('stable','beta','rc')][string] $Channel)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if (-not $env:GITHUB_ACTIONS -or $env:GITHUB_REPOSITORY -ne 'ABDO-TECK/pos-desktop') { throw 'This publisher runs only in the project GitHub Actions repository.' }
+if (-not $env:GITHUB_ACTIONS -or $env:GITHUB_REPOSITORY -ne 'ABDO-TECK/pos-desktop-updates') { throw 'This publisher runs only in the project GitHub Actions repository.' }
 if (-not $env:UPDATE_PRIVATE_KEY) { throw 'UPDATE_PRIVATE_KEY repository secret is required.' }
 $version = Get-Content version.json -Raw | ConvertFrom-Json
 New-Item -ItemType Directory -Path release-assets -Force | Out-Null

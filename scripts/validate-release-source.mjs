@@ -166,7 +166,7 @@ const tagMatch = /^v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?)$/.exec(tag);
 if (!tagMatch) {
   fail(`tag '${tag}' is not a supported vX.Y.Z tag`);
 }
-if (tagMatch[1] !== targetVersion) {
+if (tagMatch[1] !== (mode === 'full' ? (versionData.installer_version || targetVersion) : targetVersion)) {
   fail(`tag version '${tagMatch[1]}' does not match version.json '${targetVersion}'`);
 }
 
@@ -199,7 +199,7 @@ if (mode === 'delta') {
   }
   // The runtime package remains at its last Setup version. A beta baseline may
   // already carry newer delta artifacts; the inventory verifies the shell.
-} else if (rootPackage.version !== targetVersion) {
+} else if (rootPackage.version !== (versionData.installer_version || targetVersion)) {
   fail(`full release package version '${rootPackage.version}' must match target '${targetVersion}'`);
 }
 

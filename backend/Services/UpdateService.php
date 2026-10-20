@@ -61,9 +61,9 @@ class UpdateService
         $this->clientChannelFile = rtrim(str_replace('\\', '/', $storageDir), '/') . '/update_channel.json';
         $this->migrationSafetyBackupService = $migrationSafetyBackupService
             ?? new MigrationSafetyBackupService($backupService, $this->deltaUpdateService->getStorageDir());
-        $this->repoUrl          = EnvLoader::get('UPDATE_SERVER_URL', 'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/latest');
+        $this->repoUrl          = EnvLoader::get('UPDATE_SERVER_URL', 'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/latest');
         if (preg_match('#^https://api\.github\.com/repos/ABDO-TECK/(?:pos|pos-desktop)/(?:contents/version\.json|releases)(?:[/?]|$)#', $this->repoUrl)) {
-            $this->repoUrl = 'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/latest';
+            $this->repoUrl = 'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/latest';
         }
 
 

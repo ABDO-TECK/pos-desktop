@@ -4,7 +4,7 @@
 
 [تحميل الإصدار الأول](https://github.com/ABDO-TECK/pos-desktop/releases) · [بناء GitHub](https://github.com/ABDO-TECK/pos-desktop/actions)
 
-نسخة Windows x64 تشمل PHP وMariaDB وJava وQZ Tray؛ لا تحتاج XAMPP. إصدار 0.0.1 تجريبي ومثبته غير موقع بشهادة Windows Authenticode. راجع وصف الإصدار وبصمات SHA-256 قبل التثبيت.
+نسخة Windows x64 تشمل PHP وMariaDB وJava وQZ Tray؛ لا تحتاج XAMPP. Setup 0.0.1 يحمل أحدث إصلاحات التطبيق (المراجعة الداخلية 0.0.8)، ومثبته غير موقع بشهادة Windows Authenticode. راجع وصف الإصدار وبصمات SHA-256 قبل التثبيت.
 
 ## بناء المشروع من السورس على Windows
 
@@ -28,7 +28,7 @@ node scripts/verify-installer-package.mjs
 ملف التثبيت: `dist-electron/POS-Desktop-Setup-0.0.1.exe`.
 بعد تجهيز محركات التشغيل وبناء الواجهة، يمكن التشغيل محليا بالأمر `npx electron .`.
 
-Workflow `Windows Setup and first release` يبني ويفحص الحزمة على GitHub، ثم يشغلها على runner نظيف للتحقق من API وقاعدة البيانات وخدمة الطباعة. دفع tag بصيغة `vX.Y.Z` ينشر الإصدار بعد نجاح الفحوص. التشغيل اليدوي يبني artifact فقط.
+Workflow `Windows Setup release` يبني ويفحص الحزمة على GitHub. التشغيل اليدوي يبني artifact؛ خيار publish ينشر Setup بعد نجاح الفحوص. تحديثات delta تُنشر من ريبو التحديثات فقط.
 
 ## البيانات والأمان
 
@@ -38,4 +38,4 @@ Workflow `Windows Setup and first release` يبني ويفحص الحزمة عل
 
 ## Update releases
 
-Stable and beta updates share this repository. See [publishing and delta verification](docs/release.md) for tags, signed per-baseline assets and the v0.0.2 Setup prerequisite. Delta replaces changed deployed files only; PHP changes replace the compiled backend.phar as one artifact. Device configuration and business databases are excluded.
+Full Setup releases live here. Signed stable and beta deltas live in [pos-desktop-updates](https://github.com/ABDO-TECK/pos-desktop-updates). See [publishing and delta verification](docs/release.md). Setup 0.0.1 carries application revision 0.0.8; update revisions continue increasing independently. Older installations need the new complete Setup once to acquire the new desktop shell and update endpoint; existing data is outside the installation directory. Delta changes deployed artifacts only; business data and device credentials are excluded.

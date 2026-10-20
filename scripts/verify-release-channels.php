@@ -18,12 +18,12 @@ final class FixtureReleaseProvider extends GitHubReleaseProvider
 }
 function release(string $version, bool $prerelease, string $baseline = '0.0.2'): array
 {
-    $base = "https://github.com/ABDO-TECK/pos-desktop/releases/download/v{$version}/";
+    $base = "https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v{$version}/";
     $names = ["delta-{$baseline}-to-{$version}.zip", "manifest-{$baseline}.json", "manifest-{$baseline}.sig"];
     return ['tag_name' => 'v'.$version, 'prerelease' => $prerelease, 'draft' => false, 'assets' => array_map(static fn ($n) => ['name'=>$n,'browser_download_url'=>$base.$n], $names)];
 }
 $provider = new FixtureReleaseProvider([release('0.0.4-beta.1', true), release('0.0.3', false), release('0.0.3-rc.1', true)]);
-expect($provider->getRepo() === 'pos-desktop', 'Default repository must be pos-desktop.');
+expect($provider->getRepo() === 'pos-desktop-updates', 'Default repository must be the dedicated update repository.');
 $stable = $provider->getLatestRelease('stable', '0.0.2');
 $beta = $provider->getLatestRelease('beta', '0.0.2');
 $rc = $provider->getLatestRelease('rc', '0.0.2');
@@ -41,5 +41,6 @@ $policy = new App\Services\UpdateManifestService();
 expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'beta'], '0.0.3', 'v0.0.3', 'stable')['compatible'], 'Signed beta asset accepted under a stable tag.');
 expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'beta'], '0.0.4-beta.1', 'v0.0.4-beta.1', 'stable')['compatible'], 'Stable apply accepted beta channel.');
 expect($policy->checkReleaseAssociation(['version'=>'0.0.3','channel'=>'stable'], '0.0.3', 'v0.0.3', 'beta')['compatible'], 'Beta cannot promote to stable.');
-foreach ($provider->requests as $url) expect(str_contains($url, '/ABDO-TECK/pos-desktop/'), 'Request reached the wrong repository.');
+foreach ($provider->requests as $url) expect(str_contains($url, '/ABDO-TECK/pos-desktop-updates/'), 'Request reached the wrong repository.');
 echo "Release channels verified: stable/beta/rc, baseline selection and repository isolation.\n";
+

@@ -33,8 +33,10 @@ function Assert-Authenticode {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $releaseRoot = (Resolve-Path $ReleaseDirectory).Path
 $package = Get-Content (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
-$version = (Get-Content (Join-Path $repoRoot 'version.json') -Raw | ConvertFrom-Json).version
-if (-not $version -or $package.version -ne $version) { throw 'package.json and version.json must contain the same release version.' }
+$metadata = Get-Content (Join-Path $repoRoot 'version.json') -Raw | ConvertFrom-Json
+$version = $package.version
+$installerVersion = if ($metadata.PSObject.Properties.Name -contains 'installer_version') { $metadata.installer_version } else { $metadata.version }
+if (-not $version -or $installerVersion -ne $version) { throw 'package.json and version.json must contain the same release version.' }
 if ($Tag) {
     $tagVersion = $Tag -replace '^v', ''
     if ($tagVersion -ne $version) { throw "Tag '$Tag' does not match version '$version'." }

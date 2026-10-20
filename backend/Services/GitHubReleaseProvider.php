@@ -24,7 +24,10 @@ class GitHubReleaseProvider
         int $timeout = 15
     ) {
         $this->owner = $owner ?? EnvLoader::get('UPDATE_REPO_OWNER', 'ABDO-TECK');
-        $this->repo = $repo ?? EnvLoader::get('UPDATE_REPO_NAME', 'pos-desktop');
+        $this->repo = $repo ?? EnvLoader::get('UPDATE_REPO_NAME', 'pos-desktop-updates');
+        if ($this->owner === 'ABDO-TECK' && in_array($this->repo, ['pos', 'pos-desktop'], true)) {
+            $this->repo = 'pos-desktop-updates';
+        }
         $this->token = $token ?? EnvLoader::get('GITHUB_TOKEN');
         $this->timeout = $timeout;
         $this->caCertPath = $caCertPath ?? $this->resolveCaCertPath();

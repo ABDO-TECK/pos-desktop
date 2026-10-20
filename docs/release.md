@@ -1,72 +1,30 @@
-# Publishing POS Desktop updates
+# POS release publishing
 
-All Setup and delta releases use **ABDO-TECK/pos-desktop**. The supported publishers are GitHub Actions workflows `Windows Setup release` and `Signed delta release`. Historical v1 release guides and GUI scripts are not the publisher for this v0 repository.
+## Two delivery repositories
 
-| Channel | Tag | GitHub release |
-| --- | --- | --- |
-| stable | v0.0.3 | Normal release |
-| beta | v0.0.3-beta.1 | Prerelease |
-| rc | v0.0.3-rc.1 | Prerelease |
+- ABDO-TECK/pos-desktop: source and complete Windows Setup releases only.
+- ABDO-TECK/pos-desktop-updates: signed per-baseline deltas for stable and beta.
 
-Stable devices accept stable only. Beta devices accept beta, rc and stable. The device preference is persisted separately in `update_channel.json`, which a release never replaces. Discovery reads Releases on this repository, rather than the version on main.
+Setup 0.0.1 embeds application update revision 0.0.8. package.json and both lockfiles identify the shell/installer; version.json identifies the monotonic application revision and declares installer_version. Never decrement application revisions to rename an installer.
 
-## Setup baseline
+## Full Setup
 
-Use Setup for changes to Electron, npm runtime dependencies, packaging or portable engines. Set the same complete version in version.json, root/frontend package.json and their lockfiles. Set `release_type: setup`, the tag's `channel`, and the intended default `update_channel`. Commit, tag that commit, and push the branch and tag.
+Run Windows Setup release on the source commit. Leave publish false to build and validate an artifact first. The verified artifact includes the installer, blockmap, latest.yml, SHA256SUMS and deployment-inventory.json. Publishing requires the matching installer tag at that commit. New full Setup versions should exceed deployed application revisions to preserve the full-updater downgrade policy.
 
-The Setup workflow builds and smoke-tests the packaged app on a clean Windows runner before publishing. It also publishes `deployment-inventory.json`, generated from actual app.asar.unpacked files and tracked desktop shell inputs.
+The initial replacement v0.0.1 tag is archived before reuse. Its immutable source baseline alias v0.0.8 identifies the actual revision used by delta builds. The updates repository stores an inventory-only v0.0.8 release for this baseline; it is not an installable delta.
 
-Install **v0.0.2 Setup** before using this improved delta protocol. The original v0.0.1 has no published inventory and lacks the updated shell/physical version-file layout. Current Windows installers are unsigned Authenticode; RSA delta signing is separate and does not sign the Windows EXE.
+## Stable and beta deltas
 
-## Beta delta
+Keep package versions and all tracked Electron/build/runtime shell inputs unchanged from the supported Setup baseline. Set version and application_version to an increasing revision, release_type to delta, channel to stable or beta, and delta_baseline_tags to explicit source tags. Commit and push the source tag (vX.Y.Z or vX.Y.Z-beta.N).
 
-Keep root/frontend package versions and lockfiles at their last Setup version. Change application code and version.json, for example:
+In pos-desktop-updates run Signed delta release: source_ref is the exact source tag/commit, tag is its application revision tag, publish controls public publication. That workflow checks out public source from pos-desktop, downloads baseline inventories from pos-desktop-updates, builds/signs/verifies each package, and publishes with the updates repository's GITHUB_TOKEN. No cross-repository write credential is required. The encrypted UPDATE_PRIVATE_KEY secret must correspond to the pinned public key.
 
-```json
-{
-  "version": "0.0.3-beta.1",
-  "application_version": "0.0.3-beta.1",
-  "update_engine_version": "1.0.0",
-  "channel": "beta",
-  "release_type": "delta",
-  "delta_baseline_tags": ["v0.0.2"],
-  "released_at": "2026-10-20",
-  "changelog": ["Describe actual changes"]
-}
-```
+Stable devices receive stable only; beta devices can receive beta and newer stable. update_channel.json is device state and is excluded from updates. Existing explicit pos/pos-desktop update endpoint settings are normalized in new code to pos-desktop-updates without changing device files. Custom repository settings remain supported.
 
-Commit, tag that exact commit v0.0.3-beta.1 and push it. CI downloads each baseline's inventory from its published release, verifies its version and unchanged desktop shell, builds frontend/PHAR, compares deployed SHA-256 hashes, and signs each baseline manifest using the UPDATE_PRIVATE_KEY repository secret. A missing or mismatched key fails the job. The private key never enters source, ZIPs, logs or artifacts.
+Historical deltas are copied byte-for-byte with signatures and original version/channel metadata. Historical Setup inventories remain private local evidence; only baseline inventories needed by builds are mirrored separately in the updates repository.
 
-For each baseline the release contains:
+## Integrity
 
-- manifest-0.0.2.json and manifest-0.0.2.sig
-- delta-0.0.2-to-0.0.3-beta.1.zip
+Only changed built artifacts enter the ZIP. Explicit obsolete managed paths enter deleted_files. The installed baseline, payload hashes, release channel and RSA signature are checked. PHP is deployed as one backend/backend.phar artifact; this is file-level delta, not an internal PHAR binary patch. Unchanged files retain their bytes, timestamps and file identities. Business databases, device configuration, credentials and device printing certificates are excluded. Electron or runtime changes require a complete Setup.
 
-It also contains the target deployment-inventory.json for future releases. Delta releases do not become GitHub's latest full Setup release. The app selects a delta for its channel and exact installed baseline. The separate full updater selects releases containing installer metadata.
-
-## Promote to stable
-
-For v0.0.3, set matching version fields, `channel: stable`, `release_type: delta`, and support both starting points:
-
-```json
-"delta_baseline_tags": ["v0.0.2", "v0.0.3-beta.1"]
-```
-
-CI builds distinct signed packages for both. Keep older starting points listed if they should update directly; another baseline's package is never offered instead. Different shell fingerprints require a new Setup.
-
-## File replacement and verification
-
-Only files with different built bytes enter the ZIP. Removed managed files appear explicitly in deleted_files. Unchanged files are omitted; both apply engines also skip already-matching targets. Installed baseline hashes, payload hashes, RSA signature, release version and channel are checked before applying. Databases, device configuration, credentials and portable engines are outside delta targets.
-
-PHP code/migrations ship as one **backend/backend.phar** file. A PHP change replaces that artifact as a unit. This is a file-level delta, not a binary patch within PHAR/EXE files. Electron changes require Setup.
-
-```powershell
-$env:PHP_BINARY = 'C:\xampp\php\php.exe' # or PHP on PATH
-& $env:PHP_BINARY scripts/verify-release-channels.php
-node scripts/verify-update-channel-policy.cjs
-node scripts/verify-delta-flow.mjs
-```
-
-Isolated acceptance builds/signs real ZIPs for stable, beta and beta-to-stable promotion; stages via PHP; applies via PHP and Electron handoff; checks exact resulting hashes and unchanged artifact/data hashes, timestamps and identity. It tests new/deleted files, rollback, corrupt signature/payload rejection and wrong baselines. It never opens the live app/database.
-
-For a complete build/sign/validation without publishing, run Signed delta release manually against an existing delta tag with `publish` unchecked.
+Run verify-release-identity.mjs, verify-release-channels.php, verify-update-channel-policy.cjs and verify-delta-flow.mjs before publishing. Acceptance must also exercise actual signed GitHub assets against an isolated packaged copy before removing prior distribution assets.
