@@ -59,6 +59,7 @@ if(in_array($mode,['prepare-compatibility','inspect-compatibility'],true)) {
         if($result['errors'])throw new RuntimeException('Compatibility metadata migration failed: '.implode('; ',$result['errors']));
     }
     $description=(new App\Services\UpdateDataCompatibilityService())->describe($db);
+    if(getenv('POS_TRANSITION_SCHEMA_EVIDENCE'))file_put_contents($isolatedStorage.'/schema-'.bin2hex(random_bytes(5)).'.json',json_encode($description,JSON_PRETTY_PRINT|JSON_THROW_ON_ERROR));
     $backup=new App\Services\BackupService();$backup->setDb($db);
     $backupFile=$backup->createBackupFile($isolatedStorage.'/backup');
     if(!is_file($backupFile)||filesize($backupFile)<30)throw new RuntimeException('Historical restricted-account SQL backup failed');
