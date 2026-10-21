@@ -54,9 +54,26 @@ const ui=createDesktopLab(application,evidence);
 let auth;
 let requestTransport;
 let firstTransitionAt;
+let firstForwardAt;
+let forwardCount=0;
 async function versionIs(expected){
  const deadline=Date.now()+150000;
- do{try{if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){await delay(5000);await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');requestTransport.resume();return;}}catch{}await delay(500);}while(Date.now()<deadline);throw Error('Version/restart failed '+expected);
+ do{
+   try{
+     if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){
+       await delay(5000);
+       await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);
+       if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
+       await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');
+       requestTransport.resume();
+       return;
+     }
+   }catch{}
+   const toast=await ui.evaluate('document.querySelector(".toast-error")?.textContent.trim()').catch(()=>null);
+   if(toast&&!toast.includes('تم استكمال التحديث')&&!toast.includes('إعادة تشغيل الخدمات'))throw Error('Frontend reported error during update: '+toast);
+   await delay(500);
+ }while(Date.now()<deadline);
+ throw Error('Version/restart failed '+expected);
 }
 async function chooseChannel(channel){
  await ui.until('Boolean(document.querySelector("select option[value=beta]"))','channel selector');
@@ -64,9 +81,24 @@ async function chooseChannel(channel){
  await delay(1500);
 }
 async function forward(){
+ forwardCount++;
+ if(forwardCount===1){
+   firstForwardAt=Date.now();
+ }else if(forwardCount>2){
+   while(Date.now()<firstForwardAt+310000){
+     console.log('Waiting for the production 2/300s update_apply rate window before forward #'+forwardCount);
+     await delay(Math.min(15000,firstForwardAt+310000-Date.now()));
+   }
+ }
+ if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
+ await requestTransport.reauth();
  await ui.system();await chooseChannel('beta');await ui.click('التحقق من التحديثات');
  await ui.until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="تثبيت التحديث الآن"&&!b.disabled)','normal beta install');
- await ui.click('تثبيت التحديث الآن');await ui.click('تأكيد');await versionIs(version);
+ await ui.click('تثبيت التحديث الآن');await ui.click('تأكيد');
+ await delay(1500);
+ const toast=await ui.evaluate('document.querySelector(".toast-error, [role=alert]")?.textContent.trim()').catch(()=>null);
+ if(toast&&!toast.includes('تم استكمال التحديث')&&!toast.includes('إعادة تشغيل الخدمات')&&!toast.includes('التحقق من التحديثات'))throw Error('Update apply rejected: '+toast);
+ await versionIs(version);
 }
 function verifyInventory(inventory,removedFrom){
  for(const [file,expected] of Object.entries(inventory.files))assert.equal(ui.hash(path.join(root,file)),expected.sha256,'Target hash '+file);
@@ -130,6 +162,8 @@ try {
  mode('delta');const failedReceipt=await failLateHandoff();assert.deepEqual(sql('inspect'),before);
  const deltaReceipt=await returnStable('delta');assert.deepEqual(sql('inspect'),before);assert.deepEqual(await pendingSale('get'),offlineBefore);
  assert.equal(restore().extended_metadata,false,'Historical restore fixture did not recreate the historical metadata shape');assert.deepEqual(sql('inspect'),before);
+ if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
+ await requestTransport.reauth();
  await forward();verifyInventory(source);assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore,'Forward startup did not repair metadata after historical restore');
  // Respect the production 2/300s apply limiter across both old/new interfaces.
  while(Date.now()<firstTransitionAt+310000){console.log('Waiting for the unchanged production apply rate window before full return');await delay(Math.min(15000,firstTransitionAt+310000-Date.now()));}

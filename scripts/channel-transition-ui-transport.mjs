@@ -16,15 +16,21 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   const config=path.join(process.env.APPDATA,'POS System');
   const ports=()=>JSON.parse(fs.readFileSync(path.join(config,'runtime_ports.json')));
   const credentials=JSON.parse(fs.readFileSync(path.join(config,'db_credentials.json')));
-  const realBase=ports().apiBaseUrl;
+  let realBase=ports().apiBaseUrl;
   const cookies=new Map();
   const captureCookies=response=>{for(const cookie of response.headers.getSetCookie()){const pair=cookie.split(';',1)[0],split=pair.indexOf('=');if(split>0)cookies.set(pair.slice(0,split),pair.slice(split+1));}};
   const cookieHeader=()=>[...cookies].map(([name,value])=>`${name}=${value}`).join('; ');
-  const login=await fetch(realBase+'/api/v1/login',{method:'POST',headers:{Origin:'app://pos-app','Content-Type':'application/json'},body:JSON.stringify(auth)});
-  assert.equal(login.status,200,'Real fixture account login for HTTP transport failed');captureCookies(login);
-  assert.ok(cookies.has('pos_token'),'Production login did not issue its session cookie');
-  const csrf=await fetch(realBase+'/api/v1/csrf-cookie',{headers:{Origin:'app://pos-app',Cookie:cookieHeader()}});captureCookies(csrf);
-  const signature=(await csrf.json()).data?.csrf_token;assert.ok(signature&&cookies.has('XSRF-TOKEN'),'Real CSRF pair missing');
+  let signature;
+
+  async function reauth(){
+    realBase=ports().apiBaseUrl;
+    const login=await fetch(realBase+'/api/v1/login',{method:'POST',headers:{Origin:'app://pos-app','Content-Type':'application/json'},body:JSON.stringify(auth)});
+    assert.equal(login.status,200,'Real fixture account login for HTTP transport failed');captureCookies(login);
+    assert.ok(cookies.has('pos_token'),'Production login did not issue its session cookie');
+    const csrf=await fetch(realBase+'/api/v1/csrf-cookie',{headers:{Origin:'app://pos-app',Cookie:cookieHeader()}});captureCookies(csrf);
+    signature=(await csrf.json()).data?.csrf_token;assert.ok(signature&&cookies.has('XSRF-TOKEN'),'Real CSRF pair missing');
+  }
+  await reauth();
   const php=path.join(application,'resources/portable/php/php.exe');
   const root=path.join(application,'resources/app.asar.unpacked');
   let server,starting,base,preparing=false,beforeApplyResponse=null;
@@ -68,16 +74,21 @@ export async function attachTransitionTransport({ui,application,storage,evidence
       for(const name of ['host','content-length','connection'])headers.delete(name);
       const response=await fetch(destination+url.pathname+url.search,{method:request.method,headers,...(request.postData?{body:request.postData}:{})});
       const body=Buffer.from(await response.arrayBuffer());
+      const bodyStr=body.toString();
+      fs.appendFileSync(path.join(evidence,'transport-http.log'),JSON.stringify({time:new Date().toISOString(),method:request.method,url:url.pathname+url.search,status:response.status,body:bodyStr.slice(0,1000)})+'\n');
       if(url.pathname.endsWith('/transition/preview')){
-        const result=JSON.parse(body.toString());
-        fs.appendFileSync(path.join(evidence,'preview-responses.jsonl'),JSON.stringify({status:response.status,channel:result.data?.selected_channel,result:result.data?.status,reason:result.data?.reason_code,error:result.status==='error'?result.message:null})+'\n');
+        let result;try{result=JSON.parse(bodyStr);}catch{}
+        fs.appendFileSync(path.join(evidence,'preview-responses.jsonl'),JSON.stringify({status:response.status,channel:result?.data?.selected_channel,result:result?.data?.status,reason:result?.data?.reason_code,error:result?.status==='error'?result?.message:null})+'\n');
       }
       const responseHeaders=[];for(const [name,value] of response.headers)if(!['content-length','content-encoding','transfer-encoding','set-cookie'].includes(name.toLowerCase()))responseHeaders.push({name,value});
       for(const value of response.headers.getSetCookie())responseHeaders.push({name:'set-cookie',value});
       if(mutation){
         // End the actual request PHP parent before Electron stops its own runtime.
         await stopServer();
-        const prepared=JSON.parse(body.toString());
+        let prepared;try{prepared=JSON.parse(bodyStr);}catch{}
+        if(response.status!==200){
+          console.error(`Mutation ${request.method} ${url.pathname} returned HTTP ${response.status}: ${bodyStr}`);
+        }
         if(response.status===200&&beforeApplyResponse){const hook=beforeApplyResponse;beforeApplyResponse=null;await hook(prepared);}
       }
       try{
@@ -105,6 +116,7 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   });
   await ui.call('Fetch.enable',{patterns:[{urlPattern:'*/api/*/updates/*',requestStage:'Request'},{urlPattern:'*/api/updates/*',requestStage:'Request'}]});
   return {
+    reauth,
     resume(){preparing=false;if(failure)throw failure;},
     beforeApply(callback){assert.equal(beforeApplyResponse,null);beforeApplyResponse=callback;},
     async close(){unsubscribe();await ui.call('Fetch.disable').catch(()=>{});await Promise.allSettled([...tasks]);await stopServer();if(failure)throw failure;},
