@@ -6,7 +6,7 @@ import {spawn} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {delay} from './desktop-transition-lab.mjs';
 
-const isInterceptionDropped=error=>/Invalid InterceptionId|WebSocket is not open/i.test(error?.message||'');
+const isInterceptionDropped=error=>/Invalid InterceptionId|WebSocket is not open|Fetch domain is not enabled/i.test(error?.message||'');
 
 /** UI request transport only. Runs the actual deployed PHAR, auth and CSRF. */
 export async function attachTransitionTransport({ui,application,storage,evidence,fixture,auth}) {
@@ -119,6 +119,6 @@ export async function attachTransitionTransport({ui,application,storage,evidence
     reauth,
     resume(){preparing=false;if(failure)throw failure;},
     beforeApply(callback){assert.equal(beforeApplyResponse,null);beforeApplyResponse=callback;},
-    async close(){unsubscribe();await ui.call('Fetch.disable').catch(()=>{});await Promise.allSettled([...tasks]);await stopServer();if(failure)throw failure;},
+    async close(){unsubscribe();await Promise.allSettled([...tasks]);await ui.call('Fetch.disable').catch(()=>{});await stopServer();if(failure)throw failure;},
   };
 }
