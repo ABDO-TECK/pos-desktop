@@ -48,6 +48,7 @@ async function until(expression, label, timeout = 90_000) {
   throw Error('Timed out: ' + label);
 }
 async function clickText(text) {
+  await until(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === ${JSON.stringify(text)})`, 'ready UI control: ' + text);
   const clicked = await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)}); if (!button) return false; button.click(); return true; })()`);
   assert.equal(clicked, true, 'Expected UI control: ' + text);
 }
