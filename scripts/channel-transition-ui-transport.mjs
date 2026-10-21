@@ -60,6 +60,10 @@ export async function attachTransitionTransport({ui,application,storage,evidence
       for(const name of ['host','content-length','connection'])headers.delete(name);
       const response=await fetch(destination+url.pathname+url.search,{method:request.method,headers,...(request.postData?{body:request.postData}:{})});
       const body=Buffer.from(await response.arrayBuffer());
+      if(url.pathname.endsWith('/transition/preview')){
+        const result=JSON.parse(body.toString());
+        fs.appendFileSync(path.join(evidence,'preview-responses.jsonl'),JSON.stringify({status:response.status,channel:result.data?.selected_channel,result:result.data?.status,reason:result.data?.reason_code,error:result.status==='error'?result.message:null})+'\n');
+      }
       const responseHeaders=[];for(const [name,value] of response.headers)if(!['content-length','content-encoding','transfer-encoding','set-cookie'].includes(name.toLowerCase()))responseHeaders.push({name,value});
       for(const value of response.headers.getSetCookie())responseHeaders.push({name:'set-cookie',value});
       if(mutation){

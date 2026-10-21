@@ -73,7 +73,12 @@ function verifyInventory(inventory,removedFrom){
  if(removedFrom)for(const file of Object.keys(removedFrom.files))if(!Object.hasOwn(inventory.files,file))assert.equal(fs.existsSync(path.join(root,file)),false,'Newer artifact remains '+file);
 }
 async function pendingSale(action){return ui.evaluate(`new Promise((resolve,reject)=>{const request=indexedDB.open('pos_offline');request.onerror=()=>reject(Error('Offline DB unavailable'));request.onsuccess=()=>{const db=request.result;if(!db.objectStoreNames.contains('pending_sales')){db.close();resolve(null);return;}const tx=db.transaction('pending_sales',${JSON.stringify(action==='put'?'readwrite':'readonly')});const store=tx.objectStore('pending_sales');const op=${action==='put'?`store.put({localId:'codex-transition-pending',ownerUserId:9999999,branchId:1,savedAt:'2026-10-21T00:00:00Z',syncStatus:'review',fixture:true})`:`store.get('codex-transition-pending')`};op.onsuccess=()=>resolve(${action==='put'?'true':'op.result'});op.onerror=()=>reject(Error('Offline sale fixture failed'));tx.oncomplete=()=>db.close();};})`);}
-async function preview(){await ui.evaluate('document.querySelector("[data-testid=preview-channel-transition]").click()');await ui.until('Boolean(document.querySelector("[data-testid=transition-preview-result]"))','transition preview');}
+async function preview(){
+ await ui.until('Boolean(document.querySelector("[data-testid=preview-channel-transition]:not(:disabled)"))','enabled transition preview');
+ await ui.evaluate('document.querySelector("[data-testid=preview-channel-transition]").click()');await delay(250);
+ await ui.until('document.querySelector("[data-testid=channel-transition]")?.getAttribute("aria-busy")==="false" && Boolean(document.querySelector("[data-testid=transition-preview-result], [data-testid=channel-transition] [role=alert]"))','transition preview');
+ const error=await ui.evaluate('document.querySelector("[data-testid=channel-transition] [role=alert]")?.innerText');assert.ok(!error,error);
+}
 async function returnStable(type){
  await ui.system();await chooseChannel('stable');
  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version,version,'Selecting a channel installed something');
