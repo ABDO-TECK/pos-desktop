@@ -50,18 +50,21 @@ $ports=json_decode(file_get_contents($config.'/runtime_ports.json'),true,512,JSO
 $db=new PDO('mysql:host=127.0.0.1;port='.$ports['mysqlPort'].';dbname=pos_db;charset=utf8mb4',$credentials['user'],$credentials['password'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
 if(in_array($mode,['prepare-compatibility','inspect-compatibility'],true)) {
     require __DIR__.'/../../backend/vendor/autoload.php';
+    $isolatedStorage=rtrim((string)getenv('RUNNER_TEMP'),'/\\').'/transition-metadata-fixture';
+    if(!is_dir($isolatedStorage))mkdir($isolatedStorage,0700,true);
     if($mode==='prepare-compatibility') {
         $migration=new PDO('mysql:host=127.0.0.1;port='.$ports['mysqlPort'].';dbname=pos_db;charset=utf8mb4',$credentials['migrationUser'],$credentials['migrationPassword'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
-        $isolatedStorage=rtrim((string)getenv('RUNNER_TEMP'),'/\\').'/transition-metadata-fixture';
-        if(!is_dir($isolatedStorage))mkdir($isolatedStorage,0700,true);
         putenv('APP_STORAGE_DIR='.$isolatedStorage);
         $result=(new App\Services\MigrationService($migration))->runMigrations([App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION],true);
         if($result['errors'])throw new RuntimeException('Compatibility metadata migration failed: '.implode('; ',$result['errors']));
     }
     $description=(new App\Services\UpdateDataCompatibilityService())->describe($db);
-    try{$db->exec("UPDATE pos_update_compatibility_metadata SET definition='altered'");throw new RuntimeException('Metadata view was writable');}
+    $backup=new App\Services\BackupService();$backup->setDb($db);
+    $backupFile=$backup->createBackupFile($isolatedStorage.'/backup');
+    if(!is_file($backupFile)||filesize($backupFile)<30)throw new RuntimeException('Historical restricted-account SQL backup failed');
+    try{$db->exec("UPDATE product_catalog_trigger_metadata SET definition='altered'");throw new RuntimeException('Metadata view was writable');}
     catch(PDOException $expected){/* TEMPTABLE view is intentionally not updatable. */}
-    echo json_encode(['format'=>1,'metadata_migration'=>App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION,'schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'objects'=>count($description['schema']['objects']),'runtime_metadata_readable'=>true,'metadata_view_read_only'=>true],JSON_THROW_ON_ERROR);exit;
+    echo json_encode(['format'=>1,'metadata_migration'=>App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION,'schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'objects'=>count($description['schema']['objects']),'runtime_metadata_readable'=>true,'metadata_view_read_only'=>true,'legacy_backup_readable'=>true],JSON_THROW_ON_ERROR);exit;
 }
 if($mode==='seed') {
     $query=$db->prepare('INSERT INTO customers (branch_id,name,phone,initial_balance,loyalty_points) VALUES (1, ?, ?, 27.50, 13)');

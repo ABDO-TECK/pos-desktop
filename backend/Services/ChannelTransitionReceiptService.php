@@ -4,12 +4,21 @@ namespace App\Services;
 
 use App\Config\Database;
 use RuntimeException;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+use FilesystemIterator;
 use Throwable;
 
 /** Independent post-start verification survives replacing the deployed backend. */
 final class ChannelTransitionReceiptService
 {
     public function __construct(private string $root, private string $storage) {}
+
+    public function isTargetHealthy(string $response, string $version): bool
+    {
+        $health=json_decode($response,true);
+        return is_array($health) && ($health['status']??null)==='ok' && ($health['critical_failed']??true)===false && ($health['version']??null)===$version;
+    }
 
     public function verifyFiles(array $inventory, array $deleted): bool
     {
@@ -20,6 +29,14 @@ final class ChannelTransitionReceiptService
             if (is_link($path) || !is_file($path) || filesize($path)!==$file['size'] || !hash_equals($file['sha256'],hash_file('sha256',$path))) return false;
         }
         foreach ($deleted as $relative) if (file_exists($this->root.'/'.$relative)) return false;
+        $dist=$this->root.'/frontend/dist';
+        if (is_link($dist)) return false;
+        if (is_dir($dist)) foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dist,FilesystemIterator::SKIP_DOTS)) as $file) {
+            if ($file->isLink()) return false;
+            if (!$file->isFile() || $file->getFilename()==='digital-certificate.txt') continue;
+            $relative='frontend/dist/'.substr(str_replace('\\','/',$file->getPathname()),strlen(str_replace('\\','/',$dist))+1);
+            if (!isset($inventory['files'][$relative])) return false;
+        }
         return true;
     }
 
@@ -85,7 +102,7 @@ final class ChannelTransitionReceiptService
                         $port=filter_var(getenv('API_PORT'),FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>65535]]);
                         if (!$port) throw new RuntimeException('health_endpoint_unavailable');
                         $health=@file_get_contents('http://127.0.0.1:'.$port.'/api/health',false,stream_context_create(['http'=>['timeout'=>3]]));
-                        if ($health===false) { usleep(250000);continue; }
+                        if ($health===false || !$this->isTargetHealthy($health,$plan['target_version'])) { usleep(250000);continue; }
                         $assessment=(new UpdateDataCompatibilityService())->assess(Database::getInstance(),$plan['data_compatibility'],true);
                         if (!$assessment['compatible']) throw new RuntimeException($assessment['reason_code']);
                         $result=['state'=>'completed','reason_code'=>null,'target_inventory_matches'=>true,'data_compatible'=>true,'requires_recovery'=>false];

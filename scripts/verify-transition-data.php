@@ -12,7 +12,7 @@ class CompatibilityDatabase extends PDO {
     public function getAttribute(int $attribute):mixed{return 'mysql';}
     public function query(string $query,?int $fetchMode=null,mixed ...$args):PDOStatement|false {
         $this->queries[]=$query;
-        if(str_contains($query,'FROM pos_update_compatibility_metadata')){if(!$this->metadata)throw new RuntimeException('metadata missing');return new CompatibilityStatement([['object_type'=>'trigger','object_name'=>'t','definition'=>$this->trigger,'context'=>'BEFORE|INSERT','table_name'=>'customers']]);}
+        if(str_contains($query,'FROM product_catalog_trigger_metadata')){if(!$this->metadata)throw new RuntimeException('metadata missing');return new CompatibilityStatement([['object_type'=>'trigger','object_name'=>'t','definition'=>$this->trigger,'context'=>'BEFORE|INSERT','table_name'=>'customers']]);}
         if(str_contains($query,'FROM schema_versions'))return new CompatibilityStatement(array_map(fn($version)=>['version'=>$version],$this->ledger));
         if(str_contains($query,'information_schema.COLUMNS'))return new CompatibilityStatement([['table_name'=>'customers','name'=>'name','type'=>$this->type,'default'=>null]]);
         if(str_contains($query,'information_schema.TABLES'))return new CompatibilityStatement([['name'=>'customers','type'=>'BASE TABLE','engine'=>'InnoDB','collation'=>'utf8mb4_general_ci']]);

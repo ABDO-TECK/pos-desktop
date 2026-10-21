@@ -55,6 +55,8 @@ final class ChannelTransitionService
             if (!$this->delta->checkDiskSpace(max(104857600,$descriptor['package']['size']*3+filesize($this->delta->getRootDir().'/backend/backend.phar')*2))['ok']) throw new RuntimeException('insufficient_disk_space');
             $manifest=$this->handoffManifest($descriptor);
             $this->stage($descriptor,$context['package']);
+            $fresh=$this->resolve($this->updates->getClientChannel());
+            if ($fresh['preview']['status']!=='ready' || ($fresh['binding']??null)!==$context['binding']) throw new RuntimeException('preview_expired_or_changed');
             // Recheck the schema and every source byte after potentially slow network I/O.
             if (!$this->compatibility->assess($this->database(),$descriptor['data_compatibility'],version_compare($descriptor['version'],$descriptor['from_version'],'<'))['compatible']) throw new RuntimeException('data_schema_incompatible');
             if (!(new UpdateManifestService())->verifyBaselineFiles($this->delta->getRootDir(),$manifest)) throw new RuntimeException('source_inventory_mismatch');

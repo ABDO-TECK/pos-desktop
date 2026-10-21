@@ -10,7 +10,7 @@ use Throwable;
 final class UpdateDataCompatibilityService
 {
     public const METADATA_MIGRATION = '059_add_update_compatibility_metadata.sql';
-    private const METADATA_VIEW = 'pos_update_compatibility_metadata';
+    private const METADATA_VIEW = 'product_catalog_trigger_metadata';
 
     public function describe(PDO $db): array
     {
@@ -22,7 +22,7 @@ final class UpdateDataCompatibilityService
             'keys' => 'SELECT TABLE_NAME AS table_name,CONSTRAINT_NAME AS name,COLUMN_NAME AS column_name,ORDINAL_POSITION AS position,REFERENCED_TABLE_NAME AS referenced_table,REFERENCED_COLUMN_NAME AS referenced_column FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE()',
             'references' => 'SELECT TABLE_NAME AS table_name,CONSTRAINT_NAME AS name,REFERENCED_TABLE_NAME AS referenced_table,UPDATE_RULE AS update_rule,DELETE_RULE AS delete_rule,MATCH_OPTION AS match_option FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE()',
             'checks' => 'SELECT TABLE_NAME AS table_name,CONSTRAINT_NAME AS name,CHECK_CLAUSE AS clause_text FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE()',
-            'objects' => 'SELECT object_type,object_name,definition,context,table_name FROM pos_update_compatibility_metadata',
+            'objects' => 'SELECT object_type,object_name,definition,context,table_name FROM product_catalog_trigger_metadata',
         ];
         $schema = [];
         foreach ($queries as $kind => $sql) {
