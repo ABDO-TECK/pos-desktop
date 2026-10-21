@@ -22,7 +22,20 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
     finally{clearTimeout(timer);}
   }
   async function evaluate(expression){return (await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true})).result?.value;}
-  async function until(expression,label,timeout=90000){const deadline=Date.now()+timeout;do{if(await evaluate(expression))return;await delay(250);}while(Date.now()<deadline);throw Error('Timed out: '+label);}
+  async function until(expression,label,timeout=90000){
+    const deadline=Date.now()+timeout;
+    do{
+      try {
+        if(await evaluate(expression))return;
+      } catch (err) {
+        if (!/Execution context was destroyed|Cannot find context|Inspected target navigated/i.test(err?.message || '')) {
+          throw err;
+        }
+      }
+      await delay(250);
+    }while(Date.now()<deadline);
+    throw Error('Timed out: '+label);
+  }
   async function start(){
     const env={...process.env,...extraEnv};for(const key of ['GH_TOKEN','GITHUB_TOKEN','UPDATE_PRIVATE_KEY'])delete env[key];
     const output=fs.openSync(path.join(evidence,'desktop.log'),'a');

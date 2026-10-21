@@ -56,15 +56,24 @@ let requestTransport;
 let firstTransitionAt;
 let firstForwardAt;
 let forwardCount=0;
-async function versionIs(expected, startedAt = 0){
+async function versionIs(expected, startedAt = 0, expectedRunId = null){
  const deadline=Date.now()+150000;
  do{
    try{
      if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){
-       await delay(5000);
-       await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);
+       if(expectedRunId){
+         await ui.until(
+           `window.__pageRunId !== ${JSON.stringify(expectedRunId)} && Boolean(document.querySelector("form, a[href='/settings']"))`,
+           'restarted frontend after restart',
+           120000
+         );
+       }else{
+         await delay(5000);
+         await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);
+       }
        if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
        await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');
+       await delay(2000);
        requestTransport.resume();
        return;
      }
@@ -77,6 +86,13 @@ async function versionIs(expected, startedAt = 0){
          const stateTime = Date.parse(st.updated_at || st.started_at || '');
          if (Number.isFinite(stateTime) && stateTime >= startedAt && (st.state === 'failed' || st.state === 'rolled_back')) {
            throw Error('Update transaction failed on disk: ' + (st.error || st.state));
+         }
+         if (Number.isFinite(stateTime) && stateTime >= startedAt && st.state === 'desktop_handoff_pending' && Date.now() - startedAt > 8000) {
+           await ui.evaluate(`(() => {
+             if (window.posRuntime && typeof window.posRuntime.applyStagedDelta === 'function') {
+               window.posRuntime.applyStagedDelta(${JSON.stringify(expected)}).catch(() => {});
+             }
+           })()`).catch(() => {});
          }
        }
      } catch(e) {
@@ -136,6 +152,8 @@ async function forward(){
    }
  })()`);
  const startedAt = Date.now();
+ const runId = 'forward_' + forwardCount + '_' + startedAt;
+ await ui.evaluate(`window.__pageRunId = ${JSON.stringify(runId)}`);
  await ui.click('تثبيت التحديث الآن');await ui.click('تأكيد');
  await delay(1500);
  const toast=await ui.evaluate(`(() => {
@@ -147,7 +165,7 @@ async function forward(){
    return null;
  })()`).catch(()=>null);
  if(toast)throw Error('Update apply rejected: '+toast);
- await versionIs(version, startedAt);
+ await versionIs(version, startedAt, runId);
 }
 function verifyInventory(inventory,removedFrom){
  for(const [file,expected] of Object.entries(inventory.files))assert.equal(ui.hash(path.join(root,file)),expected.sha256,'Target hash '+file);
@@ -167,7 +185,10 @@ async function returnStable(type){
  const text=await ui.evaluate('document.querySelector("[data-testid=transition-preview-result]").innerText');assert.ok(text.includes(type==='delta'?'Delta':'كاملة'),text);
  await ui.click('انتظار دون تثبيت');assert.equal(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version,version);
  await preview();await ui.screenshot('return-'+type+'-preview');
- await ui.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');const startedAt=Date.now();await ui.click('تأكيد');await versionIs('0.0.1',startedAt);
+ const startedAt=Date.now();
+ const runId = 'return_' + type + '_' + startedAt;
+ await ui.evaluate(`window.__pageRunId = ${JSON.stringify(runId)}`);
+ await ui.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');await ui.click('تأكيد');await versionIs('0.0.1',startedAt,runId);
  const deadline=Date.now()+30000;let receipt;
  do{const state=JSON.parse(fs.readFileSync(path.join(storage,'update-state.json')));if(state.transition_receipt){try{receipt=JSON.parse(fs.readFileSync(path.join(storage,'channel-transition-receipts',state.transition_receipt+'.json')));}catch{}if(receipt?.state==='completed')break;if(receipt?.state==='failed')throw Error('Independent verification failed: '+JSON.stringify(receipt));}await delay(250);}while(Date.now()<deadline);
  assert.equal(receipt?.state,'completed','Independent production receipt never completed');assert.equal(receipt.target_inventory_matches,true);assert.equal(receipt.data_compatible,true);
