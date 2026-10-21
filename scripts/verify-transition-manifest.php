@@ -27,5 +27,8 @@ $full=$descriptor;$full['type']='full';$full['files']=array_map(static fn($p)=>[
 $incomplete=$full;array_pop($incomplete['files']);[$raw,$sig]=$sign($incomplete);manifestAssert(!$service->verify($raw,$sig,$carrier,$installed,$target)['ok'],'Incomplete full bundle accepted');
 $alias=$descriptor;$alias['target_inventory']['files']['frontend/dist/KEEP.js']=$file('keep');[$raw,$sig]=$sign($alias);manifestAssert(!$service->verify($raw,$sig,$carrier,$installed,$target)['ok'],'Windows case alias accepted');
 manifestAssert(!(new UpdateManifestService())->checkVersionCompatibility('0.0.10-beta.5',['version'=>'0.0.1'])['compatible'],'Ordinary downgrade bypass introduced');
+$index=['format'=>1,'carrier_tag'=>$carrier['tag_name'],'entries'=>[['from_version'=>$installed['version'],'source_inventory_sha256'=>$sourceHash,'version'=>$target['version'],'channel'=>'stable','descriptor'=>'transition-stable.json','signature'=>'transition-stable.sig','descriptor_sha256'=>hash('sha256',json_encode($descriptor)),'type'=>'delta']]];
+[$raw,$sig]=$sign($index);manifestAssert($service->verifyIndex($raw,$sig,$carrier)['ok'],'Valid signed transition index refused');
+$index['entries'][]=$index['entries'][0];[$raw,$sig]=$sign($index);manifestAssert(!$service->verifyIndex($raw,$sig,$carrier)['ok'],'Ambiguous transition index accepted');
 unlink($lab.'/public.pem');rmdir($lab);
 echo "PASS transition signatures: exact source/carrier/target/shell bindings, delta/full inventory sets, protected paths and strict ordinary downgrade policy\n";

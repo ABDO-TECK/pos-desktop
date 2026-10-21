@@ -10,6 +10,30 @@ final class ChannelTransitionManifestService
 {
     public function __construct(private ManifestSignatureService $signatures) {}
 
+    public function verifyIndex(string $raw, string $signature, array $carrier): array
+    {
+        try {
+            $this->require(strlen($raw) <= 131072 && $this->signatures->verifySignature($raw,$signature), 'signature_invalid');
+            $index = json_decode($raw,true,16,JSON_THROW_ON_ERROR);
+            $this->require(is_array($index) && ($index['format']??null)===1 && ($carrier['draft']??true)===false && ($index['carrier_tag']??null)===($carrier['tag_name']??null), 'index_invalid');
+            $this->require(is_array($index['entries']??null) && array_is_list($index['entries']) && count($index['entries'])<=32, 'index_invalid');
+            $seen = [];
+            foreach ($index['entries'] as $entry) {
+                $this->require(is_array($entry), 'index_invalid');
+                foreach (['source_inventory_sha256','descriptor_sha256'] as $field) $this->require($this->hash($entry[$field]??null), 'index_invalid');
+                foreach (['from_version','version'] as $field) $this->require(is_string($entry[$field]??null) && in_array(UpdateChannelPolicy::installedChannel($entry[$field]),UpdateChannelPolicy::active(),true), 'index_invalid');
+                $this->require(($entry['channel']??null)===UpdateChannelPolicy::installedChannel($entry['version']) && in_array($entry['type']??null,['delta','full'],true), 'index_invalid');
+                foreach (['descriptor'=>'json','signature'=>'sig'] as $field=>$extension) $this->require(is_string($entry[$field]??null) && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*\\.'.$extension.'$/D',$entry[$field])===1, 'index_invalid');
+                $key = implode('|',[$entry['from_version'],$entry['source_inventory_sha256'],$entry['version'],$entry['channel'],$entry['type']]);
+                $this->require(!isset($seen[$key]), 'index_ambiguous');
+                $seen[$key] = true;
+            }
+            return ['ok'=>true,'index'=>$index,'reason_code'=>null];
+        } catch (Throwable $error) {
+            return ['ok'=>false,'index'=>null,'reason_code'=>$error instanceof RuntimeException?$error->getMessage():'index_invalid'];
+        }
+    }
+
     /** @return array{ok:bool,descriptor:?array,reason_code:?string} */
     public function verify(string $raw, string $signature, array $carrier, array $installed, array $target): array
     {
