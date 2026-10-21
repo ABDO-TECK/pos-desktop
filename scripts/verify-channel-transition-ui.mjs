@@ -3,6 +3,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createDesktopLab,delay} from './desktop-transition-lab.mjs';
+import {attachTransitionTransport} from './channel-transition-ui-transport.mjs';
 
 const [phase,appArg,evidenceArg,assetsArg]=process.argv.slice(2);
 const application=path.resolve(appArg),evidence=path.resolve(evidenceArg),assets=path.resolve(assetsArg);
@@ -14,7 +15,7 @@ const sql=mode=>JSON.parse(execFileSync(php,[fixture,mode],{encoding:'utf8',wind
 const target=JSON.parse(fs.readFileSync(path.join(lab,'deployment-inventory.json')));
 const source=JSON.parse(fs.readFileSync(path.join(assets,'deployment-inventory.json')));
 const version=source.version;
-assert.equal(target.version,'0.0.1');assert.match(version,/^0\.0\.10-beta\.\d+$/);
+assert.equal(target.version,'0.0.1');assert.match(version,/^0\.\d+\.\d+-beta\.\d+$/);
 if(phase==='contract') {
   const ui=createDesktopLab(application,evidence);
   try {
@@ -36,7 +37,7 @@ const transportPath=path.join(lab,'transport.json');
 const assetUrl=(repo,tag,name)=>`https://github.com/ABDO-TECK/${repo}/releases/download/${tag}/${name}`;
 const candidate={tag_name:'v'+version,draft:false,prerelease:true,name:'Isolated candidate',published_at:'2026-10-21T00:00:00Z',body:'Isolated signed channel transition acceptance',assets:[]};
 const stable={tag_name:'v0.0.1',draft:false,prerelease:false,name:'Preserved original Setup',assets:[{name:'deployment-inventory.json',browser_download_url:assetUrl('pos-desktop','v0.0.1','deployment-inventory.json')}]};
-const transport={mode:'delta',responses:{},assets:{}};
+const transport={mode:'delta',responses:{},assets:{},trace:path.join(evidence,'transport-trace.jsonl')};
 for(const name of fs.readdirSync(assets)){
  const file=path.join(assets,name);if(!fs.statSync(file).isFile())continue;
  const url=assetUrl('pos-desktop-updates','v'+version,name);candidate.assets.push({name,browser_download_url:url,size:fs.statSync(file).size});transport.assets[url]=file;
@@ -48,15 +49,13 @@ for(const [repo,releases] of [['pos-desktop-updates',[candidate]],['pos-desktop'
 }
 function mode(value){transport.mode=value;fs.writeFileSync(transportPath,JSON.stringify(transport));}
 mode('delta');
-const ini=path.join(application,'resources/portable/php/php.ini');
-assert.ok(fs.existsSync(ini),'Portable PHP ini missing');
-fs.appendFileSync(ini,`\nauto_prepend_file="${path.resolve('scripts/fixtures/channel-transition-transport.php').replaceAll('\\','/')}"\n`);
-const ui=createDesktopLab(application,evidence,{POS_TRANSITION_FIXTURE:transportPath});
+const ui=createDesktopLab(application,evidence);
 let auth;
+let requestTransport;
 let firstTransitionAt;
 async function versionIs(expected){
  const deadline=Date.now()+150000;
- do{try{if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){await delay(5000);await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');return;}}catch{}await delay(500);}while(Date.now()<deadline);throw Error('Version/restart failed '+expected);
+ do{try{if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){await delay(5000);await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');requestTransport.resume();return;}}catch{}await delay(500);}while(Date.now()<deadline);throw Error('Version/restart failed '+expected);
 }
 async function chooseChannel(channel){
  await ui.until('Boolean(document.querySelector("select option[value=beta]"))','channel selector');
@@ -89,30 +88,27 @@ async function returnStable(type){
 }
 async function failLateHandoff(){
  await ui.system();await chooseChannel('stable');await preview();await ui.until('Boolean(document.querySelector("[data-testid=apply-channel-transition]"))','failure-test preview');
- let resolvePaused;const paused=new Promise(resolve=>{resolvePaused=resolve;});
- const unsubscribe=ui.onEvent((method,params)=>{if(method==='Fetch.requestPaused')resolvePaused(params);});
- await ui.call('Fetch.enable',{patterns:[{urlPattern:'*/updates/transition/apply',requestStage:'Response'}]});
- try{
-   await ui.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');firstTransitionAt=Date.now();await ui.click('تأكيد');
-   const response=await Promise.race([paused,delay(120000).then(()=>{throw Error('Transition response was not intercepted');})]);
-   if(response.responseStatusCode!==200){await ui.call('Fetch.continueRequest',{requestId:response.requestId});throw Error('Failure fixture preparation status '+response.responseStatusCode);}
-   const state=JSON.parse(fs.readFileSync(path.join(storage,'update-state.json')));assert.ok(state.transition_receipt);
+ let receiptId;
+ requestTransport.beforeApply(async prepared=>{
+   assert.equal(prepared.data?.requires_desktop_handoff,true);receiptId=prepared.data.receipt_id;
    const staged=path.join(storage,'update_staging','0.0.1','version.json');assert.ok(fs.existsSync(staged));
    fs.writeFileSync(staged,'intentional isolated late-handoff corruption');
-   await ui.call('Fetch.continueRequest',{requestId:response.requestId});await ui.call('Fetch.disable');
+ });
+   await ui.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');firstTransitionAt=Date.now();await ui.click('تأكيد');
    await ui.until('Boolean(document.querySelector("[data-testid=channel-transition] [role=alert]"))','real transition failure',120000);
+   requestTransport.resume();assert.ok(receiptId);
    const message=await ui.evaluate('document.querySelector("[data-testid=channel-transition] [role=alert]").innerText');assert.ok(message.includes('Staged artifact integrity check failed'),message);
    assert.equal(await ui.evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false,'Connection-error spam hid actual failure');
-   const receiptPath=path.join(storage,'channel-transition-receipts',state.transition_receipt+'.json');let receipt;const deadline=Date.now()+30000;
+   const receiptPath=path.join(storage,'channel-transition-receipts',receiptId+'.json');let receipt;const deadline=Date.now()+30000;
    do{receipt=JSON.parse(fs.readFileSync(receiptPath));if(receipt.state==='failed')break;await delay(250);}while(Date.now()<deadline);
    assert.equal(receipt.state,'failed');assert.equal(receipt.reason_code,'handoff_failed');assert.equal(receipt.requires_recovery,false);
    verifyInventory(source);await ui.screenshot('late-failure-recovered');return receipt;
- }finally{unsubscribe();await ui.call('Fetch.disable').catch(()=>{});}
 }
 try {
  await ui.start();auth=JSON.parse(fs.readFileSync(path.join(lab,'fixture-auth.json')));
  if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
  await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','resumed fixture session');
+ requestTransport=await attachTransitionTransport({ui,application,storage,evidence,fixture:transportPath,auth});
  const before=sql('seed');const compatibilityBefore=sql('inspect-compatibility');
  await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','ready session');
  let stored=false;for(let i=0;i<20&&!stored;i++){stored=await pendingSale('put');if(!stored)await delay(500);}assert.equal(stored,true,'Offline fixture store unavailable');
@@ -134,8 +130,9 @@ try {
  for(const [file,expected] of Object.entries(identities)){const s=fs.statSync(path.join(root,file));assert.deepEqual({ino:s.ino,mtimeMs:s.mtimeMs,birthtimeMs:s.birthtimeMs},expected,'Unchanged file replaced '+file);}
  assert.deepEqual([ui.hash(path.join(application,'POS Desktop.exe')),ui.hash(path.join(application,'resources/app.asar'))],shellBefore);
  assert.equal(await ui.evaluate('Boolean(document.querySelector("option[value=rc]"))'),false);
+ const trace=fs.readFileSync(transport.trace,'utf8');assert.ok(trace.includes('delta-0.0.1-to-'+version+'.zip'),'Frozen signed candidate transport was not exercised');
  const result={ok:true,actualOriginalSetup:true,transport:'isolated copied signed packages; live GitHub feeds verified separately after publication',sourceVersion:version,targetVersion:'0.0.1',transitions:['0.0.1',version,'0.0.1',version,'0.0.1',version],deltaAndFull:true,productionHttpPreparation:true,independentVerifierSurvived:true,deltaReceipt,fullReceipt,failedReceipt,lateFailureRecoveredSource:true,realFailureVisibleWithoutConnectionSpam:true,productionRateLimitsUnchanged:true,sourceInventorySha256:ui.hash(path.join(assets,'deployment-inventory.json')),targetInventorySha256:ui.hash(path.join(lab,'deployment-inventory.json')),sqlSchemaLedgerCustomerSettingsPreserved:true,offlineSalePreserved:true,unchangedFileIdentityPreserved:true,unchangedFilesChecked:common.length,shellUnchanged:true,selectionDoesNotInstall:true,waitDoesNotInstall:true,invalidSignatureBlocked:true,activeRcRemoved:true};
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify(result,null,2));await ui.screenshot('candidate-final');
  console.log('PASS real original Setup UI: stable-beta-stable-beta, signed delta and full return, HTTP preparation, independent receipt, exact artifacts, unchanged file identity and SQL/offline data preservation');
 } catch(error){try{await ui.screenshot('failure');}catch{}throw error;}
-finally{await ui.stop();}
+finally{try{await requestTransport?.close();}finally{await ui.stop();}}

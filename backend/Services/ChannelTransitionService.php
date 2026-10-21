@@ -51,7 +51,7 @@ final class ChannelTransitionService
             if ($context['preview']['status']!=='ready') return $this->failure($context['preview']['reason_code']??'transition_unavailable');
             if (!$this->previews->claim($previewId,$userId,$context['binding'])['ok']) return $this->failure('preview_expired_or_changed');
             $descriptor=$context['descriptor'];
-            $this->delta->setUpdateState('downloading',['operation'=>'channel_transition','owner_id'=>$lease['owner_id'],'to_version'=>$descriptor['version']]);
+            $this->delta->setUpdateState('downloading',['operation'=>'channel_transition','owner_id'=>$lease['owner_id'],'to_version'=>$descriptor['version'],'transition_receipt'=>null,'transition_verified'=>false,'requires_recovery'=>false,'error'=>null,'backup_snapshot'=>null,'handoff_plan'=>null]);
             if (!$this->delta->checkDiskSpace(max(104857600,$descriptor['package']['size']*3+filesize($this->delta->getRootDir().'/backend/backend.phar')*2))['ok']) throw new RuntimeException('insufficient_disk_space');
             $manifest=$this->handoffManifest($descriptor);
             $this->stage($descriptor,$context['package']);
@@ -69,7 +69,7 @@ final class ChannelTransitionService
             if (!copy($this->delta->getRootDir().'/backend/backend.phar',$source)) throw new RuntimeException('retained_verifier_failed');
             $handoff=$this->delta->prepareDesktopHandoff($manifest,$snapshot['snapshot_path']);
             if (!$handoff['ok']) throw new RuntimeException($handoff['error']);
-            $receipt=$this->receipts->start(['source_phar'=>$source,'snapshot_path'=>$snapshot['snapshot_path'],'target_version'=>$descriptor['version'],'target_inventory'=>$descriptor['target_inventory'],'deleted_files'=>$descriptor['deleted_files'],'data_compatibility'=>$descriptor['data_compatibility']]);
+            $receipt=$this->receipts->start(['source_phar'=>$source,'snapshot_path'=>$snapshot['snapshot_path'],'source_inventory'=>$descriptor['source_inventory'],'introduced_files'=>array_keys(array_diff_key($descriptor['target_inventory']['files'],$descriptor['source_inventory']['files'])),'target_version'=>$descriptor['version'],'target_inventory'=>$descriptor['target_inventory'],'deleted_files'=>$descriptor['deleted_files'],'data_compatibility'=>$descriptor['data_compatibility']]);
             return ['ok'=>true,'code'=>200,'requires_desktop_handoff'=>true,'handoff_version'=>$handoff['version'],'receipt_id'=>$receipt['receipt_id'],'logs'=>['تم التحقق من توقيع الحزمة والملفات وتوافق البيانات.','تم الاحتفاظ بنسخة بيانات للاسترداد اليدوي.','التحديث جاهز لإعادة التشغيل والتحقق النهائي.']];
         } catch (Throwable $error) {
             $this->delta->setUpdateState('failed',['operation'=>'channel_transition','error'=>$error->getMessage()]);

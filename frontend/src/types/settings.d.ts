@@ -40,7 +40,7 @@ declare global {
   }
 
   interface UpdateStateData {
-    transition_receipt?: string;
+    transition_receipt?: string | null;
     transition_verified?: boolean;
     requires_recovery?: boolean;
     state: 'pending' | 'downloading' | 'verifying' | 'backing_up' | 'applying' | 'migrating' | 'completed' | 'failed' | 'rolled_back' | 'idle';

@@ -11,6 +11,7 @@ class GitHubReleaseProvider extends IsolatedChannelProviderBase
     protected function executeCurlGet(string $url,array $headers=[],bool $followRedirects=false):array
     {
         $fixture=$this->fixture();$response=$fixture['responses'][$url]??null;
+        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['metadata_url'=>$url,'transport'=>'frozen_metadata'])."\n",FILE_APPEND|LOCK_EX);
         if (!is_array($response)) throw new RuntimeException('Unexpected isolated discovery URL.');
         if (($fixture['mode']??'')==='full') {
             $filter=static function(array $release):array {
@@ -31,6 +32,7 @@ class GitHubReleaseProvider extends IsolatedChannelProviderBase
     public function downloadAssetFile(string $url,string $destPath):array
     {
         $fixture=$this->fixture();$source=$fixture['assets'][$url]??null;
+        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['asset'=>basename($url),'transport'=>'copied_signed_package'])."\n",FILE_APPEND|LOCK_EX);
         if (!is_string($source)||!is_file($source)||!copy($source,$destPath)) return ['ok'=>false,'error'=>'Isolated package copy failed.'];
         return ['ok'=>true,'error'=>null];
     }

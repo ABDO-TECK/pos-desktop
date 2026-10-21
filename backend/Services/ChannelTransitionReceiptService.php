@@ -87,14 +87,26 @@ final class ChannelTransitionReceiptService
         $delta=new DeltaUpdateService(new UpdateManifestService(),$this->root,$this->storage);
         $deadline=microtime(true)+240;
         $result=['state'=>'failed','reason_code'=>'handoff_timeout','requires_recovery'=>true];
+        $verificationLock=new UpdateOperationLock($this->storage);
+        $locked=false;
+        try {
         do {
             $state=$delta->getUpdateState();
-            if (($state['transition_receipt']??null)!==$plan['receipt_id'] || ($state['backup_snapshot']??null)!==$plan['snapshot_path'] || !in_array($state['operation']??null,['channel_transition','electron_delta_install'],true)) {
+            if (!$this->ownsState($state,$plan)) {
                 $result=['state'=>'failed','reason_code'=>'operation_superseded','requires_recovery'=>false];break;
+            }
+            if (in_array($state['state']??null,['completed','failed','rolled_back','database_recovery_failed'],true) && !$locked) {
+                $lease=$verificationLock->acquire('channel_transition_verify',['receipt_id'=>$plan['receipt_id']]);
+                if (!$lease['acquired']) { usleep(250000);continue; }
+                $locked=true;
+                $state=$delta->getUpdateState();
+                if (!$this->ownsState($state,$plan)) { $result=['state'=>'failed','reason_code'=>'operation_superseded','requires_recovery'=>false];break; }
             }
             if (($state['to_version']??null)===$plan['target_version']) {
                 if (in_array($state['state']??null,['failed','rolled_back','database_recovery_failed'],true)) {
-                    $result=['state'=>'failed','reason_code'=>'handoff_failed','requires_recovery'=>false];break;
+                    try { $sourceMatches=is_array($plan['source_inventory']??null) && $this->verifyFiles($plan['source_inventory'],$plan['introduced_files']??[]); }
+                    catch (Throwable) { $sourceMatches=false; }
+                    $result=['state'=>'failed','reason_code'=>'handoff_failed','source_inventory_matches'=>$sourceMatches,'requires_recovery'=>!$sourceMatches];break;
                 }
                 if (($state['state']??null)==='completed') {
                     try {
@@ -114,10 +126,21 @@ final class ChannelTransitionReceiptService
             }
             usleep(250000);
         } while (microtime(true)<$deadline);
+        if (($result['reason_code']??null)!=='operation_superseded' && !$locked) $locked=$verificationLock->acquire('channel_transition_verify',['receipt_id'=>$plan['receipt_id']])['acquired'];
+        if (!$this->ownsState($delta->getUpdateState(),$plan)) $result=['state'=>'failed','reason_code'=>'operation_superseded','requires_recovery'=>false];
         $this->write($path,[...$result,'receipt_id'=>$plan['receipt_id'],'updated_at'=>date(DATE_ATOM)]);
-        if (($result['reason_code']??null)==='operation_superseded') return;
+        if (($result['reason_code']??null)==='operation_superseded' || !$locked) return;
         if ($result['state']!=='completed') $delta->setUpdateState('failed',['operation'=>'channel_transition','transition_receipt'=>$plan['receipt_id'],'error'=>'Channel transition verification failed: '.$result['reason_code'],'requires_recovery'=>$result['requires_recovery']]);
-        else $delta->setUpdateState('completed',['operation'=>'channel_transition','transition_receipt'=>$plan['receipt_id'],'transition_verified'=>true]);
+        else $delta->setUpdateState('completed',['operation'=>'channel_transition','transition_receipt'=>$plan['receipt_id'],'transition_verified'=>true,'requires_recovery'=>false,'error'=>null]);
+        } finally { if ($locked) $verificationLock->release(); }
+    }
+
+    private function ownsState(?array $state, array $plan): bool
+    {
+        return ($state['transition_receipt']??null)===$plan['receipt_id']
+            && ($state['backup_snapshot']??null)===$plan['snapshot_path']
+            && ($state['to_version']??null)===$plan['target_version']
+            && in_array($state['operation']??null,['channel_transition','electron_delta_install'],true);
     }
 
     private function write(string $path, array $value): void

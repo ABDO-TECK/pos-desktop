@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-// Loaded only through the disposable runner's portable php.ini. Never packaged.
+// Loaded explicitly by the disposable fixture HTTP router. Never packaged.
 if (getenv('GITHUB_ACTIONS')!=='true' || !getenv('POS_TRANSITION_FIXTURE')) throw new RuntimeException('Isolated transport requires ephemeral CI.');
 $fixture=(string)getenv('POS_TRANSITION_FIXTURE');
 $temporary=realpath((string)getenv('RUNNER_TEMP'));
