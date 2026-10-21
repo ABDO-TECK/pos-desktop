@@ -1,3 +1,4 @@
+param([switch]$Capability)
 $ErrorActionPreference='Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) { throw 'Ephemeral runner required.' }
 $lab=Join-Path $env:RUNNER_TEMP 'rollback-ui-lab'
@@ -17,6 +18,7 @@ New-Item -ItemType Directory -Path $prior | Out-Null
 gh release download v0.0.10-beta.3 --repo ABDO-TECK/pos-desktop-updates --pattern 'delta-0.0.1-to-0.0.10-beta.3.zip' --pattern 'manifest-0.0.1.*' --dir $prior
 if ($LASTEXITCODE) { throw 'Cannot download signed intermediate beta baseline.' }
 $env:POS_ROLLBACK_PRIOR_ASSETS=$prior
-node scripts/verify-rollback-ui.mjs "$lab/app" "$env:RUNNER_TEMP/rollback-ui-evidence" release-assets
+$script=if($Capability){'scripts/verify-channel-transition-capability.mjs'}else{'scripts/verify-rollback-ui.mjs'}
+node $script "$lab/app" "$env:RUNNER_TEMP/rollback-ui-evidence" release-assets
 if ($LASTEXITCODE) { throw 'Real rollback UI acceptance failed.' }
 Copy-Item -LiteralPath "$env:RUNNER_TEMP/rollback-ui-evidence/acceptance.json" -Destination 'release-assets/rollback-acceptance.json'

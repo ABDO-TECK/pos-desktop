@@ -116,6 +116,19 @@ try{
  const sentinel=path.join(storage,'business-sentinel.db');fs.writeFileSync(sentinel,'customer data fixture must remain identical');const sentinelHash=hash(sentinel);
  const oldPhar=hash(path.join(root,'backend/backend.phar'));
  const priorAssets=fs.realpathSync(process.env.POS_ROLLBACK_PRIOR_ASSETS);assert.ok(priorAssets.toLowerCase().startsWith(temporary));
+ let capabilityBefore;
+ const capability=process.env.POS_CHANNEL_CAPABILITY==='1';
+ const fixture=path.resolve('scripts/fixtures/channel-transition-capability.php');
+ const shellFiles=[path.join(application,'POS Desktop.exe'),path.join(application,'resources/app.asar')];
+ const shellBefore=shellFiles.map(hash);
+ if(capability){
+   capabilityBefore=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',[fixture,'seed'],{encoding:'utf8',windowsHide:true}));
+   const plan=path.join(evidence,'observer-plan.json');
+   fs.writeFileSync(plan,JSON.stringify({mode:'desktop',directory:evidence,root,storage,inventory:JSON.parse(fs.readFileSync(path.join(priorAssets,'manifest-0.0.1.json'))).baseline_files}));
+   execFileSync(process.env.PHP_BINARY||'php',[fixture,'launch',plan],{windowsHide:true});
+   const end=Date.now()+10_000;while(!fs.existsSync(path.join(evidence,'heartbeat.json'))&&Date.now()<end)await delay(100);
+   assert.ok(fs.existsSync(path.join(evidence,'heartbeat.json')),'Independent observer did not start');
+ }
  const prior=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',['scripts/stage-acceptance-delta.php',root,storage,priorAssets],{encoding:'utf8',windowsHide:true}));
  await evaluate('void window.posRuntime.applyStagedDelta('+JSON.stringify(prior.version)+').catch(()=>{})');await versionIs(prior.version);
  const staged=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',['scripts/stage-acceptance-delta.php',root,storage,assets],{encoding:'utf8',windowsHide:true}));
@@ -140,6 +153,13 @@ try{
  for(const file of [...intermediate.files,...manifest.files])if(!Object.hasOwn(manifest.baseline_files,file.path))assert.equal(fs.existsSync(path.join(root,file.path)),false,'Newer artifact survived: '+file.path);
  assert.equal(await evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false);await screenshot('rollback-restored');
  fs.unlinkSync(safe);
+ if(capability){
+   const after=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',[fixture,'inspect'],{encoding:'utf8',windowsHide:true}));
+   assert.deepEqual(after,capabilityBefore,'SQL schema, migration ledger or business fixture changed across return');
+   assert.deepEqual(shellFiles.map(hash),shellBefore,'Original Setup shell changed');
+   const observer=JSON.parse(fs.readFileSync(path.join(evidence,'observer.json')));assert.equal(observer.target_inventory_matches,true);
+   fs.writeFileSync(path.join(evidence,'capability.json'),JSON.stringify({...observer,schema_unchanged:true,ledger_unchanged:true,business_rows_preserved:true,shell_unchanged:true,launcherParent:'fixture_php_cli',actualDesktopHandoffs:3},null,2));
+ }
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify({ok:true,actualSetupShell:true,signedUpdateApplied:true,rollbackButton:true,validDestinationsOnly:true,oldInterfaceWarning:true,corruptSnapshotRejected:true,realErrorVisible:true,noConnectionErrorSpam:true,phpRestarted:true,baselineArtifactsRestored:true,newerAssetsRemoved:true,businessSentinelPreserved:true,transitions:[staged.version,prior.version,'0.0.1'],legacyInterfaceRestoredAsExpected:true,target:'0.0.1'},null,2));
  console.log('PASS real desktop UI: signed update, corrupt snapshot refusal, rollback button, PHP stop/replace/restart, exact baseline recovery and preserved business data');
 } catch(error){try{await screenshot('failure');}catch{}throw error;}finally{try{await stop();}catch{child?.kill();}}
