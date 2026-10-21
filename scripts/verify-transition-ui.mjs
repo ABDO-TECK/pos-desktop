@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
+import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 const root=process.cwd(),lab=fs.mkdtempSync(path.join(os.tmpdir(),'pos-channel-hook-'));
+const require=createRequire(import.meta.url);
 const {rolldown}=await import(pathToFileURL(path.join(root,'frontend/node_modules/rolldown/dist/index.mjs')).href);
 try {
  const entry=path.join(lab,'entry.js');
@@ -47,7 +49,10 @@ await evaluate('probe.setChannel("stable")');await delay(100);await evaluate('re
 assert.equal(await evaluate('installRequests'),0,'Preview/wait/selection installed an update');console.log('PASS actual React hook: automatic preview, retained wait across reopening, stale responses ignored and zero installation requests');app.exit(0);
 }catch(error){console.error(error.stack);app.exit(1);}});`);
  const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
- const child=spawn(path.join(root,'node_modules/electron/dist/electron.exe'),[path.join(lab,'main.cjs')],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
+ const electronPackage=path.join(root,'node_modules/electron');
+ if(!fs.existsSync(path.join(electronPackage,'dist/electron.exe')))execFileSync(process.execPath,[path.join(electronPackage,'install.js')],{env:{...env,ELECTRON_SKIP_BINARY_DOWNLOAD:''},windowsHide:true,stdio:'inherit'});
+ const electron=require(electronPackage);assert.ok(fs.existsSync(electron),'Pinned test Electron runtime was not installed');
+ const child=spawn(electron,[path.join(lab,'main.cjs')],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',d=>output+=d);child.stderr.on('data',d=>output+=d);
  const code=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('Hook fixture timeout'));},30000);child.on('error',reject);child.on('exit',code=>{clearTimeout(timer);resolve(code);});});assert.equal(code,0,output);console.log(output.trim());
 }finally{assert.ok(fs.realpathSync(lab).startsWith(fs.realpathSync(os.tmpdir())+path.sep));fs.rmSync(lab,{recursive:true,force:true,maxRetries:10,retryDelay:100});}
 
