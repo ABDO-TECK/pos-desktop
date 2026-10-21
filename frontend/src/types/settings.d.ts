@@ -124,6 +124,8 @@ declare global {
 
   interface UpdateRollbackResult {
     ok: boolean;
+    requires_desktop_handoff?: boolean;
+    handoff_version?: string;
     snapshot?: string;
     logs?: string[];
     error?: string | null;
@@ -175,6 +177,7 @@ declare global {
     last_event_success: number | boolean;
     last_seen_at: string;
     total_events: number;
+    is_active: boolean;
   }
 
   interface TelemetryEventRecord {

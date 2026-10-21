@@ -625,6 +625,10 @@ class UpdateRecoveryService
             ];
         }
 
+        if (!empty($rbResult['requires_desktop_handoff'])) {
+            return $rbResult + ['action'=>'rollback', 'message'=>'Recovery files are verified; desktop service restart is required to complete rollback.'];
+        }
+
         // Keep snapshot preserved (NEVER delete snapshot during recovery)
         $state['status'] = 'rolled_back';
         $state['state'] = 'rolled_back';

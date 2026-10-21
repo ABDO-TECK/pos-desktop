@@ -298,6 +298,10 @@ class UpdateController extends Controller
             ? trim($body['snapshot_path'])
             : null;
 
+        if (\App\Services\UpdateRuntimePaths::isPackagedPharDeployment($this->updateService->getRootDir()) && empty($body['delta_capable'])) {
+            return Response::error('يلزم تشغيل الاسترجاع من تطبيق سطح المكتب الذي يدعم الاستبدال الآمن.', 426);
+        }
+
         Logger::info('Admin update rollback initiated', [
             'user_id'       => $user['id'] ?? null,
             'username'      => $user['username'] ?? 'system',
@@ -314,19 +318,19 @@ class UpdateController extends Controller
 
             return Response::error(
                 $result['error'] ?? 'فشل التراجع عن التحديث.',
-                500,
+                $result['code'] ?? 500,
                 ['logs' => $result['logs'] ?? []]
             );
         }
 
-        Logger::info('Admin update rollback completed successfully', [
+        Logger::info(!empty($result['requires_desktop_handoff']) ? 'Admin rollback prepared for desktop handoff' : 'Admin update rollback completed successfully', [
             'user_id'  => $user['id'] ?? null,
             'snapshot' => $result['snapshot'] ?? null,
         ]);
 
         return Response::success(
             $result,
-            'تم التراجع عن التحديث بنجاح وإعادة النظام لحالته السابقة'
+            !empty($result['requires_desktop_handoff']) ? 'تم التحقق من نقطة الاسترجاع وتجهيز الاستبدال الآمن بعد إيقاف الخدمات.' : 'تم التراجع عن التحديث بنجاح وإعادة النظام لحالته السابقة'
         );
     }
 

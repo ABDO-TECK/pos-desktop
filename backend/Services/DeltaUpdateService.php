@@ -1087,12 +1087,15 @@ class DeltaUpdateService
                 }
                 $targetFile = $this->rootDir . '/' . $normalized;
 
-                if (is_file($targetFile)) {
-                    if (@unlink($targetFile)) {
+                if (file_exists($targetFile)) {
+                    if (is_file($targetFile) && @unlink($targetFile)) {
                         $deletedFiles[] = $normalized;
                         $logs[] = "🗑️ تم حذف: {$normalized}";
                     } else {
                         Logger::warning("Could not delete deprecated file during update: {$normalized}");
+                        $errors[] = "Failed to delete artifact: {$normalized}";
+                        $logs[] = "❌ تعذر حذف ملف التحديث المطلوب: {$normalized}";
+                        break;
                     }
                 }
             }

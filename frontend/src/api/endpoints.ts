@@ -120,14 +120,16 @@ export const applyUpdate = (force = false, deltaCapable = false) => api.post<Api
   ...(force ? { force: true } : {}),
   delta_capable: deltaCapable,
 }, {
-  // Allow the server's bounded four-minute signed update and recovery snapshot
+  // Allow the server's bounded signed update and recovery snapshot
   // to finish before handing the verified files to Electron.
   timeout: 1_260_000,
   hideGlobalError: true,
   headers: { 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 } as UpdateRequestConfig)
 export const getUpdateHistory = (config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateHistoryRecord[]>>('/updates/history', config)
-export const rollbackUpdate = (snapshotPath?: string) => api.post<ApiResponse<UpdateRollbackResult>>('/updates/rollback', snapshotPath ? { snapshot_path: snapshotPath } : null)
+export const rollbackUpdate = (snapshotPath?: string, deltaCapable = false) => api.post<ApiResponse<UpdateRollbackResult>>('/updates/rollback', {
+  ...(snapshotPath ? { snapshot_path: snapshotPath } : {}), delta_capable: deltaCapable,
+}, { timeout: 1_260_000, hideGlobalError: true } as UpdateRequestConfig)
 export const getUpdateSnapshots = (config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateSnapshot[]>>('/updates/snapshots', config)
 export const getUpdateJob = (id: number) => api.get<ApiResponse<UpdateJobResult>>(`/update/jobs/${id}`, { timeout: 15_000 })
 

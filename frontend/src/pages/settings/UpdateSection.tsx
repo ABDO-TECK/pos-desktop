@@ -143,6 +143,12 @@ export default function UpdateSection() {
   }
 
   const handleManualRecovery = async (action: string) => {
+    if (action === 'rollback') {
+      const snapshot = recoveryDiag?.details?.snapshot
+      await handleRollback(typeof snapshot === 'string' ? snapshot : undefined)
+      return
+    }
+
     const ok = await confirm(`هل أنت متأكد من رغبتك في تنفيذ إجراء الاستعادة: (${action})؟`)
     if (!ok) return
 
@@ -335,14 +341,28 @@ export default function UpdateSection() {
   const handleRollback = async (snapshotPath?: string) => {
     const targetLabel = snapshotPath ? `من اللقطة: ${snapshotPath.split('/').pop()}` : 'إلى آخر نسخة احتياطية سابقة'
     const confirmed = await confirm(
-      `⚠️ تحذير: التراجع عن التحديث ${targetLabel}:\n\nسيتم استرجاع ملفات النظام وقاعدة البيانات إلى الحالة السابقة للقطة المحددة. هل أنت متأكد؟`
+      `⚠️ تحذير: التراجع عن التحديث ${targetLabel}:\n\nسيتم استرجاع ملفات البرنامج فقط مع الحفاظ على بياناتك الحالية. النقاط التي تتضمن استعادة قاعدة بيانات تحتاج مسار استعادة مخصصًا. هل أنت متأكد؟`
     )
     if (!confirmed) return
 
     setRollingBack(true)
     setUpdateLogs(['🔄 جاري استرجاع الملفات من اللقطة الاحتياطية...'])
     try {
-      const res = await rollbackUpdate(snapshotPath)
+      const capable = await hasDeltaHandoffCapability()
+      const res = await rollbackUpdate(snapshotPath, capable)
+      const result = res.data?.data
+      if (result?.requires_desktop_handoff && result.handoff_version) {
+        const version = result.handoff_version
+        const notice = 'pos-update-restarting'
+        toast.loading('جاري إعادة تشغيل الخدمات لإكمال الاسترجاع...', { id: notice })
+        try {
+          const applied = await withUpdateRestart(async () => {
+            if (!window.posRuntime) throw new Error('خدمة الاسترجاع الآمن غير متاحة.')
+            return window.posRuntime.applyStagedDelta(version)
+          })
+          if (!applied.ok) throw new Error(applied.error || 'فشل استرجاع الملفات بأمان.')
+        } finally { toast.dismiss(notice) }
+      }
       const logs = res.data?.data?.logs || []
       setUpdateLogs(logs)
       toast.success('✅ تم التراجع عن التحديث بنجاح!')
@@ -350,7 +370,8 @@ export default function UpdateSection() {
       setTimeout(() => window.location.reload(), 1200)
     } catch (error: unknown) {
       const msg = isAxiosError(error) ? error.response?.data?.message : (error instanceof Error ? error.message : 'فشل التراجع.')
-      toast.error(msg || 'فشل التراجع عن التحديث.')
+      if (isAxiosError(error) && Array.isArray(error.response?.data?.data?.logs)) setUpdateLogs(error.response.data.data.logs)
+      toast.error(msg || (error instanceof Error ? error.message : 'فشل التراجع عن التحديث.'))
     } finally {
       setRollingBack(false)
     }

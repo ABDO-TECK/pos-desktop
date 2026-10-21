@@ -1,0 +1,26 @@
+<?php
+declare(strict_types=1);
+require __DIR__.'/../backend/vendor/autoload.php';
+use App\Services\{UpdateTelemetryService,UpdateService,DeltaUpdateService,GitService,FrontendBuildService,BackupService};
+putenv('APP_ENV=testing');
+$lab=sys_get_temp_dir().'/pos-fleet-'.bin2hex(random_bytes(6));mkdir($lab);
+file_put_contents($lab.'/version.json','{"version":"0.0.10-beta.3"}');
+$pdo=new PDO('sqlite::memory:');$pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+$pdo->exec('CREATE TABLE update_telemetry(id INTEGER PRIMARY KEY,device_id TEXT,current_version TEXT,target_version TEXT,channel TEXT,event_type TEXT,success INTEGER,error_code TEXT,duration_ms INTEGER,metadata TEXT,created_at TEXT)');
+$insert=$pdo->prepare('INSERT INTO update_telemetry(device_id,current_version,channel,event_type,success,created_at) VALUES(?,?,?,?,?,?)');
+$insert->execute(['historic-device','0.0.8','stable','update_check_started',1,date('Y-m-d H:i:s',time()-60*86400)]);
+$insert->execute(['live-device','0.0.10-beta.3','beta','update_applied',1,date('Y-m-d H:i:s')]);
+$insert->execute(['live-device','0.0.8','stable','update_check_started',1,date('Y-m-d H:i:s',time()-90*86400)]);
+$insert->execute(['fixture-old','0.0.8','stable','update_check_started',1,date('Y-m-d H:i:s')]);
+$service=new UpdateTelemetryService($lab,$pdo,$lab);$stats=$service->getFleetStats();$devices=$service->getFleetDevices();
+if(isset($stats['version_distribution']['0.0.8']))throw new RuntimeException('Historical version counted as active');
+if($stats['total_devices']!==1||$stats['total_known_devices']!==2)throw new RuntimeException('Counts differ from activity window');
+if(count($devices['devices'])!==2||$devices['devices'][1]['is_active']!==false)throw new RuntimeException('Historical rows missing or marked active');
+$searched=$service->getFleetDevices(50,0,'0.0.8');if($searched['total']!==1)throw new RuntimeException('Filtered count incorrect');
+mkdir($lab.'/legacy/storage',0700,true);file_put_contents($lab.'/legacy/storage/.device_id','existing-device-uuid');
+putenv('APP_DEPLOY_ROOT='.$lab.'/legacy');
+$delta=new DeltaUpdateService(null,$lab.'/legacy',$lab.'/persistent');
+$updates=new UpdateService(new GitService(),new FrontendBuildService(),new BackupService(),$delta);
+if($updates->getDeviceId()!=='existing-device-uuid'||!is_file($lab.'/persistent/.device_id'))throw new RuntimeException('Legacy identity not migrated to persistent storage');
+unlink($lab.'/legacy/storage/.device_id');if($updates->getDeviceId()!=='existing-device-uuid')throw new RuntimeException('Device identity changed');
+echo "PASS Fleet historical/active distinction, filters, retained old versions and persistent legacy device identity\n";

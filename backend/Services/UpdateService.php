@@ -103,10 +103,7 @@ class UpdateService
     public function getTelemetryService(): UpdateTelemetryService
     {
         if ($this->telemetryService === null) {
-            $storage = $this->rootDir . '/backend/storage';
-            if (!is_dir($storage)) {
-                $storage = $this->rootDir . '/storage';
-            }
+            $storage = $this->deltaUpdateService->getStorageDir();
             $this->telemetryService = new UpdateTelemetryService($storage);
         }
         return $this->telemetryService;
@@ -163,17 +160,21 @@ class UpdateService
      */
     public function getDeviceId(): string
     {
-        $storageDir = $this->rootDir . '/backend/storage';
-        if (!is_dir($storageDir)) {
-            $storageDir = $this->rootDir . '/storage';
-        }
+        $storageDir = $this->deltaUpdateService->getStorageDir();
         $deviceFile = $storageDir . '/.device_id';
-
-        if (file_exists($deviceFile)) {
-            $id = trim((string) @file_get_contents($deviceFile));
-            if ($id !== '') {
-                return $id;
+        if (!is_dir($storageDir) && !@mkdir($storageDir, 0755, true) && !is_dir($storageDir)) throw new \RuntimeException('Cannot persist device identity.');
+        foreach ([$deviceFile, $this->rootDir.'/backend/storage/.device_id', $this->rootDir.'/storage/.device_id'] as $candidate) {
+            if (!is_file($candidate)) continue;
+            $id = trim((string)file_get_contents($candidate));
+            if ($id === '') continue;
+            if ($candidate !== $deviceFile) {
+                $handle = @fopen($deviceFile, 'x');
+                if ($handle) { fwrite($handle, $id); fclose($handle); }
+                $persisted = @file_get_contents($deviceFile);
+                if ($persisted === false || trim($persisted) === '') throw new \RuntimeException('Cannot migrate device identity.');
+                return trim($persisted);
             }
+            return $id;
         }
 
         // Generate RFC 4122 v4 UUID
@@ -182,10 +183,11 @@ class UpdateService
         $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
         $uuid = vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
 
-        @mkdir(dirname($deviceFile), 0755, true);
-        @file_put_contents($deviceFile, $uuid);
-
-        return $uuid;
+        $handle = @fopen($deviceFile, 'x');
+        if ($handle) { fwrite($handle, $uuid); fclose($handle); }
+        $persisted = @file_get_contents($deviceFile);
+        if ($persisted === false || trim($persisted) === '') throw new \RuntimeException('Cannot persist device identity.');
+        return trim($persisted);
     }
 
     /**
@@ -1485,42 +1487,43 @@ class UpdateService
 
     public function rollbackUpdate(?string $snapshotPath = null): array
     {
-        $snapshot = $snapshotPath ?? $this->deltaUpdateService->findLatestSnapshot();
-        if ($snapshot && is_file(rtrim($snapshot, '/\\') . '/metadata.json')) {
-            $metadata = json_decode((string) @file_get_contents(rtrim($snapshot, '/\\') . '/metadata.json'), true);
-            $dbRecovery = is_array($metadata) ? ($metadata['db_recovery'] ?? null) : null;
-            if (is_array($dbRecovery) && !empty($dbRecovery['backup_path']) && !empty($dbRecovery['recovery_id'])) {
-                $database = $this->migrationSafetyBackupService->restoreMigrationSafetyBackup(
-                    (string) $dbRecovery['backup_path'],
-                    (string) $dbRecovery['recovery_id']
-                );
-                if (!$database['ok']) {
-                    return [
-                        'ok' => false,
-                        'snapshot' => $snapshot,
-                        'logs' => [],
-                        'error' => 'Database recovery failed; application files were not rolled back: ' . ($database['error'] ?? 'unknown error'),
-                    ];
-                }
+        $lock = new UpdateOperationLock($this->deltaUpdateService->getStorageDir());
+        if (UpdateOperationLock::isActiveState($this->deltaUpdateService->getUpdateState())) {
+            return ['ok'=>false,'code'=>409,'error'=>'Another update or sale operation is already in progress.','logs'=>[]];
+        }
+        $lease = $lock->acquire('backend_rollback');
+        if (!$lease['acquired']) return ['ok'=>false,'code'=>409,'error'=>$lease['message'],'logs'=>[]];
+        $limit=(int)ini_get('max_execution_time');
+        try {
+            if ($limit>0 && $limit<1200) set_time_limit(1200);
+            $snapshot=$snapshotPath ?? $this->deltaUpdateService->findLatestSnapshot();
+            if (!$snapshot) return ['ok'=>false,'code'=>404,'error'=>'No backup snapshot found for rollback.','logs'=>[]];
+            $this->deltaUpdateService->setUpdateState('verifying',['owner_id'=>$lease['owner_id'],'operation'=>'backend_rollback','error'=>null,'update_completed'=>false]);
+            $prepared=(new UpdateRollbackPlanner($this->deltaUpdateService))->prepare($snapshot);
+            if (!$prepared['ok']) {
+                $this->deltaUpdateService->setUpdateState('failed',['error'=>$prepared['error']]);
+                return $prepared;
             }
+            if (!UpdateRuntimePaths::isPackagedPharDeployment($this->rootDir)) {
+                $applied=$this->deltaUpdateService->applyStagedFiles($prepared['manifest'],$prepared['safety_snapshot']);
+                if (!$applied['ok']) return ['ok'=>false,'code'=>500,'error'=>implode('; ',$applied['errors']),'logs'=>$applied['logs']];
+                return ['ok'=>true,'snapshot'=>$prepared['snapshot'],'logs'=>$applied['logs']];
+            }
+            $handoff=$this->deltaUpdateService->prepareDesktopHandoff($prepared['manifest'],$prepared['safety_snapshot']);
+            if (!$handoff['ok']) {
+                $this->deltaUpdateService->setUpdateState('failed',['error'=>$handoff['error']]);
+                return ['ok'=>false,'code'=>422,'error'=>$handoff['error'],'logs'=>$prepared['logs']];
+            }
+            $this->deltaUpdateService->setUpdateState('desktop_handoff_pending',['operation_kind'=>'rollback','rollback_snapshot'=>$prepared['snapshot']]);
+            return ['ok'=>true,'requires_desktop_handoff'=>true,'handoff_version'=>$handoff['version'],
+                'snapshot'=>$prepared['snapshot'],'logs'=>$prepared['logs']];
+        } catch (Throwable $error) {
+            $this->deltaUpdateService->setUpdateState('failed',['error'=>$error->getMessage()]);
+            return ['ok'=>false,'code'=>500,'error'=>$error->getMessage(),'logs'=>[]];
+        } finally {
+            $lock->release();
+            if ($limit>0 && $limit<1200) set_time_limit($limit);
         }
-
-        $res = $this->deltaUpdateService->rollbackUpdate($snapshot);
-        if (!empty($res['ok'])) {
-            $this->getTelemetryService()->recordEvent([
-                'device_id'             => $this->getDeviceId(),
-                'application_version'   => $this->getLocalVersion()['version'] ?? '0.0.0',
-                'update_engine_version' => '1.0.0',
-                'channel'               => $this->getClientChannel(),
-                'target_version'        => null,
-                'event_type'            => 'rollback_completed',
-                'success'               => true,
-                'metadata'              => [
-                    'snapshot_name' => basename($res['snapshot'] ?? ($snapshotPath ?? 'latest')),
-                ],
-            ]);
-        }
-        return $res;
     }
 
     private function updateCoordinationFailure(

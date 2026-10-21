@@ -1,0 +1,21 @@
+<?php
+declare(strict_types=1);
+require __DIR__.'/../backend/vendor/autoload.php';
+[$script,$root,$storage,$assets]=$argv;
+$current=json_decode(file_get_contents($root.'/version.json'),true)['version'];
+$raw=file_get_contents($assets.'/manifest-'.$current.'.json');
+$signature=file_get_contents($assets.'/manifest-'.$current.'.sig');
+if(!(new App\Services\ManifestSignatureService())->verifySignature($raw,$signature,__DIR__.'/../backend/certs/update_public_key.pem'))throw new RuntimeException('Untrusted acceptance delta');
+$policy=new App\Services\UpdateManifestService();$valid=$policy->validateManifest($raw);
+if(!$valid['valid'])throw new RuntimeException('Invalid acceptance manifest');
+$manifest=$valid['manifest'];
+putenv('APP_STORAGE_DIR='.$storage);
+$delta=new App\Services\DeltaUpdateService($policy,$root,$storage);
+if(!$policy->verifyBaselineFiles($root,$manifest))throw new RuntimeException('Acceptance baseline mismatch');
+$stage=$delta->extractZipToStaging($assets.'/delta-'.$current.'-to-'.$manifest['version'].'.zip',$delta->getStagingDir($manifest['version']));
+if(!$stage['ok'])throw new RuntimeException(json_encode($stage));
+$snapshot=$delta->createBackupSnapshot($current,$manifest['version'],$manifest);
+if(!$snapshot['ok'])throw new RuntimeException($snapshot['error']);
+$result=$delta->prepareDesktopHandoff($manifest,$snapshot['snapshot_path']);
+if(!$result['ok'])throw new RuntimeException($result['error']);
+echo json_encode(['snapshot'=>$snapshot['snapshot_path'],'version'=>$manifest['version']]);

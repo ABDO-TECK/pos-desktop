@@ -1,6 +1,6 @@
 {
-  "version": "0.0.10-beta.2",
-  "application_version": "0.0.10-beta.2",
+  "version": "0.0.10-beta.3",
+  "application_version": "0.0.10-beta.3",
   "update_engine_version": "1.0.0",
   "channel": "beta",
   "minimum_supported_version": "0.0.1",
@@ -8,16 +8,17 @@
   "release_generation": 3,
   "released_at": "2026-10-21",
   "changelog": [
-    "Reliable signed delta downloads on slow or interrupted connections with bounded retries and precise errors.",
-    "Failed delta downloads stop safely without an unavailable Git/full-update fallback.",
-    "One-time RSA-verified repair tool for the original 0.0.1 and beta.1 downloaders."
+    "Restore points verify snapshots and hand files to Electron after stopping PHP; failures retain the running version and data.",
+    "Fleet distinguishes recent reports from historical records without deleting old versions.",
+    "Device identity and telemetry storage persist across updates and migrate the existing legacy identifier."
   ],
   "requires_npm_install": false,
   "update_channel": "beta",
   "release_type": "delta",
   "delta_baseline_tags": [
     "v0.0.1",
-    "v0.0.10-beta.1"
+    "v0.0.10-beta.1",
+    "v0.0.10-beta.2"
   ],
   "installer_version": "0.0.1"
 }

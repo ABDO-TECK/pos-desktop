@@ -191,7 +191,7 @@ export default function FleetDashboard() {
           <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text)' }}>
             {totalDevs} <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--text-muted)' }}>أجهزة</span>
           </div>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>نقاط البيع النشطة خلال 30 يوماً</div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>أجهزة أرسلت سجلات خلال 30 يوماً</div>
         </div>
 
         {/* Update Success Rate */}
@@ -306,10 +306,11 @@ export default function FleetDashboard() {
         </div>
       </div>
 
+      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>هذه سجلات تحديث محلية وليست قائمة أجهزة متصلة الآن. حذف إصدار من GitHub لا يحذف سجله التاريخي؛ الإصدار الظاهر هو آخر إصدار أبلغ عنه الجهاز.</p>
       {/* Fleet Devices Table */}
       <div className="card" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
-          <h4 style={{ margin: 0, fontSize: '0.95rem' }}>أجهزة الأسطول النشطة ({devices.length})</h4>
+          <h4 style={{ margin: 0, fontSize: '0.95rem' }}>سجلات أجهزة الأسطول ({devices.length})</h4>
 
           {/* Search Box */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'var(--bg-input, #1e1e2e)', padding: '0.35rem 0.75rem', borderRadius: '6px', border: '1px solid var(--border)' }}>
@@ -334,7 +335,7 @@ export default function FleetDashboard() {
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--border)', textAlign: 'right', color: 'var(--text-muted)' }}>
                   <th style={{ padding: '0.6rem 0.5rem' }}>معرّف الجهاز المجهول (UUID)</th>
-                  <th style={{ padding: '0.6rem 0.5rem' }}>الإصدار الحالي</th>
+                  <th style={{ padding: '0.6rem 0.5rem' }}>آخر إصدار مُبلّغ عنه</th>
                   <th style={{ padding: '0.6rem 0.5rem' }}>القناة</th>
                   <th style={{ padding: '0.6rem 0.5rem' }}>آخر حدث تحديث</th>
                   <th style={{ padding: '0.6rem 0.5rem' }}>آخر ظهور</th>
@@ -365,6 +366,7 @@ export default function FleetDashboard() {
                     </td>
                     <td style={{ padding: '0.6rem 0.5rem', color: 'var(--text-muted)' }}>
                       {d.last_seen_at ? new Date(d.last_seen_at).toLocaleString('ar-EG') : '—'}
+                      <div style={{ fontSize: '0.75rem' }}>{d.is_active ? 'سجل خلال آخر 30 يومًا' : 'سجل تاريخي — لم يظهر خلال 30 يومًا'}</div>
                     </td>
                     <td style={{ padding: '0.6rem 0.5rem' }}>
                       <button

@@ -356,6 +356,15 @@ class UpdateTelemetryService
     /**
      * Calculate fleet health and telemetry analytics.
      */
+    private function latestDeviceRowsSql(): string
+    {
+        $filter=self::getTestDeviceExclusionSql('candidate.device_id');
+        return "SELECT candidate.device_id, candidate.id AS max_id FROM update_telemetry candidate
+            WHERE {$filter} AND NOT EXISTS (SELECT 1 FROM update_telemetry newer
+                WHERE newer.device_id=candidate.device_id AND (newer.created_at>candidate.created_at
+                    OR (newer.created_at=candidate.created_at AND newer.id>candidate.id)))";
+    }
+
     public function getFleetStats(): array
     {
         $this->flushLocalQueue();
@@ -368,6 +377,7 @@ class UpdateTelemetryService
 
             $deviceFilter = self::getTestDeviceExclusionSql('device_id');
             $tDeviceFilter = self::getTestDeviceExclusionSql('t.device_id');
+            $latestRows=$this->latestDeviceRowsSql();
             $intervalSql = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite'
                 ? "datetime('now', '-30 days')"
                 : "DATE_SUB(NOW(), INTERVAL 30 DAY)";
@@ -386,12 +396,9 @@ class UpdateTelemetryService
                 SELECT t.current_version, COUNT(*) as count
                 FROM update_telemetry t
                 INNER JOIN (
-                    SELECT device_id, MAX(id) as max_id
-                    FROM update_telemetry
-                    WHERE {$deviceFilter}
-                    GROUP BY device_id
+                    {$latestRows}
                 ) latest ON t.id = latest.max_id
-                WHERE {$tDeviceFilter}
+                WHERE {$tDeviceFilter} AND t.created_at >= {$intervalSql}
                 GROUP BY t.current_version
                 ORDER BY count DESC
             ");
@@ -405,12 +412,9 @@ class UpdateTelemetryService
                 SELECT t.channel, COUNT(*) as count
                 FROM update_telemetry t
                 INNER JOIN (
-                    SELECT device_id, MAX(id) as max_id
-                    FROM update_telemetry
-                    WHERE {$deviceFilter}
-                    GROUP BY device_id
+                    {$latestRows}
                 ) latest ON t.id = latest.max_id
-                WHERE {$tDeviceFilter}
+                WHERE {$tDeviceFilter} AND t.created_at >= {$intervalSql}
                 GROUP BY t.channel
                 ORDER BY count DESC
             ");
@@ -490,8 +494,8 @@ class UpdateTelemetryService
                     $alerts[] = [
                         'severity' => 'info',
                         'code' => 'outdated_devices',
-                        'title' => 'أجهزة تعمل بإصدارات قديمة',
-                        'message' => "يوجد {$outdatedCount} جهاز يعمل بإصدار أقدم من v{$targetVersion} ويتطلب التحديث.",
+                        'title' => 'تقارير أجهزة بإصدارات أقدم',
+                        'message' => "آخر إصدار أبلغ عنه {$outdatedCount} جهاز أقدم من v{$targetVersion}. راجع تاريخ آخر ظهور؛ هذه السجلات لا تثبت اتصال الأجهزة الآن.",
                     ];
                 }
             } elseif ($totalDevices > 0) {
@@ -506,6 +510,8 @@ class UpdateTelemetryService
             return [
                 'ok'                   => true,
                 'total_devices'        => $totalDevices,
+                'total_known_devices'  => (int)$pdo->query("SELECT COUNT(DISTINCT device_id) FROM update_telemetry WHERE {$deviceFilter}")->fetchColumn(),
+                'activity_window_days' => 30,
                 'version_distribution' => $versionDist,
                 'channel_distribution' => $channelDist,
                 'update_health'        => [
@@ -557,7 +563,10 @@ class UpdateTelemetryService
 
             $deviceFilter = self::getTestDeviceExclusionSql('device_id');
             $tDeviceFilter = self::getTestDeviceExclusionSql('t.device_id');
+            $latestRows=$this->latestDeviceRowsSql();
 
+            $limit=max(1,min(100,$limit));$offset=max(0,$offset);
+            $intervalSql=$pdo->getAttribute(PDO::ATTR_DRIVER_NAME)==='sqlite' ? "datetime('now', '-30 days')" : "DATE_SUB(NOW(), INTERVAL 30 DAY)";
             $params = [];
             $where = "WHERE {$tDeviceFilter}";
 
@@ -574,13 +583,11 @@ class UpdateTelemetryService
                     t.event_type as last_event,
                     t.success as last_event_success,
                     t.created_at as last_seen_at,
+                    CASE WHEN t.created_at >= {$intervalSql} THEN 1 ELSE 0 END as is_active,
                     (SELECT COUNT(*) FROM update_telemetry ut WHERE ut.device_id = t.device_id) as total_events
                 FROM update_telemetry t
                 INNER JOIN (
-                    SELECT device_id, MAX(id) as max_id
-                    FROM update_telemetry
-                    WHERE {$deviceFilter}
-                    GROUP BY device_id
+                    {$latestRows}
                 ) latest ON t.id = latest.max_id
                 {$where}
                 ORDER BY t.created_at DESC
@@ -590,10 +597,12 @@ class UpdateTelemetryService
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             $devices = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            foreach ($devices as &$device) $device['is_active']=(bool)$device['is_active'];
+            unset($device);
 
             // Count total (excluding test identities)
-            $countSql = "SELECT COUNT(DISTINCT device_id) as total FROM update_telemetry WHERE {$deviceFilter}";
-            $total = (int) ($pdo->query($countSql)->fetch(PDO::FETCH_ASSOC)['total'] ?? 0);
+            $countSql = "SELECT COUNT(*) FROM update_telemetry t INNER JOIN ({$latestRows}) latest ON t.id=latest.max_id {$where}";
+            $count=$pdo->prepare($countSql);$count->execute($params);$total=(int)$count->fetchColumn();
 
             return [
                 'ok'      => true,
@@ -657,7 +666,7 @@ class UpdateTelemetryService
                        event_type, success, error_code, duration_ms, metadata, created_at
                 FROM update_telemetry
                 WHERE device_id = :device_id
-                ORDER BY id DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 50
             ");
             $stmt->execute([':device_id' => $deviceId]);
