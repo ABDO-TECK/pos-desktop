@@ -116,12 +116,13 @@ try{
  const sentinel=path.join(storage,'business-sentinel.db');fs.writeFileSync(sentinel,'customer data fixture must remain identical');const sentinelHash=hash(sentinel);
  const oldPhar=hash(path.join(root,'backend/backend.phar'));
  const priorAssets=fs.realpathSync(process.env.POS_ROLLBACK_PRIOR_ASSETS);assert.ok(priorAssets.toLowerCase().startsWith(temporary));
- let capabilityBefore;
+ let capabilityBefore,compatibilityBefore;
  const capability=process.env.POS_CHANNEL_CAPABILITY==='1';
  const fixture=path.resolve('scripts/fixtures/channel-transition-capability.php');
  const shellFiles=[path.join(application,'POS Desktop.exe'),path.join(application,'resources/app.asar')];
  const shellBefore=shellFiles.map(hash);
  if(capability){
+   compatibilityBefore=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',[fixture,'prepare-compatibility'],{encoding:'utf8',windowsHide:true}));
    capabilityBefore=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',[fixture,'seed'],{encoding:'utf8',windowsHide:true}));
    const plan=path.join(evidence,'observer-plan.json');
    fs.writeFileSync(plan,JSON.stringify({mode:'desktop',directory:evidence,root,storage,inventory:JSON.parse(fs.readFileSync(path.join(priorAssets,'manifest-0.0.1.json'))).baseline_files}));
@@ -158,7 +159,9 @@ try{
    assert.deepEqual(after,capabilityBefore,'SQL schema, migration ledger or business fixture changed across return');
    assert.deepEqual(shellFiles.map(hash),shellBefore,'Original Setup shell changed');
    const observer=JSON.parse(fs.readFileSync(path.join(evidence,'observer.json')));assert.equal(observer.target_inventory_matches,true);
-   fs.writeFileSync(path.join(evidence,'capability.json'),JSON.stringify({...observer,schema_unchanged:true,ledger_unchanged:true,business_rows_preserved:true,shell_unchanged:true,launcherParent:'fixture_php_cli',actualDesktopHandoffs:3},null,2));
+   const compatibilityAfter=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',[fixture,'inspect-compatibility'],{encoding:'utf8',windowsHide:true}));
+   assert.deepEqual(compatibilityAfter,compatibilityBefore,'Old destination startup changed the supported data contract');
+   fs.writeFileSync(path.join(evidence,'capability.json'),JSON.stringify({...observer,schema_unchanged:true,ledger_unchanged:true,business_rows_preserved:true,shell_unchanged:true,compatibility:compatibilityAfter,launcherParent:'fixture_php_cli',actualDesktopHandoffs:4},null,2));
  }
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify({ok:true,actualSetupShell:true,signedUpdateApplied:true,rollbackButton:true,validDestinationsOnly:true,oldInterfaceWarning:true,corruptSnapshotRejected:true,realErrorVisible:true,noConnectionErrorSpam:true,phpRestarted:true,baselineArtifactsRestored:true,newerAssetsRemoved:true,businessSentinelPreserved:true,transitions:[staged.version,prior.version,'0.0.1'],legacyInterfaceRestoredAsExpected:true,target:'0.0.1'},null,2));
  console.log('PASS real desktop UI: signed update, corrupt snapshot refusal, rollback button, PHP stop/replace/restart, exact baseline recovery and preserved business data');

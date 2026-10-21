@@ -43,11 +43,26 @@ if($mode==='observe') {
     exit;
 }
 if($mode==='launch'){launchObserver($argument);echo '{"launched":true}';exit;}
-if(!in_array($mode,['seed','inspect'],true)||getenv('GITHUB_ACTIONS')!=='true')throw new RuntimeException('SQL capability fixture requires ephemeral CI');
+if(!in_array($mode,['seed','inspect','prepare-compatibility','inspect-compatibility'],true)||getenv('GITHUB_ACTIONS')!=='true')throw new RuntimeException('SQL capability fixture requires ephemeral CI');
 $config=rtrim((string)getenv('APPDATA'),'/\\').'/POS System';
 $credentials=json_decode(file_get_contents($config.'/db_credentials.json'),true,512,JSON_THROW_ON_ERROR);
 $ports=json_decode(file_get_contents($config.'/runtime_ports.json'),true,512,JSON_THROW_ON_ERROR);
 $db=new PDO('mysql:host=127.0.0.1;port='.$ports['mysqlPort'].';dbname=pos_db;charset=utf8mb4',$credentials['user'],$credentials['password'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+if(in_array($mode,['prepare-compatibility','inspect-compatibility'],true)) {
+    require __DIR__.'/../../backend/vendor/autoload.php';
+    if($mode==='prepare-compatibility') {
+        $migration=new PDO('mysql:host=127.0.0.1;port='.$ports['mysqlPort'].';dbname=pos_db;charset=utf8mb4',$credentials['migrationUser'],$credentials['migrationPassword'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+        $isolatedStorage=rtrim((string)getenv('RUNNER_TEMP'),'/\\').'/transition-metadata-fixture';
+        if(!is_dir($isolatedStorage))mkdir($isolatedStorage,0700,true);
+        putenv('APP_STORAGE_DIR='.$isolatedStorage);
+        $result=(new App\Services\MigrationService($migration))->runMigrations([App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION],true);
+        if($result['errors'])throw new RuntimeException('Compatibility metadata migration failed: '.implode('; ',$result['errors']));
+    }
+    $description=(new App\Services\UpdateDataCompatibilityService())->describe($db);
+    try{$db->exec("UPDATE pos_update_compatibility_metadata SET definition='altered'");throw new RuntimeException('Metadata view was writable');}
+    catch(PDOException $expected){/* TEMPTABLE view is intentionally not updatable. */}
+    echo json_encode(['schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'objects'=>count($description['schema']['objects']),'runtime_metadata_readable'=>true,'metadata_view_read_only'=>true],JSON_THROW_ON_ERROR);exit;
+}
 if($mode==='seed') {
     $query=$db->prepare('INSERT INTO customers (branch_id,name,phone,initial_balance,loyalty_points) VALUES (1, ?, ?, 27.50, 13)');
     $query->execute(['codex-transition-sentinel',bin2hex(random_bytes(10))]);
