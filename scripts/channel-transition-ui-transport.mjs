@@ -6,6 +6,8 @@ import {spawn} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {delay} from './desktop-transition-lab.mjs';
 
+const isInterceptionDropped=error=>/Invalid InterceptionId|WebSocket is not open/i.test(error?.message||'');
+
 /** UI request transport only. Runs the actual deployed PHAR, auth and CSRF. */
 export async function attachTransitionTransport({ui,application,storage,evidence,fixture,auth}) {
   assert.equal(process.env.GITHUB_ACTIONS,'true');
@@ -50,9 +52,15 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   async function handle(params){
     const {requestId,request}=params;
     // Preserve the real runtime's preflight response; OPTIONS never prepares a handoff.
-    if(request.method==='OPTIONS'){await ui.call('Fetch.continueRequest',{requestId});return;}
+    if(request.method==='OPTIONS'){
+      try{await ui.call('Fetch.continueRequest',{requestId});}catch(err){if(!isInterceptionDropped(err))throw err;}
+      return;
+    }
     const url=new URL(request.url),mutation=request.method==='POST'&&/\/(?:apply|rollback)$/.test(url.pathname);
-    if(preparing){await ui.call('Fetch.continueRequest',{requestId});return;}
+    if(preparing){
+      try{await ui.call('Fetch.continueRequest',{requestId});}catch(err){if(!isInterceptionDropped(err))throw err;}
+      return;
+    }
     if(mutation){preparing=true;await Promise.allSettled([...tasks]);}
     try{
       const destination=await ensureServer();
@@ -72,10 +80,15 @@ export async function attachTransitionTransport({ui,application,storage,evidence
         const prepared=JSON.parse(body.toString());
         if(response.status===200&&beforeApplyResponse){const hook=beforeApplyResponse;beforeApplyResponse=null;await hook(prepared);}
       }
-      await ui.call('Fetch.fulfillRequest',{requestId,responseCode:response.status,responseHeaders,body:body.toString('base64')});
+      try{
+        await ui.call('Fetch.fulfillRequest',{requestId,responseCode:response.status,responseHeaders,body:body.toString('base64')});
+      }catch(err){
+        if(!isInterceptionDropped(err))throw err;
+      }
       if(mutation&&response.status!==200)preparing=false;
     }catch(error){
       preparing=false;
+      if(isInterceptionDropped(error))return;
       await ui.call('Fetch.fulfillRequest',{requestId,responseCode:503,responseHeaders:[{name:'content-type',value:'application/json'},{name:'access-control-allow-origin',value:'app://pos-app'},{name:'access-control-allow-credentials',value:'true'}],body:Buffer.from(JSON.stringify({status:'error',message:'Isolated HTTP transport failed.'})).toString('base64')}).catch(()=>{});
       throw error;
     }
@@ -83,7 +96,12 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   let failure;
   const unsubscribe=ui.onEvent((method,params)=>{
     if(method!=='Fetch.requestPaused')return;
-    const task=handle(params).catch(error=>{failure=error;console.error('Isolated update request failed: '+error.message);}).finally(()=>tasks.delete(task));tasks.add(task);
+    const task=handle(params).catch(error=>{
+      if(isInterceptionDropped(error))return;
+      failure=error;
+      console.error('Isolated update request failed: '+error.message);
+    }).finally(()=>tasks.delete(task));
+    tasks.add(task);
   });
   await ui.call('Fetch.enable',{patterns:[{urlPattern:'*/api/*/updates/*',requestStage:'Request'},{urlPattern:'*/api/updates/*',requestStage:'Request'}]});
   return {
