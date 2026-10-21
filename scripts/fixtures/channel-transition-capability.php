@@ -49,8 +49,10 @@ $credentials=json_decode(file_get_contents($config.'/db_credentials.json'),true,
 $ports=json_decode(file_get_contents($config.'/runtime_ports.json'),true,512,JSON_THROW_ON_ERROR);
 $db=new PDO('mysql:host=127.0.0.1;port='.$ports['mysqlPort'].';dbname=pos_db;charset=utf8mb4',$credentials['user'],$credentials['password'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
 if($mode==='seed') {
-    $db->exec('CREATE TABLE codex_transition_sentinel (id INT PRIMARY KEY, value VARCHAR(80) NOT NULL)');
-    $query=$db->prepare('INSERT INTO codex_transition_sentinel VALUES (1, ?)');$query->execute([bin2hex(random_bytes(24))]);
+    $query=$db->prepare('INSERT INTO customers (branch_id,name,phone,initial_balance,loyalty_points) VALUES (1, ?, ?, 27.50, 13)');
+    $query->execute(['codex-transition-sentinel',bin2hex(random_bytes(10))]);
+    $query=$db->prepare('INSERT INTO settings (`key`,`value`) VALUES (?,?)');
+    $query->execute(['codex_transition_sentinel',bin2hex(random_bytes(24))]);
 }
 $schema=[];
 foreach($db->query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"')->fetchAll(PDO::FETCH_NUM) as $entry) {
@@ -58,4 +60,4 @@ foreach($db->query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"')->fetchAll
     $schema[$name]=preg_replace('/AUTO_INCREMENT=\d+\s*/','',$create);
 }
 ksort($schema);
-echo json_encode(['schema_sha256'=>hash('sha256',json_encode($schema)),'ledger'=>$db->query('SELECT version FROM schema_versions ORDER BY version')->fetchAll(PDO::FETCH_COLUMN),'business_rows'=>$db->query('SELECT id,value FROM codex_transition_sentinel ORDER BY id')->fetchAll(PDO::FETCH_ASSOC)],JSON_THROW_ON_ERROR);
+echo json_encode(['schema_sha256'=>hash('sha256',json_encode($schema)),'ledger'=>$db->query('SELECT version FROM schema_versions ORDER BY version')->fetchAll(PDO::FETCH_COLUMN),'business_rows'=>$db->query("SELECT id,name,phone,initial_balance,loyalty_points FROM customers WHERE name='codex-transition-sentinel' ORDER BY id")->fetchAll(PDO::FETCH_ASSOC),'settings'=>$db->query("SELECT `key`,`value` FROM settings WHERE `key`='codex_transition_sentinel'")->fetchAll(PDO::FETCH_ASSOC)],JSON_THROW_ON_ERROR);
