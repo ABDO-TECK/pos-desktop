@@ -17,7 +17,8 @@ for(const rel of ['app.asar.unpacked/version.json','app.asar.unpacked/frontend/d
 }
 const v=JSON.parse(fs.readFileSync('package.json','utf8')).version;
 const setup=`POS-Desktop-Setup-${v}.exe`;
-const metadata=v.includes('-beta.')?'beta.yml':v.includes('-rc.')?'rc.yml':'latest.yml';
+if(v.includes('-rc.'))throw Error('RC publication is retired');
+const metadata=v.includes('-beta.')?'beta.yml':'latest.yml';
 for(const rel of [setup,setup+'.blockmap',metadata])if(!fs.existsSync(path.join(out,rel)))throw Error('Missing release asset: '+rel);
 const names=[setup,setup+'.blockmap',metadata];
 const hashes=names.map(name=>crypto.createHash('sha256').update(fs.readFileSync(path.join(out,name))).digest('hex')+'  '+name).join('\n')+'\n';

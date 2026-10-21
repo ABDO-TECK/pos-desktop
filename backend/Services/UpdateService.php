@@ -111,22 +111,20 @@ class UpdateService
 
 
     /**
-     * Get client update channel ('stable', 'beta', 'rc').
+     * Get the selected active channel, independently of installed code identity.
      */
     public function getClientChannel(): string
     {
-        $preference = @file_get_contents($this->clientChannelFile);
-        if ($preference !== false) {
-            $data = json_decode($preference, true);
-            $storedChannel = is_array($data) ? strtolower(trim((string) ($data['channel'] ?? ''))) : '';
-            if (in_array($storedChannel, ['stable', 'beta', 'rc'], true)) {
-                return $storedChannel;
-            }
-        }
+        return $this->getChannelPreferenceInfo()['channel'];
+    }
+
+    public function getChannelPreferenceInfo(): array
+    {
+        if (is_file($this->clientChannelFile)) return UpdateChannelPolicy::migratePreference($this->clientChannelFile);
 
         $local = $this->getLocalVersion();
         $channel = strtolower(trim($local['update_channel'] ?? EnvLoader::get('APP_UPDATE_CHANNEL', 'stable')));
-        return in_array($channel, ['stable', 'beta', 'rc'], true) ? $channel : 'stable';
+        return ['channel'=>UpdateChannelPolicy::normalizePreference($channel), 'migrated_from'=>null];
     }
 
     /**
@@ -135,8 +133,8 @@ class UpdateService
     public function setClientChannel(string $channel): array
     {
         $channel = strtolower(trim($channel));
-        if (!in_array($channel, ['stable', 'beta', 'rc'], true)) {
-            return ['ok' => false, 'error' => 'قناة التحديث المحددة غير صحيحة. القنوات المسموحة: stable, beta, rc.'];
+        if (!in_array($channel, UpdateChannelPolicy::active(), true)) {
+            return ['ok' => false, 'error' => 'القنوات المتاحة هي stable وbeta فقط.'];
         }
 
         $storageDir = dirname($this->clientChannelFile);
@@ -144,13 +142,8 @@ class UpdateService
             return ['ok' => false, 'error' => 'تعذر حفظ إعدادات قناة التحديث.'];
         }
 
-        $json = json_encode([
-            'channel' => $channel,
-            'updated_at' => date('c'),
-        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        if ($json === false || @file_put_contents($this->clientChannelFile, $json . "\n", LOCK_EX) === false) {
-            return ['ok' => false, 'error' => 'تعذر حفظ إعدادات قناة التحديث.'];
-        }
+        try { UpdateChannelPolicy::savePreference($this->clientChannelFile, $channel); }
+        catch (Throwable $error) { return ['ok'=>false, 'error'=>'تعذر حفظ إعدادات قناة التحديث.']; }
 
         return ['ok' => true, 'channel' => $channel];
     }
@@ -218,7 +211,8 @@ class UpdateService
             if ($mtime !== false && (time() - $mtime) < 300) {
                 $cached = @json_decode((string) @file_get_contents($cacheFile), true);
                 if (is_array($cached) && !empty($cached['ok']) && !empty($cached['data'])) {
-                    return $cached['data'];
+                    $cachedVersion = $cached['data']['version'] ?? null;
+                    if ($cachedVersion === null || (is_string($cachedVersion) && $this->manifestService->checkChannelCompatibility($targetChannel, UpdateChannelPolicy::installedChannel($cachedVersion))['compatible'])) return $cached['data'];
                 }
             }
         }

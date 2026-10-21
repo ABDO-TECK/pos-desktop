@@ -78,7 +78,7 @@ export default function UpdateSection() {
   const [historyList, setHistoryList] = useState<UpdateHistoryRecord[]>([])
   const [snapshotsList, setSnapshotsList] = useState<UpdateSnapshot[]>([])
   const [rollingBack, setRollingBack] = useState(false)
-  const [currentChannel, setCurrentChannel] = useState<'stable' | 'beta' | 'rc'>('stable')
+  const [currentChannel, setCurrentChannel] = useState<'stable' | 'beta'>('stable')
   const [savingChannel, setSavingChannel] = useState(false)
 
   // Recovery & Self-Healing states
@@ -169,7 +169,7 @@ export default function UpdateSection() {
     }
   }
 
-  const handleChannelChange = async (newChan: 'stable' | 'beta' | 'rc') => {
+  const handleChannelChange = async (newChan: 'stable' | 'beta') => {
     setSavingChannel(true)
     try {
       await setUpdateChannel(newChan)
@@ -395,15 +395,15 @@ export default function UpdateSection() {
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
           {/* Channel Selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'var(--card-bg, #2a2a3e)', border: '1px solid var(--border)', borderRadius: '8px', padding: '0.2rem 0.5rem' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>القناة:</span>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>قناة المتابعة:</span>
             <select
               value={currentChannel}
-              onChange={(e) => handleChannelChange(e.target.value as 'stable' | 'beta' | 'rc')}
+              onChange={(e) => handleChannelChange(e.target.value as 'stable' | 'beta')}
               disabled={savingChannel || isChecking || applyingUpdate}
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: currentChannel === 'beta' ? '#f59e0b' : currentChannel === 'rc' ? '#38bdf8' : '#4ade80',
+                color: currentChannel === 'beta' ? '#f59e0b' : '#4ade80',
                 fontWeight: 700,
                 fontSize: '0.8rem',
                 cursor: 'pointer',
@@ -412,9 +412,11 @@ export default function UpdateSection() {
             >
               <option value="stable" style={{ background: '#1e1e2e', color: '#fff' }}>Stable (مستقر)</option>
               <option value="beta" style={{ background: '#1e1e2e', color: '#fff' }}>Beta (تجريبي)</option>
-              <option value="rc" style={{ background: '#1e1e2e', color: '#fff' }}>RC (مرشح للإطلاق)</option>
             </select>
           </div>
+          {updateStatus?.channel_migrated_from && (
+            <p role="status" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>تم إيقاف القناة السابقة واختيار متابعة stable. الإصدار المثبّت لم يتغير.</p>
+          )}
 
           <span style={{ 
             fontSize: '0.8rem', 

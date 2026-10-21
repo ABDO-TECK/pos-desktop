@@ -89,7 +89,9 @@ class UpdateController extends Controller
             'type'               => $type,
             'bootstrap_required' => $bootstrapRequired,
             'channel'            => $clientChannel,
-            'available_channels' => ['stable', 'beta', 'rc'],
+            'channel_migrated_from' => $this->updateService->getChannelPreferenceInfo()['migrated_from'],
+            'installed_channel'  => \App\Services\UpdateChannelPolicy::installedChannel($currentVersion),
+            'available_channels' => ['stable', 'beta'],
             'device_id'          => substr($this->updateService->getDeviceId(), 0, 8) . '...',
             'release_info'       => $releaseInfo,
             'update_state'       => $state,
@@ -103,7 +105,8 @@ class UpdateController extends Controller
     {
         return Response::success([
             'channel' => $this->updateService->getClientChannel(),
-            'available_channels' => ['stable', 'beta', 'rc'],
+            'channel_migrated_from' => $this->updateService->getChannelPreferenceInfo()['migrated_from'],
+            'available_channels' => ['stable', 'beta'],
             'device_id' => $this->updateService->getDeviceId(),
         ]);
     }
@@ -121,8 +124,8 @@ class UpdateController extends Controller
         $input = json_decode((string) file_get_contents('php://input'), true) ?: $_POST;
         $channel = trim($input['channel'] ?? '');
 
-        if (!in_array($channel, ['stable', 'beta', 'rc'], true)) {
-            return Response::error('Invalid channel. Allowed: stable, beta, rc.', 400);
+        if (!in_array($channel, ['stable', 'beta'], true)) {
+            return Response::error('Invalid channel. Allowed: stable, beta.', 400);
         }
 
         $result = $this->updateService->setClientChannel($channel);

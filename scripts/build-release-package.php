@@ -71,10 +71,10 @@ if (!$tag) {
 $isBootstrap = str_contains(strtolower($tag), 'bootstrap');
 $cleanVersion = preg_replace('/^v/', '', $tag);
 $baseVersion = preg_replace('/-bootstrap$/', '', $cleanVersion);
-if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $baseVersion)) {
-    throw new RuntimeException('Use vX.Y.Z, vX.Y.Z-beta.N or vX.Y.Z-rc.N.');
+if (!preg_match('/^\d+\.\d+\.\d+(?:-beta\.\d+)?$/', $baseVersion)) {
+    throw new RuntimeException('Use vX.Y.Z or vX.Y.Z-beta.N.');
 }
-$releaseChannel = str_contains($baseVersion, '-beta.') ? 'beta' : (str_contains($baseVersion, '-rc.') ? 'rc' : 'stable');
+$releaseChannel = str_contains($baseVersion, '-beta.') ? 'beta' : 'stable';
 
 echo "════════════════════════════════════════════════════════════════════════════════\n";
 echo "🚀 POS Update Engine Release Builder\n";
@@ -249,7 +249,7 @@ if ($isBootstrap) {
     }
 
     $fromVersion = $fromVersionOption;
-    if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $fromVersion)) {
+    if (!preg_match('/^\d+\.\d+\.\d+(?:-beta\.\d+)?$/', $fromVersion)) {
         throw new RuntimeException("Invalid explicit baseline version '{$fromVersionOption}'.");
     }
 

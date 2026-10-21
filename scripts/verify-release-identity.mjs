@@ -20,7 +20,11 @@ try {
   assert.notEqual(run(setup,'v0.0.8').status,0);
   const delta = {...setup,version:'0.0.10-beta.1',application_version:'0.0.10-beta.1',channel:'beta',release_type:'delta',delta_baseline_tags:['v0.0.1']};
   assert.equal(run(delta,'v0.0.10-beta.1').status,0);
+  assert.notEqual(run({...delta,version:'0.0.10-rc.1',application_version:'0.0.10-rc.1',channel:'rc'},'v0.0.10-rc.1').status,0,'Retired channel can still be published');
   console.log('PASS: Setup identity agrees with displayed application version; delta revisions remain independent of the installed shell');
 } finally {
-  fs.rmSync(lab,{recursive:true,force:true});
+  const resolved=fs.realpathSync(lab);
+  assert.equal(path.dirname(resolved).toLowerCase(),fs.realpathSync(os.tmpdir()).toLowerCase());
+  assert.ok(path.basename(resolved).startsWith('pos-release-identity-'));
+  fs.rmSync(resolved,{recursive:true,force:true});
 }

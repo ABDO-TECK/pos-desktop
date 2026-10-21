@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $Tag, [ValidateSet('stable','beta','rc')][string] $Channel)
+param([Parameter(Mandatory)][string] $Tag, [ValidateSet('stable','beta')][string] $Channel)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $env:GITHUB_ACTIONS -or $env:GITHUB_REPOSITORY -ne 'ABDO-TECK/pos-desktop-updates') { throw 'This publisher runs only in the project GitHub Actions repository.' }
@@ -7,7 +7,7 @@ if (-not $env:UPDATE_PRIVATE_KEY) { throw 'UPDATE_PRIVATE_KEY repository secret 
 $version = Get-Content version.json -Raw | ConvertFrom-Json
 New-Item -ItemType Directory -Path release-assets -Force | Out-Null
 foreach ($baselineTag in $version.delta_baseline_tags) {
-    if ($baselineTag -notmatch '^v\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$') { throw 'Invalid baseline tag.' }
+    if ($baselineTag -notmatch '^v\d+\.\d+\.\d+(?:-beta\.\d+)?$') { throw 'Invalid baseline tag.' }
     $baselineVersion = $baselineTag.Substring(1)
     $work = Join-Path $env:RUNNER_TEMP ('delta-' + $baselineVersion)
     New-Item -ItemType Directory -Path $work -Force | Out-Null

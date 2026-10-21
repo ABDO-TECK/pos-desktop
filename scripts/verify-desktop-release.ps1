@@ -44,7 +44,8 @@ if ($Tag) {
 
 $installerName = "POS-Desktop-Setup-$version.exe"
 $installerPath = Join-Path $releaseRoot $installerName
-$metadataName = if ($version -match '-beta\.') { 'beta.yml' } elseif ($version -match '-rc\.') { 'rc.yml' } else { 'latest.yml' }
+$metadataName = if ($version -match '-beta\.') { 'beta.yml' } else { 'latest.yml' }
+if ($version -match '-rc\.') { throw 'RC publication is retired.' }
 $latestPath = Join-Path $releaseRoot $metadataName
 if (-not (Test-Path -LiteralPath $installerPath)) { throw "Installer is missing: $installerPath" }
 if (-not (Test-Path -LiteralPath $latestPath)) { throw "latest.yml is missing: $latestPath" }

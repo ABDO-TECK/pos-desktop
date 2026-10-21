@@ -35,7 +35,9 @@ declare global {
     update_available: boolean;
     type: 'bootstrap' | 'delta' | 'full';
     bootstrap_required?: boolean;
-    channel?: 'stable' | 'beta' | 'rc';
+    channel?: 'stable' | 'beta';
+    installed_channel?: 'stable' | 'beta' | 'retired';
+    channel_migrated_from?: string | null;
     available_channels?: string[];
     device_id?: string;
     release_info: ReleaseInfo;
@@ -76,8 +78,8 @@ declare global {
     delta_url?: string | null;
     fallback_reason?: string | null;
     bootstrap_required?: boolean;
-    client_channel?: 'stable' | 'beta' | 'rc';
-    release_channel?: 'stable' | 'beta' | 'rc';
+    client_channel?: 'stable' | 'beta';
+    release_channel?: 'stable' | 'beta';
     rollout_percentage?: number;
     device_bucket?: number;
     in_rollout_group?: boolean;
@@ -163,7 +165,8 @@ declare global {
     ok: boolean;
     total_devices: number;
     version_distribution: Record<string, number>;
-    channel_distribution: { stable: number; beta: number; rc: number };
+    channel_distribution: { stable: number; beta: number };
+    legacy_channel_distribution?: Record<string, number>;
     update_health: FleetHealthStats;
     alerts: FleetAlert[];
     last_synced_at: string;

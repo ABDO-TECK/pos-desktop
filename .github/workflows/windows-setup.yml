@@ -158,7 +158,6 @@ jobs:
             dist-electron/POS-Desktop-Setup-*.exe.blockmap
             dist-electron/latest*.yml
             dist-electron/beta.yml
-            dist-electron/rc.yml
             dist-electron/deployment-inventory.json
             dist-electron/SHA256SUMS.txt
           if-no-files-found: error

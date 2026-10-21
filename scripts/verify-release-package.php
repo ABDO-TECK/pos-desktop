@@ -12,7 +12,7 @@ function verifyFail(string $message): never
 
 function verifySemver(string $version, string $label): void
 {
-    if (!preg_match('/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/', $version)) {
+    if (!preg_match('/^\d+\.\d+\.\d+(?:-beta\.\d+)?$/', $version)) {
         verifyFail("{$label} must be a semantic version in X.Y.Z form.");
     }
 }

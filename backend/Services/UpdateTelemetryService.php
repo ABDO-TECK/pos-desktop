@@ -418,10 +418,12 @@ class UpdateTelemetryService
                 GROUP BY t.channel
                 ORDER BY count DESC
             ");
-            $channelDist = ['stable' => 0, 'beta' => 0, 'rc' => 0];
+            $channelDist = ['stable' => 0, 'beta' => 0];
+            $legacyChannelDist = [];
             while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 $ch = strtolower((string) $row['channel']);
-                $channelDist[$ch] = (int) $row['count'];
+                if (in_array($ch, UpdateChannelPolicy::active(), true)) $channelDist[$ch] = (int)$row['count'];
+                else $legacyChannelDist[$ch] = (int)$row['count'];
             }
 
             // Update success vs failure & recovery in last 30 days (excluding test/diagnostic identities)
@@ -514,6 +516,7 @@ class UpdateTelemetryService
                 'activity_window_days' => 30,
                 'version_distribution' => $versionDist,
                 'channel_distribution' => $channelDist,
+                'legacy_channel_distribution' => $legacyChannelDist,
                 'update_health'        => [
                     'total_events'     => $totalActions,
                     'successful'       => $successfulActions,
@@ -535,7 +538,8 @@ class UpdateTelemetryService
                 'ok'                   => false,
                 'total_devices'        => 0,
                 'version_distribution' => [],
-                'channel_distribution' => ['stable' => 0, 'beta' => 0, 'rc' => 0],
+                'channel_distribution' => ['stable' => 0, 'beta' => 0],
+                'legacy_channel_distribution' => [],
                 'update_health'        => [
                     'total_events' => 0,
                     'successful'   => 0,

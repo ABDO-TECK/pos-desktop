@@ -104,8 +104,8 @@ class UpdateManifestService
 
         // Validate channel string if present
         if (isset($manifest['channel'])) {
-            if (!is_string($manifest['channel']) || !in_array($manifest['channel'], ['stable', 'beta', 'rc'], true)) {
-                $errors[] = 'Manifest "channel" must be one of: stable, beta, rc.';
+            if (!is_string($manifest['channel']) || !in_array($manifest['channel'], UpdateChannelPolicy::active(), true)) {
+                $errors[] = 'Manifest "channel" must be stable or beta.';
             }
         }
 
@@ -261,10 +261,9 @@ class UpdateManifestService
      *
      * Rules:
      * - 'stable' client receives ONLY 'stable' releases.
-     * - 'rc' client receives 'rc' and 'stable' releases.
-     * - 'beta' client receives 'beta', 'rc', and 'stable' releases.
+     * - 'beta' client receives 'beta' and 'stable' releases.
      *
-     * @param string $clientChannel Client update channel ('stable', 'beta', 'rc')
+     * @param string $clientChannel Client update channel ('stable', 'beta')
      * @param string|null $releaseChannel Channel specified in release manifest (defaults to 'stable')
      * @return array{compatible: bool, reason: string|null}
      */
@@ -273,37 +272,13 @@ class UpdateManifestService
         $relChannel = strtolower(trim($releaseChannel ?: 'stable'));
         $cliChannel = strtolower(trim($clientChannel ?: 'stable'));
 
-        if (!in_array($cliChannel, ['stable', 'beta', 'rc'], true)) {
-            $cliChannel = 'stable';
+        if (!in_array($cliChannel, UpdateChannelPolicy::active(), true) || !in_array($relChannel, UpdateChannelPolicy::active(), true)) {
+            return ['compatible'=>false, 'reason'=>'Release channel is not active.'];
         }
-        if (!in_array($relChannel, ['stable', 'beta', 'rc'], true)) {
-            $relChannel = 'stable';
+        if ($cliChannel === 'stable' && $relChannel !== 'stable') {
+            return ['compatible'=>false, 'reason'=>'Stable clients accept stable releases only.'];
         }
-
-        // Stable clients only accept stable releases
-        if ($cliChannel === 'stable') {
-            if ($relChannel !== 'stable') {
-                return [
-                    'compatible' => false,
-                    'reason' => "Release is on '{$relChannel}' channel, but client is configured for 'stable' updates only.",
-                ];
-            }
-            return ['compatible' => true, 'reason' => null];
-        }
-
-        // RC clients accept stable and rc
-        if ($cliChannel === 'rc') {
-            if ($relChannel === 'beta') {
-                return [
-                    'compatible' => false,
-                    'reason' => "Release is on 'beta' channel, but client is configured for 'rc' updates.",
-                ];
-            }
-            return ['compatible' => true, 'reason' => null];
-        }
-
-        // Beta clients accept all channels (beta, rc, stable)
-        return ['compatible' => true, 'reason' => null];
+        return ['compatible'=>true, 'reason'=>null];
     }
 
     /**
@@ -357,7 +332,7 @@ class UpdateManifestService
         if (($manifest['version'] ?? null) !== $targetVersion || ltrim($tag, 'vV') !== $targetVersion) {
             return ['compatible' => false, 'reason' => 'Signed manifest version does not match the selected release tag.'];
         }
-        $releaseChannel = str_contains($targetVersion, '-beta.') ? 'beta' : (str_contains($targetVersion, '-rc.') ? 'rc' : 'stable');
+        $releaseChannel = UpdateChannelPolicy::installedChannel($targetVersion);
         if (($manifest['channel'] ?? 'stable') !== $releaseChannel) {
             return ['compatible' => false, 'reason' => 'Signed manifest channel does not match the selected release tag.'];
         }

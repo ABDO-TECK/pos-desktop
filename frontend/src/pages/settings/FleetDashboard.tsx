@@ -292,16 +292,9 @@ export default function FleetDashboard() {
               </div>
             </div>
 
-            {/* RC */}
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.25rem' }}>
-                <span style={{ color: '#38bdf8', fontWeight: 600 }}>قناة RC (المرشحة)</span>
-                <span style={{ color: 'var(--text-muted)' }}>{stats?.channel_distribution?.rc ?? 0} أجهزة</span>
-              </div>
-              <div style={{ width: '100%', height: '6px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' }}>
-                <div style={{ width: `${totalDevs > 0 ? ((stats?.channel_distribution?.rc ?? 0) / totalDevs) * 100 : 0}%`, height: '100%', background: '#38bdf8', borderRadius: '3px' }} />
-              </div>
-            </div>
+            {Object.keys(stats?.legacy_channel_distribution || {}).length > 0 && (
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>سجلات لقنوات متوقفة: {Object.values(stats?.legacy_channel_distribution || {}).reduce((sum, count) => sum + count, 0)}</p>
+            )}
           </div>
         </div>
       </div>

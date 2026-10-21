@@ -79,6 +79,7 @@ final class UpdateRollbackPlanner
             $root=$this->delta->getRootDir();
             $current=json_decode((string)file_get_contents($root.'/version.json'),true,512,JSON_THROW_ON_ERROR)['version']??'';
             $target=$metadata['from_version']??'';
+            if (UpdateChannelPolicy::installedChannel($target) === 'retired') throw new RuntimeException('هذه النقطة تخص قناة متوقفة؛ تظل محفوظة للاسترداد الفني فقط.');
             if (($metadata['to_version']??null)!==$current) {
                 throw new RuntimeException('هذه اللقطة تخص تحديثًا أقدم ولا تمثل الحالة السابقة مباشرة لإصدارك الحالي. اختر نقطة استرجاع التحديث الحالي لتجنب خلط ملفات إصدارات مختلفة.');
             }

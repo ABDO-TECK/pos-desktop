@@ -107,7 +107,7 @@ if ($db !== null) {
                 ('updates.check', 'Check for new system updates'),
                 ('updates.apply', 'Install and apply system updates'),
                 ('updates.rollback', 'Rollback system updates from snapshots'),
-                ('updates.manage_channel', 'Change release update channel (stable/beta/rc)'),
+                ('updates.manage_channel', 'Change release update channel (stable/beta)'),
                 ('updates.telemetry.view', 'View fleet updates telemetry and analytics'),
                 ('updates.telemetry.manage', 'Manage and purge update telemetry data'),
                 ('updates.recovery.view', 'View update recovery status, diagnostics, and audit logs'),

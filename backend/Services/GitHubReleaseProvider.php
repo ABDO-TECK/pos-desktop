@@ -78,7 +78,7 @@ class GitHubReleaseProvider
     /**
      * Fetch the latest release from GitHub Releases API for a specified channel.
      *
-     * @param string $channel Target channel ('stable', 'beta', 'rc')
+     * @param string $channel Target channel ('stable', 'beta')
      * @return array{
      *   ok: bool,
      *   latest_version: ?string,
@@ -105,8 +105,8 @@ class GitHubReleaseProvider
     private function getReleasePage(string $channel, ?string $currentVersion, int $page): array
     {
         $channel = strtolower(trim($channel ?: 'stable'));
-        if (!in_array($channel, ['stable', 'beta', 'rc'], true)) {
-            $channel = 'stable';
+        if (!in_array($channel, UpdateChannelPolicy::active(), true)) {
+            return $this->failureResult('invalid_channel', 'Only stable and beta channels are active.');
         }
 
         // Use the same semantic policy as every other discovery/apply path.
@@ -200,28 +200,10 @@ class GitHubReleaseProvider
                 continue;
             }
 
-            $tagLower = strtolower($tag);
-            $isPrerelease = !empty($rel['prerelease']);
-            $isRc = str_contains($tagLower, 'rc');
-            $isBeta = !$isRc && ($isPrerelease || str_contains($tagLower, 'beta'));
-
-            $relChannel = 'stable';
-            if ($isBeta) {
-                $relChannel = 'beta';
-            } elseif ($isRc) {
-                $relChannel = 'rc';
-            }
-
-            // Channel Filter Check:
-            // - stable: only accepts stable
-            // - rc: accepts stable, rc
-            // - beta: accepts stable, rc, beta
-            if ($channel === 'stable' && $relChannel !== 'stable') {
-                continue;
-            }
-            if ($channel === 'rc' && $relChannel === 'beta') {
-                continue;
-            }
+            $relChannel = UpdateChannelPolicy::installedChannel(ltrim($tag, 'vV'));
+            if ($relChannel === 'retired') continue;
+            if ((bool)$rel['prerelease'] !== ($relChannel === 'beta')) continue;
+            if ($channel === 'stable' && $relChannel !== 'stable') continue;
 
             if (!empty($rel['draft'])) continue;
             $mapped = $this->mapReleaseData($rel, $currentVersion);

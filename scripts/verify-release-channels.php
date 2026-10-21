@@ -27,11 +27,14 @@ expect($provider->getRepo() === 'pos-desktop-updates', 'Default repository must 
 $stable = $provider->getLatestRelease('stable', '0.0.2');
 $beta = $provider->getLatestRelease('beta', '0.0.2');
 $rc = $provider->getLatestRelease('rc', '0.0.2');
+expect(empty($rc['ok']), 'Retired RC request was accepted.');
 expect($stable['latest_version'] === '0.0.3', 'Stable received a beta.');
 expect($beta['latest_version'] === '0.0.4-beta.1', 'Beta did not receive newest beta.');
 expect(str_ends_with($beta['manifest_url'] ?? '', 'manifest-0.0.2.json'), 'Baseline-specific signed manifest not selected.');
-$onlyRc = (new FixtureReleaseProvider([release('0.0.3-rc.1', true)]))->getLatestRelease('rc', '0.0.2');
-expect($onlyRc['latest_version'] === '0.0.3-rc.1', 'RC prerelease misclassified as beta.');
+$onlyRc = (new FixtureReleaseProvider([release('0.0.3-rc.1', true)]))->getLatestRelease('beta', '0.0.2');
+expect(!empty($onlyRc['no_eligible_release']), 'Retired RC prerelease offered on beta.');
+$draft=release('0.0.5-beta.1',true);$draft['draft']=true;
+expect(!empty((new FixtureReleaseProvider([$draft]))->getLatestRelease('beta','0.0.2')['no_eligible_release']),'Draft release offered');
 $wrongBaseline = (new FixtureReleaseProvider([release('0.0.3', false, '0.0.1')]))->getLatestRelease('stable', '0.0.2');
 expect(!empty($wrongBaseline['no_eligible_release']), 'Delta for another baseline was offered.');
 $paged = new FixtureReleaseProvider(array_merge(array_fill(0, 100, release('0.0.4-beta.1', true)), [release('0.0.3', false)]));
@@ -42,5 +45,5 @@ expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'
 expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'beta'], '0.0.4-beta.1', 'v0.0.4-beta.1', 'stable')['compatible'], 'Stable apply accepted beta channel.');
 expect($policy->checkReleaseAssociation(['version'=>'0.0.3','channel'=>'stable'], '0.0.3', 'v0.0.3', 'beta')['compatible'], 'Beta cannot promote to stable.');
 foreach ($provider->requests as $url) expect(str_contains($url, '/ABDO-TECK/pos-desktop-updates/'), 'Request reached the wrong repository.');
-echo "Release channels verified: stable/beta/rc, baseline selection and repository isolation.\n";
+echo "Release channels verified: stable/beta only, RC/drafts excluded, baseline selection and repository isolation.\n";
 

@@ -67,7 +67,7 @@ function readJsonFile(absolutePath, label) {
 }
 
 function parseVersion(value, label) {
-  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?$/.test(value)) {
+  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+(?:-beta\.\d+)?$/.test(value)) {
     fail(`${label} must be a semantic version in X.Y.Z form`);
   }
   const [main, prerelease] = value.split('-');
@@ -165,7 +165,7 @@ if (!['delta', 'full'].includes(mode)) {
 }
 
 const tag = requireArgument('tag');
-const tagMatch = /^v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?)$/.exec(tag);
+const tagMatch = /^v(\d+\.\d+\.\d+(?:-beta\.\d+)?)$/.exec(tag);
 if (!tagMatch) {
   fail(`tag '${tag}' is not a supported vX.Y.Z tag`);
 }
@@ -174,10 +174,10 @@ if (tagMatch[1] !== (mode === 'full' ? (versionData.installer_version || targetV
 }
 
 const releaseChannel = requireArgument('release-channel');
-if (!['prerelease', 'stable', 'beta', 'rc'].includes(releaseChannel)) {
+if (!['prerelease', 'stable', 'beta'].includes(releaseChannel)) {
   fail(`release channel '${releaseChannel}' is invalid`);
 }
-const expectedChannel = targetVersion.includes('-beta.') ? 'beta' : targetVersion.includes('-rc.') ? 'rc' : 'stable';
+const expectedChannel = targetVersion.includes('-beta.') ? 'beta' : 'stable';
 if (releaseChannel !== 'prerelease' && releaseChannel !== expectedChannel) fail('Release channel does not match tag.');
 
 const headCommit = resolveGitRef('HEAD', 'checked-out HEAD');
