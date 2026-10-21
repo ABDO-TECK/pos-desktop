@@ -12,6 +12,7 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
   fs.mkdirSync(evidence,{recursive:true});
   let child,socket,sequence=0;
   const pending=new Map();
+  const listeners=new Set();
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   async function call(method,params={}) {
     const id=++sequence;let timer;
@@ -30,7 +31,7 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
     do{if(child.exitCode!==null)throw Error('Desktop exited during startup');try{target=(await(await fetch('http://127.0.0.1:19231/json/list')).json()).find(t=>t.type==='page'&&t.url.startsWith('app://pos-app/'));}catch{}if(target)break;await delay(500);}while(Date.now()<deadline);
     assert.ok(target,'Isolated desktop page missing');socket=new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
-    socket.onmessage=event=>{const reply=JSON.parse(event.data);const resolve=pending.get(reply.id);if(resolve){pending.delete(reply.id);resolve(reply);}};
+    socket.onmessage=event=>{const reply=JSON.parse(event.data);const resolve=pending.get(reply.id);if(resolve){pending.delete(reply.id);resolve(reply);}if(reply.method)for(const listener of listeners)listener(reply.method,reply.params);};
     await until('Boolean(window.electronAPI && document.querySelector("form, a[href=\'/settings\']"))','initial page',240000);
   }
   async function stop(){
@@ -53,5 +54,5 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
   }
   async function system(){await until('Boolean(document.querySelector("a[href=\'/settings\']"))','settings link');await evaluate('document.querySelector("a[href=\'/settings\']").click()');await until('location.pathname==="/settings"','settings route');await click('النظام والصيانة');}
   async function screenshot(name){await evaluate('document.querySelector("[data-testid=channel-transition]")?.scrollIntoView({block:"center"})');const capture=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,name+'.png'),Buffer.from(capture.data,'base64'));}
-  return {start,stop,evaluate,until,click,fill,login,freshLogin,system,screenshot,hash};
+  return {start,stop,evaluate,until,click,fill,login,freshLogin,system,screenshot,hash,call,onEvent:listener=>{listeners.add(listener);return ()=>listeners.delete(listener);}};
 }

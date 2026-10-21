@@ -20,6 +20,9 @@ if(phase==='contract') {
   try {
     await ui.start();
     for(const [file,expected] of Object.entries(target.files))assert.equal(ui.hash(path.join(root,file)),expected.sha256,'Original Setup inventory '+file);
+    const auth=await ui.freshLogin();
+    // Ephemeral fixture credentials stay outside evidence and release artifacts.
+    fs.writeFileSync(path.join(lab,'fixture-auth.json'),JSON.stringify(auth),{mode:0o600});
     const contract=sql('prepare-compatibility');assert.equal(contract.runtime_metadata_readable,true);assert.equal(contract.metadata_view_read_only,true);
     fs.writeFileSync(path.join(lab,'data-contract.json'),JSON.stringify(contract,null,2));
     fs.writeFileSync(path.join(lab,'owned-lab.json'),JSON.stringify({application,storage,version:'0.0.1'}));
@@ -50,6 +53,7 @@ assert.ok(fs.existsSync(ini),'Portable PHP ini missing');
 fs.appendFileSync(ini,`\nauto_prepend_file="${path.resolve('scripts/fixtures/channel-transition-transport.php').replaceAll('\\','/')}"\n`);
 const ui=createDesktopLab(application,evidence,{POS_TRANSITION_FIXTURE:transportPath});
 let auth;
+let firstTransitionAt;
 async function versionIs(expected){
  const deadline=Date.now()+150000;
  do{try{if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===expected){await delay(5000);await ui.until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted frontend',120000);if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated after restart');return;}}catch{}await delay(500);}while(Date.now()<deadline);throw Error('Version/restart failed '+expected);
@@ -83,8 +87,32 @@ async function returnStable(type){
  assert.equal(receipt?.state,'completed','Independent production receipt never completed');assert.equal(receipt.target_inventory_matches,true);assert.equal(receipt.data_compatible,true);
  verifyInventory(target,source);await ui.screenshot('stable-restored-'+type);return receipt;
 }
+async function failLateHandoff(){
+ await ui.system();await chooseChannel('stable');await preview();await ui.until('Boolean(document.querySelector("[data-testid=apply-channel-transition]"))','failure-test preview');
+ let resolvePaused;const paused=new Promise(resolve=>{resolvePaused=resolve;});
+ const unsubscribe=ui.onEvent((method,params)=>{if(method==='Fetch.requestPaused')resolvePaused(params);});
+ await ui.call('Fetch.enable',{patterns:[{urlPattern:'*/updates/transition/apply',requestStage:'Response'}]});
+ try{
+   await ui.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');firstTransitionAt=Date.now();await ui.click('تأكيد');
+   const response=await Promise.race([paused,delay(120000).then(()=>{throw Error('Transition response was not intercepted');})]);
+   if(response.responseStatusCode!==200){await ui.call('Fetch.continueRequest',{requestId:response.requestId});throw Error('Failure fixture preparation status '+response.responseStatusCode);}
+   const state=JSON.parse(fs.readFileSync(path.join(storage,'update-state.json')));assert.ok(state.transition_receipt);
+   const staged=path.join(storage,'update_staging','0.0.1','version.json');assert.ok(fs.existsSync(staged));
+   fs.writeFileSync(staged,'intentional isolated late-handoff corruption');
+   await ui.call('Fetch.continueRequest',{requestId:response.requestId});await ui.call('Fetch.disable');
+   await ui.until('Boolean(document.querySelector("[data-testid=channel-transition] [role=alert]"))','real transition failure',120000);
+   const message=await ui.evaluate('document.querySelector("[data-testid=channel-transition] [role=alert]").innerText');assert.ok(message.includes('Staged artifact integrity check failed'),message);
+   assert.equal(await ui.evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false,'Connection-error spam hid actual failure');
+   const receiptPath=path.join(storage,'channel-transition-receipts',state.transition_receipt+'.json');let receipt;const deadline=Date.now()+30000;
+   do{receipt=JSON.parse(fs.readFileSync(receiptPath));if(receipt.state==='failed')break;await delay(250);}while(Date.now()<deadline);
+   assert.equal(receipt.state,'failed');assert.equal(receipt.reason_code,'handoff_failed');assert.equal(receipt.requires_recovery,false);
+   verifyInventory(source);await ui.screenshot('late-failure-recovered');return receipt;
+ }finally{unsubscribe();await ui.call('Fetch.disable').catch(()=>{});}
+}
 try {
- await ui.start();auth=await ui.freshLogin();
+ await ui.start();auth=JSON.parse(fs.readFileSync(path.join(lab,'fixture-auth.json')));
+ if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))'))await ui.login(auth.email,auth.password);
+ await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','resumed fixture session');
  const before=sql('seed');const compatibilityBefore=sql('inspect-compatibility');
  await ui.until('Boolean(document.querySelector("a[href=\'/settings\']"))','ready session');
  let stored=false;for(let i=0;i<20&&!stored;i++){stored=await pendingSale('put');if(!stored)await delay(500);}assert.equal(stored,true,'Offline fixture store unavailable');
@@ -95,14 +123,18 @@ try {
  await forward();verifyInventory(source);await ui.system();await chooseChannel('stable');
  // A signed transport failure is shown without attempting full fallback.
  mode('corrupt_signature');await preview();assert.equal(await ui.evaluate('Boolean(document.querySelector("[data-testid=apply-channel-transition]"))'),false);assert.equal(await ui.evaluate('document.querySelector("[data-testid=transition-preview-result]").innerText.includes("توقيع")'),true);await ui.screenshot('invalid-signature-blocked');
- mode('delta');const deltaReceipt=await returnStable('delta');assert.deepEqual(sql('inspect'),before);assert.deepEqual(await pendingSale('get'),offlineBefore);
- await forward();verifyInventory(source);mode('full');const fullReceipt=await returnStable('full');
+ mode('delta');const failedReceipt=await failLateHandoff();assert.deepEqual(sql('inspect'),before);
+ const deltaReceipt=await returnStable('delta');assert.deepEqual(sql('inspect'),before);assert.deepEqual(await pendingSale('get'),offlineBefore);
+ await forward();verifyInventory(source);
+ // Respect the production 2/300s apply limiter across both old/new interfaces.
+ while(Date.now()<firstTransitionAt+310000){console.log('Waiting for the unchanged production apply rate window before full return');await delay(Math.min(15000,firstTransitionAt+310000-Date.now()));}
+ mode('full');const fullReceipt=await returnStable('full');
  assert.deepEqual(sql('inspect'),before);assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore);assert.deepEqual(await pendingSale('get'),offlineBefore);
  await forward();verifyInventory(source);await ui.system();
  for(const [file,expected] of Object.entries(identities)){const s=fs.statSync(path.join(root,file));assert.deepEqual({ino:s.ino,mtimeMs:s.mtimeMs,birthtimeMs:s.birthtimeMs},expected,'Unchanged file replaced '+file);}
  assert.deepEqual([ui.hash(path.join(application,'POS Desktop.exe')),ui.hash(path.join(application,'resources/app.asar'))],shellBefore);
  assert.equal(await ui.evaluate('Boolean(document.querySelector("option[value=rc]"))'),false);
- const result={ok:true,actualOriginalSetup:true,transport:'isolated copied signed packages; live GitHub feeds verified separately after publication',sourceVersion:version,targetVersion:'0.0.1',transitions:['0.0.1',version,'0.0.1',version,'0.0.1',version],deltaAndFull:true,productionHttpPreparation:true,independentVerifierSurvived:true,deltaReceipt,fullReceipt,sourceInventorySha256:ui.hash(path.join(assets,'deployment-inventory.json')),targetInventorySha256:ui.hash(path.join(lab,'deployment-inventory.json')),sqlSchemaLedgerCustomerSettingsPreserved:true,offlineSalePreserved:true,unchangedFileIdentityPreserved:true,unchangedFilesChecked:common.length,shellUnchanged:true,selectionDoesNotInstall:true,waitDoesNotInstall:true,invalidSignatureBlocked:true,activeRcRemoved:true};
+ const result={ok:true,actualOriginalSetup:true,transport:'isolated copied signed packages; live GitHub feeds verified separately after publication',sourceVersion:version,targetVersion:'0.0.1',transitions:['0.0.1',version,'0.0.1',version,'0.0.1',version],deltaAndFull:true,productionHttpPreparation:true,independentVerifierSurvived:true,deltaReceipt,fullReceipt,failedReceipt,lateFailureRecoveredSource:true,realFailureVisibleWithoutConnectionSpam:true,productionRateLimitsUnchanged:true,sourceInventorySha256:ui.hash(path.join(assets,'deployment-inventory.json')),targetInventorySha256:ui.hash(path.join(lab,'deployment-inventory.json')),sqlSchemaLedgerCustomerSettingsPreserved:true,offlineSalePreserved:true,unchangedFileIdentityPreserved:true,unchangedFilesChecked:common.length,shellUnchanged:true,selectionDoesNotInstall:true,waitDoesNotInstall:true,invalidSignatureBlocked:true,activeRcRemoved:true};
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify(result,null,2));await ui.screenshot('candidate-final');
  console.log('PASS real original Setup UI: stable-beta-stable-beta, signed delta and full return, HTTP preparation, independent receipt, exact artifacts, unchanged file identity and SQL/offline data preservation');
 } catch(error){try{await ui.screenshot('failure');}catch{}throw error;}
