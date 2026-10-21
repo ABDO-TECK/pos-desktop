@@ -64,17 +64,17 @@ Shared PHP array contracts (document with PHPDoc; TypeScript mirrors them):
 
 **Interfaces:** Produces an external `capability.json` recording child-process survival, actual stop/restart, exact target inventory, destination startup schema/ledger, unchanged shell and data-fixture checks. Later tasks may proceed only with all required capabilities true.
 
-- [ ] Write a failing isolated probe which starts from extracted verified Setup 0.0.1, stages signed candidate-like application files through existing handoff, and has an independent PHP receipt process survive PHP-server/worker shutdown. Use only `RUNNER_TEMP` paths and fresh runner application storage; reject existing POS data before launch.
+- [x] Write a failing isolated probe which starts from extracted verified Setup 0.0.1, stages signed candidate-like application files through existing handoff, and has an independent PHP receipt process survive PHP-server/worker shutdown. Use only `RUNNER_TEMP` paths and fresh runner application storage; reject existing POS data before launch.
 
 ```js
 assert.equal(receipt.survived_handoff, true);
 assert.equal(receipt.target_inventory_matches, true);
 assert.deepEqual(after.businessRows, before.businessRows);
 ```
-- [ ] Run on ephemeral Windows: `node scripts/verify-channel-transition-capability.mjs <isolated-app> <evidence-dir>`; initially expect missing verifier support/capability failure, never success inferred from a PID.
-- [ ] Prove a bounded verifier launch using the bundled PHP executable and hidden process facilities; all arguments are allowlisted task-owned paths, never credentials. Test real process-tree termination behavior, target-version code lacking new endpoints, and a destination missing expected runtime files.
-- [ ] Assert `receipt.survived_handoff===true`, all target SHA-256 values match, destination startup leaves normalized schema/ledger and fixture row values unchanged, and v0.0.1 shell fingerprint matches. Record failures and do not publish or silently require a changed shell if proof fails; report that concrete blocker before choosing a new design.
-- [ ] Commit only reproducible probe/support fixtures: `test: establish channel transition runtime capability`.
+- [x] Run on ephemeral Windows: `node scripts/verify-channel-transition-capability.mjs <isolated-app> <evidence-dir>`; initially expect missing verifier support/capability failure, never success inferred from a PID.
+- [x] Prove a bounded verifier launch using the bundled PHP executable and hidden process facilities; all arguments are allowlisted task-owned paths, never credentials. Test real process-tree termination behavior, target-version code lacking new endpoints, and a destination missing expected runtime files.
+- [x] Assert `receipt.survived_handoff===true`, all target SHA-256 values match, destination startup leaves normalized schema/ledger and fixture row values unchanged, and v0.0.1 shell fingerprint matches. Record failures and do not publish or silently require a changed shell if proof fails; report that concrete blocker before choosing a new design.
+- [x] Commit only reproducible probe/support fixtures: `test: establish channel transition runtime capability`.
 
 ### Task 2: Retire rc on active surfaces and migrate preferences safely
 
@@ -82,17 +82,17 @@ assert.deepEqual(after.businessRows, before.businessRows);
 
 **Interfaces:** `UpdateChannelPolicy::active():array` -> `['stable','beta']`; `normalizePreference(?string):string`; `installedChannel(string):string`; `migratePreference(string $file):array` -> `{channel, migrated_from:?string}`. No SQL or installed-version writes in preference migration.
 
-- [ ] Write failing assertions: saved `rc` normalizes atomically to stable; installed beta remains beta; setting rc returns HTTP 400; a corrupt preference uses stable without overwriting unrelated content; missing storage path errors are visible. Preserve historical telemetry rows and aggregate retired channels under `legacy_channel_distribution`, not active selectors.
+- [x] Write failing assertions: saved `rc` normalizes atomically to stable; installed beta remains beta; setting rc returns HTTP 400; a corrupt preference uses stable without overwriting unrelated content; missing storage path errors are visible. Preserve historical telemetry rows and aggregate retired channels under `legacy_channel_distribution`, not active selectors.
 
 ```php
 assert(UpdateChannelPolicy::active() === ['stable', 'beta']);
 assert(UpdateChannelPolicy::normalizePreference('rc') === 'stable');
 assert(UpdateChannelPolicy::installedChannel('0.0.10-beta.5') === 'beta');
 ```
-- [ ] Run `php scripts/verify-active-channels.php` and `php scripts/verify-release-channels.php`; expect failures for currently accepted rc and UI/API lists of three channels.
-- [ ] Implement policy and replace active enums/options. Skip `-rc.` tags explicitly before prerelease classification; normal beta may continue consuming stable/beta according to existing policy, while explicit transition targets match the selected channel. Generic historical semver parsing continues accepting old rc identities. Telemetry ingestion can retain old rc event labels without enabling rc updates.
-- [ ] Update `scripts/release-metadata.mjs`, `scripts/validate-release-source.mjs`, `scripts/build-release-package.php`, `scripts/verify-release-package.php`, `scripts/build-delta-release.ps1`, `scripts/verify-desktop-release.ps1`, `scripts/verify-installer-package.mjs`, `scripts/check-update-infrastructure.php` and `.github/workflows/windows-setup.yml` so new rc publications/metadata fail before signing; keep historical inspection explicit. Extend `scripts/verify-release-channels.php` to assert rc-only feeds yield no active candidate, drafts are ignored, and rc is never treated as stable. Run existing channel-policy tests too; leave immutable Electron files unchanged.
-- [ ] Run `php scripts/verify-active-channels.php`, `php scripts/verify-release-channels.php`, `node scripts/verify-update-channel-policy.cjs`, `npm --prefix frontend run typecheck`; commit green deliverable: `feat: retire active rc channel without deleting history`.
+- [x] Run `php scripts/verify-active-channels.php` and `php scripts/verify-release-channels.php`; expect failures for currently accepted rc and UI/API lists of three channels.
+- [x] Implement policy and replace active enums/options. Skip `-rc.` tags explicitly before prerelease classification; normal beta may continue consuming stable/beta according to existing policy, while explicit transition targets match the selected channel. Generic historical semver parsing continues accepting old rc identities. Telemetry ingestion can retain old rc event labels without enabling rc updates.
+- [x] Update `scripts/release-metadata.mjs`, `scripts/validate-release-source.mjs`, `scripts/build-release-package.php`, `scripts/verify-release-package.php`, `scripts/build-delta-release.ps1`, `scripts/verify-desktop-release.ps1`, `scripts/verify-installer-package.mjs`, `scripts/check-update-infrastructure.php` and `.github/workflows/windows-setup.yml` so new rc publications/metadata fail before signing; keep historical inspection explicit. Extend `scripts/verify-release-channels.php` to assert rc-only feeds yield no active candidate, drafts are ignored, and rc is never treated as stable. Run existing channel-policy tests too; leave immutable Electron files unchanged.
+- [x] Run `php scripts/verify-active-channels.php`, `php scripts/verify-release-channels.php`, `node scripts/verify-update-channel-policy.cjs`, `npm --prefix frontend run typecheck`; commit green deliverable: `feat: retire active rc channel without deleting history`.
 
 ### Task 3: Discover the actual selected-channel target across repositories
 

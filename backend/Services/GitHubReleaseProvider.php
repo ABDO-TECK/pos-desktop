@@ -102,6 +102,68 @@ class GitHubReleaseProvider
         return $this->getReleasePage($channel, $currentVersion, 1);
     }
 
+    /** Raw metadata for explicit transitions; intentionally does not filter by delta baseline. */
+    public function listChannelCandidates(string $channel, int $page = 1): array
+    {
+        if (!in_array($channel, UpdateChannelPolicy::active(), true)) return ['ok'=>false,'releases'=>[],'next_page'=>null,'error'=>'Inactive channel.'];
+        $result = $this->transitionMetadata('pos-desktop-updates', null, $page);
+        if (!$result['ok']) return $result;
+        $result['releases'] = array_values(array_filter($result['releases'], static function(array $release) use ($channel): bool {
+            $actual = UpdateChannelPolicy::installedChannel(ltrim($release['tag_name'], 'vV'));
+            return !$release['draft'] && $actual === $channel && $release['prerelease'] === ($actual === 'beta');
+        }));
+        return $result;
+    }
+
+    /** Fixed Setup authority; never passes through the ordinary repository redirect. */
+    public function getLatestSetupRelease(?string $currentVersion = null): array
+    {
+        $candidates = [];
+        for ($page = 1; $page <= 10; $page++) {
+            $result = $this->transitionMetadata('pos-desktop', null, $page);
+            if (!$result['ok']) return $result;
+            foreach ($result['releases'] as $release) {
+                $version = ltrim($release['tag_name'], 'vV');
+                if ($release['draft'] || $release['prerelease'] || UpdateChannelPolicy::installedChannel($version) !== 'stable') continue;
+                if ($currentVersion !== null && !ReleaseVersionPolicy::assess($currentVersion, $version)['compatible']) continue;
+                $candidates[] = $release;
+            }
+            if ($result['next_page'] === null) {
+                usort($candidates, static fn(array $a, array $b): int => version_compare(ltrim($b['tag_name'],'vV'), ltrim($a['tag_name'],'vV')));
+                return ['ok'=>true,'release'=>$candidates[0]??null,'error'=>null];
+            }
+        }
+        return ['ok'=>false,'release'=>null,'error'=>'Setup release pagination limit exceeded.'];
+    }
+
+    public function getReleaseByTag(string $tag): array
+    {
+        if (!ReleaseVersionPolicy::isValid(ltrim($tag, 'vV'))) return ['ok'=>false,'release'=>null,'error'=>'Invalid release tag.'];
+        $result = $this->transitionMetadata('pos-desktop-updates', $tag);
+        if (!$result['ok']) return $result;
+        $release = $result['releases'][0] ?? null;
+        if (!$release || $release['tag_name'] !== $tag || $release['draft']) return ['ok'=>false,'release'=>null,'error'=>'Release is unavailable.'];
+        return ['ok'=>true,'release'=>$release,'error'=>null];
+    }
+
+    private function transitionMetadata(string $repo, ?string $tag = null, int $page = 1): array
+    {
+        if (!in_array($repo, ['pos-desktop','pos-desktop-updates'], true) || $page < 1 || $page > 10) throw new \InvalidArgumentException('Invalid release authority.');
+        $url = 'https://api.github.com/repos/ABDO-TECK/'.$repo.'/releases'.($tag === null ? '?per_page=100&page='.$page : '/tags/'.rawurlencode($tag));
+        if (!$this->isAllowedUrl($url)) return ['ok'=>false,'error'=>'Release authority is not allowed.'];
+        $headers = ['User-Agent: ABDO-TECK-POS-Updater/1.0','Accept: application/vnd.github+json','Cache-Control: no-cache'];
+        if ($this->token) $headers[] = 'Authorization: Bearer '.$this->token;
+        $response = $this->executeCurlGet($url, $headers);
+        if (!$response['ok']) return ['ok'=>false,'error'=>'Release metadata request failed.','http_code'=>$response['http_code']??0];
+        $decoded = json_decode((string)$response['body'], true);
+        $releases = $tag === null ? $decoded : [$decoded];
+        if (!is_array($releases) || !array_is_list($releases)) return ['ok'=>false,'error'=>'Invalid release list.'];
+        foreach ($releases as $release) {
+            if (!is_array($release) || !is_string($release['tag_name']??null) || !ReleaseVersionPolicy::isValid(ltrim($release['tag_name'],'vV')) || !is_bool($release['prerelease']??null) || !is_bool($release['draft']??null) || !is_array($release['assets']??null)) return ['ok'=>false,'error'=>'Malformed release metadata.'];
+        }
+        return ['ok'=>true,'releases'=>$releases,'next_page'=>$tag===null&&count($releases)===100?$page+1:null,'error'=>null];
+    }
+
     private function getReleasePage(string $channel, ?string $currentVersion, int $page): array
     {
         $channel = strtolower(trim($channel ?: 'stable'));
