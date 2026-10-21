@@ -1496,10 +1496,11 @@ class UpdateService
         $limit=(int)ini_get('max_execution_time');
         try {
             if ($limit>0 && $limit<1200) set_time_limit(1200);
-            $snapshot=$snapshotPath ?? $this->deltaUpdateService->findLatestSnapshot();
-            if (!$snapshot) return ['ok'=>false,'code'=>404,'error'=>'No backup snapshot found for rollback.','logs'=>[]];
+            $planner = new UpdateRollbackPlanner($this->deltaUpdateService);
+            $snapshot = $snapshotPath ?? ($planner->availableSnapshots()[0]['snapshot_path'] ?? null);
+            if (!$snapshot) return ['ok'=>false,'code'=>404,'error'=>'لا توجد نقطة رجوع سليمة وصالحة لإصدارك الحالي.','logs'=>[]];
             $this->deltaUpdateService->setUpdateState('verifying',['owner_id'=>$lease['owner_id'],'operation'=>'backend_rollback','error'=>null,'update_completed'=>false]);
-            $prepared=(new UpdateRollbackPlanner($this->deltaUpdateService))->prepare($snapshot);
+            $prepared=$planner->prepare($snapshot);
             if (!$prepared['ok']) {
                 $this->deltaUpdateService->setUpdateState('failed',['error'=>$prepared['error']]);
                 return $prepared;

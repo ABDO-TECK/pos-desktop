@@ -1,6 +1,6 @@
 {
-  "version": "0.0.10-beta.3",
-  "application_version": "0.0.10-beta.3",
+  "version": "0.0.10-beta.4",
+  "application_version": "0.0.10-beta.4",
   "update_engine_version": "1.0.0",
   "channel": "beta",
   "minimum_supported_version": "0.0.1",
@@ -8,9 +8,9 @@
   "release_generation": 3,
   "released_at": "2026-10-21",
   "changelog": [
-    "Restore points verify snapshots and hand files to Electron after stopping PHP; failures retain the running version and data.",
-    "Fleet distinguishes recent reports from historical records without deleting old versions.",
-    "Device identity and telemetry storage persist across updates and migrate the existing legacy identifier."
+    "Restore points show only verified older destinations applicable to the installed version, without duplicate or internal safety backups.",
+    "The rollback interface shows the current and target versions, saved dates, an empty state and a warning that the selected older interface returns.",
+    "New snapshots retain the signed baseline inventory to reject mixed target files while preserving business data."
   ],
   "requires_npm_install": false,
   "update_channel": "beta",
@@ -18,7 +18,8 @@
   "delta_baseline_tags": [
     "v0.0.1",
     "v0.0.10-beta.1",
-    "v0.0.10-beta.2"
+    "v0.0.10-beta.2",
+    "v0.0.10-beta.3"
   ],
   "installer_version": "0.0.1"
 }

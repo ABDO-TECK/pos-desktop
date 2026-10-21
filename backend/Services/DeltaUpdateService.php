@@ -325,7 +325,8 @@ class DeltaUpdateService
         string $fromVersion,
         string $toVersion,
         array $manifest,
-        ?array $dbRecovery = null
+        ?array $dbRecovery = null,
+        string $purpose = 'update'
     ): array {
         $pathCheck = $this->manifestService->validateManifestPaths($manifest, $this->rootDir);
         if (!$pathCheck['ok']) {
@@ -341,7 +342,7 @@ class DeltaUpdateService
         $timestamp = date('Ymd_His');
         $safeFrom = preg_replace('/[^A-Za-z0-9\.\-_]/', '_', $fromVersion);
         $safeTo = preg_replace('/[^A-Za-z0-9\.\-_]/', '_', $toVersion);
-        $snapshotName = "patch_{$safeFrom}_to_{$safeTo}_{$timestamp}";
+        $snapshotName = "patch_{$safeFrom}_to_{$safeTo}_{$timestamp}_" . bin2hex(random_bytes(4));
         $snapshotDir = $this->getBackupsDir() . '/' . $snapshotName;
         $filesBackupDir = $snapshotDir . '/files';
 
@@ -441,6 +442,7 @@ class DeltaUpdateService
 
         // 3. Write metadata.json
         $metadata = [
+            'purpose' => $purpose,
             'from_version' => $fromVersion,
             'to_version' => $toVersion,
             'timestamp' => date('Y-m-d\TH:i:sP'),
@@ -450,6 +452,7 @@ class DeltaUpdateService
             'new_files' => $newFiles,
             'deleted_files' => $deletedFilesMetadata,
             'version_json_backup' => $versionContent,
+            'baseline_files' => $manifest['baseline_files'] ?? [],
         ];
 
         $metadataPath = $snapshotDir . '/metadata.json';

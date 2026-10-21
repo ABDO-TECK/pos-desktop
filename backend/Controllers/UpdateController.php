@@ -341,48 +341,8 @@ class UpdateController extends Controller
 
     public function snapshots()
     {
-        $backupsDir = str_replace('\\', '/', $this->updateService->getDeltaUpdateService()->getBackupsDir());
-        $snapshots = [];
-
-        if (is_dir($backupsDir)) {
-            $entries = scandir($backupsDir) ?: [];
-            $dirs = [];
-            foreach ($entries as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                if (str_starts_with($entry, 'patch_') && is_dir($backupsDir . '/' . $entry)) {
-                    $dirs[] = $backupsDir . '/' . $entry;
-                }
-            }
-            rsort($dirs);
-
-            foreach ($dirs as $dir) {
-                $dirNorm = str_replace('\\', '/', $dir);
-                $metaFile = $dirNorm . '/metadata.json';
-                $meta = [];
-
-                if (is_file($metaFile)) {
-                    $content = @file_get_contents($metaFile);
-                    if ($content) {
-                        $meta = json_decode($content, true) ?: [];
-                    }
-                }
-
-                $snapshots[] = [
-                    'snapshot_name' => basename($dirNorm),
-                    'snapshot_path' => $dirNorm,
-                    'from_version'  => $meta['from_version'] ?? 'unknown',
-                    'to_version'    => $meta['to_version'] ?? 'unknown',
-                    'timestamp'     => $meta['timestamp'] ?? date('Y-m-d H:i:s', filemtime($dir)),
-                    'files_count'   => count($meta['files'] ?? []),
-                    'has_db_backup' => !empty($meta['db_backup_path']),
-                    'db_backup_path'=> $meta['db_backup_path'] ?? null,
-                ];
-            }
-        }
-
-        return Response::success($snapshots);
+        $planner = new \App\Services\UpdateRollbackPlanner($this->updateService->getDeltaUpdateService());
+        return Response::success($planner->availableSnapshots());
     }
 
     /**

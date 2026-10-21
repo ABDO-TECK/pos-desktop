@@ -35,6 +35,7 @@ import useUpdateStore from '../../store/updateStore'
 import useCartStore from '../../store/cartStore'
 import { useConfirmStore } from '../../store/confirmStore'
 import SectionTitle from '../../components/common/SectionTitle'
+import RollbackPoints from './RollbackPoints'
 import { isUpdateRestarting, withUpdateRestart } from '../../utils/updateRestart'
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
@@ -339,9 +340,10 @@ export default function UpdateSection() {
   }
 
   const handleRollback = async (snapshotPath?: string) => {
-    const targetLabel = snapshotPath ? `من اللقطة: ${snapshotPath.split('/').pop()}` : 'إلى آخر نسخة احتياطية سابقة'
+    const selected = snapshotsList.find(snapshot => snapshot.snapshot_path === snapshotPath)
+    const targetLabel = selected ? `إلى الإصدار v${selected.from_version}` : 'إلى آخر نقطة رجوع صالحة'
     const confirmed = await confirm(
-      `⚠️ تحذير: التراجع عن التحديث ${targetLabel}:\n\nسيتم استرجاع ملفات البرنامج فقط مع الحفاظ على بياناتك الحالية. النقاط التي تتضمن استعادة قاعدة بيانات تحتاج مسار استعادة مخصصًا. هل أنت متأكد؟`
+      `⚠️ تحذير: التراجع عن التحديث ${targetLabel}:\n\nسيتم استرجاع ملفات البرنامج فقط مع الحفاظ على بياناتك الحالية. ستعود أيضًا واجهة الإصدار المختار وسلوكه، وقد تختفي الإصلاحات الأحدث. هل أنت متأكد؟`
     )
     if (!confirmed) return
 
@@ -751,7 +753,6 @@ export default function UpdateSection() {
           {showHistory ? 'إخفاء السجل' : 'سجل التحديثات'}
         </button>
 
-        {snapshotsList.length > 0 && (
           <button
             type="button"
             onClick={() => setShowSnapshots(!showSnapshots)}
@@ -761,7 +762,6 @@ export default function UpdateSection() {
             <RotateCcw size={16} />
             {showSnapshots ? 'إخفاء نقاط الاسترجاع' : `نقاط الاسترجاع (${snapshotsList.length})`}
           </button>
-        )}
       </div>
 
       {/* Changelog Dropdown */}
@@ -775,47 +775,9 @@ export default function UpdateSection() {
       )}
 
 
-      {/* Snapshots Rollback Section */}
-      {showSnapshots && snapshotsList.length > 0 && (
-        <div style={{ background: 'rgba(245, 158, 11, 0.04)', padding: '1rem', borderRadius: '8px', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
-          <h4 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <RotateCcw size={16} /> نقاط الاسترجاع المتاحة (Rollback Snapshots)
-          </h4>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {snapshotsList.map((snap) => (
-              <div key={snap.snapshot_name} style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '0.6rem 0.85rem',
-                background: 'var(--bg)',
-                borderRadius: '6px',
-                border: '1px solid var(--border)',
-                flexWrap: 'wrap',
-                gap: '0.5rem'
-              }}>
-                <div>
-                  <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                    {snap.snapshot_name} (من v{snap.from_version} إلى v{snap.to_version})
-                  </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    التاريخ: {snap.timestamp} | الملفات: {snap.files_count} | قاعدة البيانات: {snap.has_db_backup ? 'مضمونة ✅' : 'غير متوفرة'}
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleRollback(snap.snapshot_path)}
-                  disabled={applyingUpdate || rollingBack}
-                  className="btn btn-secondary btn-sm"
-                  style={{ color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.4)' }}
-                >
-                  <RotateCcw size={14} /> استرجاع هذه النسخة
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+      {/* Available destinations are validated by the same planner used for execution. */}
+      {showSnapshots && (
+        <RollbackPoints currentVersion={updateStatus?.current_version || currentVersion} snapshots={snapshotsList} busy={applyingUpdate || rollingBack} onRollback={handleRollback} />
       )}
 
       {/* History Table */}

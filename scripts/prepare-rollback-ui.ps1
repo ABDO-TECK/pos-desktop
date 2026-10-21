@@ -12,6 +12,11 @@ $seven=Join-Path $PWD 'node_modules/electron-winstaller/vendor/7z.exe'
 if ($LASTEXITCODE) { throw 'Cannot extract installer payload.' }
 & $seven x "$lab/app-64.7z" "-o$lab/app" -y | Out-Null
 if ($LASTEXITCODE) { throw 'Cannot extract baseline application.' }
+$prior=Join-Path $lab 'prior-assets'
+New-Item -ItemType Directory -Path $prior | Out-Null
+gh release download v0.0.10-beta.3 --repo ABDO-TECK/pos-desktop-updates --pattern 'delta-0.0.1-to-0.0.10-beta.3.zip' --pattern 'manifest-0.0.1.*' --dir $prior
+if ($LASTEXITCODE) { throw 'Cannot download signed intermediate beta baseline.' }
+$env:POS_ROLLBACK_PRIOR_ASSETS=$prior
 node scripts/verify-rollback-ui.mjs "$lab/app" "$env:RUNNER_TEMP/rollback-ui-evidence" release-assets
 if ($LASTEXITCODE) { throw 'Real rollback UI acceptance failed.' }
 Copy-Item -LiteralPath "$env:RUNNER_TEMP/rollback-ui-evidence/acceptance.json" -Destination 'release-assets/rollback-acceptance.json'

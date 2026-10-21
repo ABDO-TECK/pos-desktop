@@ -98,8 +98,14 @@ async function screenshot(name) { const r=await call('Page.captureScreenshot',{f
 const root=path.join(application,'resources/app.asar.unpacked'),storage=path.join(process.env.PROGRAMDATA,'POS System');
 const hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 async function versionIs(version){const end=Date.now()+120_000;do{try{if(JSON.parse(fs.readFileSync(path.join(root,'version.json'))).version===version){await delay(5000);await until('Boolean(document.querySelector("form, a[href=\'/settings\']"))','restarted UI',120_000);return;}}catch{}await delay(500);}while(Date.now()<end);throw Error('Version/restart failed '+version);}
-async function system(){await route('/settings');await clickText('النظام والصيانة');await until('[...document.querySelectorAll("button")].some(b=>b.textContent.includes("نقاط الاسترجاع ("))','recovery points');await evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent.includes("نقاط الاسترجاع (")).click()');await until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="استرجاع هذه النسخة")','snapshot button');}
-async function restore(){await clickText('استرجاع هذه النسخة');await until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="تأكيد")','confirm rollback');await clickText('تأكيد');}
+async function system(){await route('/settings');await clickText('النظام والصيانة');await until('[...document.querySelectorAll("button")].some(b=>b.textContent.includes("نقاط الاسترجاع ("))','recovery points');await evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent.includes("نقاط الاسترجاع (")).click()');}
+async function restore(version, legacy=false){
+ const clicked=await evaluate(`(() => { const buttons=[...document.querySelectorAll('button')];const b=buttons.find(b=>${legacy ? `b.textContent.trim()==='استرجاع هذه النسخة' && b.parentElement.textContent.includes('من v'+${JSON.stringify(version)}+' إلى')` : `b.textContent.replace(/\\s+/g,' ').trim()==='الرجوع إلى v'+${JSON.stringify(version)}`});if(!b)return false;b.click();return true; })()`);
+ assert.equal(clicked,true,'Expected rollback destination '+version);
+ await until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="تأكيد")','confirm rollback');
+ if(!legacy)assert.equal(await evaluate('document.body.innerText.includes("واجهة الإصدار المختار وسلوكه")'),true,'Old UI warning missing');
+ await clickText('تأكيد');
+}
 try{
  await start();const initial=await evaluate('window.electronAPI.setup.getInitialAdmin()');assert.ok(initial?.password);email=initial.email;
  await until('Boolean(document.querySelector("[aria-labelledby=initial-admin-title]"))','fresh-admin dialog');await clickText('فهمت');await login(initial.password);
@@ -108,20 +114,31 @@ try{
  await until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated');authenticated=true;
  const sentinel=path.join(storage,'business-sentinel.db');fs.writeFileSync(sentinel,'customer data fixture must remain identical');const sentinelHash=hash(sentinel);
  const oldPhar=hash(path.join(root,'backend/backend.phar'));
+ const priorAssets=fs.realpathSync(process.env.POS_ROLLBACK_PRIOR_ASSETS);assert.ok(priorAssets.toLowerCase().startsWith(temporary));
+ const prior=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',['scripts/stage-acceptance-delta.php',root,storage,priorAssets],{encoding:'utf8',windowsHide:true}));
+ await evaluate('void window.posRuntime.applyStagedDelta('+JSON.stringify(prior.version)+').catch(()=>{})');await versionIs(prior.version);
  const staged=JSON.parse(execFileSync(process.env.PHP_BINARY||'php',['scripts/stage-acceptance-delta.php',root,storage,assets],{encoding:'utf8',windowsHide:true}));
  // Exercise the published Setup shell's real IPC stop/replace/restart path.
  await evaluate('void window.posRuntime.applyStagedDelta('+JSON.stringify(staged.version)+').catch(()=>{})');await versionIs(staged.version);
  if(await evaluate('Boolean(document.querySelector("input[type=email]"))'))await login(password);
  await until('Boolean(document.querySelector("a[href=\'/settings\']"))','updated navigation');await system();
+ await until('document.querySelectorAll("[data-testid=rollback-destination]").length===1','one valid destination');
+ assert.equal(await evaluate('document.querySelector("[data-testid=rollback-destination]").innerText.includes("v0.0.10-beta.3")'),true);
+ assert.equal(await evaluate('document.querySelector("[data-testid=rollback-points]").innerText.includes("patch_")'),false);
+ await screenshot('rollback-available-destination');
  const currentPhar=hash(path.join(root,'backend/backend.phar'));
  const saved=path.join(staged.snapshot,'files/backend/backend.phar'),safe=path.join(path.dirname(evidence),'rollback-baseline.phar');fs.copyFileSync(saved,safe);fs.writeFileSync(saved,'corrupted snapshot');
- await restore();await until('document.body.innerText.includes("Recovery payload is missing or corrupt")','actual backup error');assert.equal(hash(path.join(root,'backend/backend.phar')),currentPhar);assert.equal(await evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false);await screenshot('rollback-corrupt-rejected');
+ await restore(prior.version);await until('document.body.innerText.includes("Recovery payload is missing or corrupt")','actual backup error');assert.equal(hash(path.join(root,'backend/backend.phar')),currentPhar);assert.equal(await evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false);await screenshot('rollback-corrupt-rejected');
  fs.copyFileSync(safe,saved);
- await restore();await versionIs('0.0.1');
+ await restore(prior.version);await versionIs(prior.version);
+ const intermediate=JSON.parse(fs.readFileSync(path.join(assets,'manifest-'+prior.version+'.json')));for(const [file,expected] of Object.entries(intermediate.baseline_files))assert.equal(hash(path.join(root,file)),expected,file);
+ assert.equal(hash(sentinel),sentinelHash);await screenshot('rollback-intermediate-restored');
+ await system();await restore('0.0.1',true);await versionIs('0.0.1');
  assert.equal(hash(path.join(root,'backend/backend.phar')),oldPhar);assert.equal(hash(sentinel),sentinelHash);
- const manifest=JSON.parse(fs.readFileSync(path.join(assets,'manifest-0.0.1.json')));for(const [file,expected] of Object.entries(manifest.baseline_files))assert.equal(hash(path.join(root,file)),expected,file);
+ const manifest=JSON.parse(fs.readFileSync(path.join(priorAssets,'manifest-0.0.1.json')));for(const [file,expected] of Object.entries(manifest.baseline_files))assert.equal(hash(path.join(root,file)),expected,file);
+ for(const file of [...intermediate.files,...manifest.files])if(!Object.hasOwn(manifest.baseline_files,file.path))assert.equal(fs.existsSync(path.join(root,file.path)),false,'Newer artifact survived: '+file.path);
  assert.equal(await evaluate('document.body.innerText.includes("حدث خطأ في الاتصال بالخادم")'),false);await screenshot('rollback-restored');
  fs.unlinkSync(safe);
- fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify({ok:true,actualSetupShell:true,signedUpdateApplied:true,rollbackButton:true,corruptSnapshotRejected:true,realErrorVisible:true,noConnectionErrorSpam:true,phpRestarted:true,baselineArtifactsRestored:true,businessSentinelPreserved:true,target:'0.0.1'},null,2));
+ fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify({ok:true,actualSetupShell:true,signedUpdateApplied:true,rollbackButton:true,validDestinationsOnly:true,oldInterfaceWarning:true,corruptSnapshotRejected:true,realErrorVisible:true,noConnectionErrorSpam:true,phpRestarted:true,baselineArtifactsRestored:true,newerAssetsRemoved:true,businessSentinelPreserved:true,transitions:[staged.version,prior.version,'0.0.1'],legacyInterfaceRestoredAsExpected:true,target:'0.0.1'},null,2));
  console.log('PASS real desktop UI: signed update, corrupt snapshot refusal, rollback button, PHP stop/replace/restart, exact baseline recovery and preserved business data');
 } catch(error){try{await screenshot('failure');}catch{}throw error;}finally{try{await stop();}catch{child?.kill();}}
