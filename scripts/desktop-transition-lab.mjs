@@ -32,6 +32,17 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
     assert.ok(target,'Isolated desktop page missing');socket=new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
     socket.onmessage=event=>{const reply=JSON.parse(event.data);const resolve=pending.get(reply.id);if(resolve){pending.delete(reply.id);resolve(reply);}if(reply.method)for(const listener of listeners)listener(reply.method,reply.params);};
+    listeners.add((method,params)=>{
+      if(method==='Runtime.consoleAPICalled'){
+        const text=(params.args||[]).map(a=>a.value??a.description??JSON.stringify(a)).join(' ');
+        console.log(`[Renderer Console ${params.type}] ${text}`);
+      }else if(method==='Runtime.exceptionThrown'){
+        const desc=params.exceptionDetails?.exception?.description||params.exceptionDetails?.text||'unknown';
+        console.error(`[Renderer Exception] ${desc}`);
+      }
+    });
+    await call('Runtime.enable');
+    await call('Console.enable').catch(()=>{});
     await until('Boolean(window.electronAPI && document.querySelector("form, a[href=\'/settings\']"))','initial page',240000);
   }
   async function stop(){

@@ -69,8 +69,29 @@ async function versionIs(expected){
        return;
      }
    }catch{}
-   const toast=await ui.evaluate('document.querySelector(".toast-error")?.textContent.trim()').catch(()=>null);
-   if(toast&&!toast.includes('تم استكمال التحديث')&&!toast.includes('إعادة تشغيل الخدمات'))throw Error('Frontend reported error during update: '+toast);
+   try {
+     const stateFile = path.join(storage, 'update-state.json');
+     if (fs.existsSync(stateFile)) {
+       const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+       if (st.state === 'failed' || st.state === 'rolled_back') {
+         throw Error('Update transaction failed on disk: ' + (st.error || st.state));
+       }
+     }
+   } catch(e) {
+     if (e.message.startsWith('Update transaction failed on disk:')) throw e;
+   }
+   const toast=await ui.evaluate(`(() => {
+     const nodes=[...document.querySelectorAll('[role="alert"], [role="status"], .toast-error, div[style*="animation"]')];
+     for(const n of nodes){
+       const text=n.innerText?.trim()||n.textContent?.trim()||'';
+       if(!text)continue;
+       if(/فشل|خطأ|error|rejected|update_in_progress|in progress|مسبق/i.test(text)&&!/تم استكمال التحديث|إعادة تشغيل الخدمات|التحقق من التحديثات|جاري/i.test(text)){
+         return text;
+       }
+     }
+     return null;
+   })()`).catch(()=>null);
+   if(toast)throw Error('Frontend reported error during update: '+toast);
    await delay(500);
  }while(Date.now()<deadline);
  throw Error('Version/restart failed '+expected);
@@ -94,10 +115,34 @@ async function forward(){
  await requestTransport.reauth();
  await ui.system();await chooseChannel('beta');await ui.click('التحقق من التحديثات');
  await ui.until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="تثبيت التحديث الآن"&&!b.disabled)','normal beta install');
+ await ui.evaluate(`(() => {
+   if (window.posRuntime && !window.posRuntime._transitionHooked) {
+     window.posRuntime._transitionHooked = true;
+     const orig = window.posRuntime.applyStagedDelta;
+     window.posRuntime.applyStagedDelta = async function(v) {
+       console.log('[Delta Hook] applyStagedDelta called with: ' + v);
+       try {
+         const res = await orig.call(this, v);
+         console.log('[Delta Hook] applyStagedDelta resolved: ' + JSON.stringify(res));
+         return res;
+       } catch(err) {
+         console.error('[Delta Hook] applyStagedDelta rejected: ' + (err.stack || err.message));
+         throw err;
+       }
+     };
+   }
+ })()`);
  await ui.click('تثبيت التحديث الآن');await ui.click('تأكيد');
  await delay(1500);
- const toast=await ui.evaluate('document.querySelector(".toast-error, [role=alert]")?.textContent.trim()').catch(()=>null);
- if(toast&&!toast.includes('تم استكمال التحديث')&&!toast.includes('إعادة تشغيل الخدمات')&&!toast.includes('التحقق من التحديثات'))throw Error('Update apply rejected: '+toast);
+ const toast=await ui.evaluate(`(() => {
+   const nodes=[...document.querySelectorAll('[role="alert"], [role="status"], .toast-error')];
+   for(const n of nodes){
+     const text=n.innerText?.trim()||'';
+     if(/فشل|خطأ|error|rejected/i.test(text)&&!/تم استكمال التحديث|إعادة تشغيل الخدمات|التحقق من التحديثات/i.test(text))return text;
+   }
+   return null;
+ })()`).catch(()=>null);
+ if(toast)throw Error('Update apply rejected: '+toast);
  await versionIs(version);
 }
 function verifyInventory(inventory,removedFrom){
@@ -178,5 +223,35 @@ try {
  result.currentAndHistoricalSqlRestoreVerified=true;
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify(result,null,2));await ui.screenshot('candidate-final');
  console.log('PASS real original Setup UI: stable-beta-stable-beta, signed delta and full return, HTTP preparation, independent receipt, exact artifacts, unchanged file identity and SQL/offline data preservation');
-} catch(error){try{await ui.screenshot('failure');}catch{}throw error;}
+} catch(error){
+  try{await ui.screenshot('failure');}catch{}
+  try{
+    const stateFile=path.join(storage,'update-state.json');
+    if(fs.existsSync(stateFile)){
+      const content=fs.readFileSync(stateFile,'utf8');
+      console.error('=== update-state.json ===\n'+content);
+      fs.writeFileSync(path.join(evidence,'update-state.json'),content);
+    }
+    const lockFile=path.join(storage,'update-operation.lock');
+    if(fs.existsSync(lockFile)){
+      const content=fs.readFileSync(lockFile,'utf8');
+      console.error('=== update-operation.lock ===\n'+content);
+      fs.writeFileSync(path.join(evidence,'update-operation.lock'),content);
+    }
+    const logDir=path.join(storage,'logs');
+    if(fs.existsSync(logDir)){
+      for(const f of fs.readdirSync(logDir)){
+        const p=path.join(logDir,f);
+        if(fs.statSync(p).isFile()){
+          const content=fs.readFileSync(p,'utf8');
+          console.error(`=== storage/logs/${f} ===\n`+content.slice(-3000));
+          fs.writeFileSync(path.join(evidence,f),content);
+        }
+      }
+    }
+  }catch(diagErr){
+    console.error('Failed to capture disk diagnostics:',diagErr.message);
+  }
+  throw error;
+}
 finally{try{await requestTransport?.close();}finally{await ui.stop();}}
