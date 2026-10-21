@@ -3,6 +3,7 @@ use App\Controllers\ReportController;
 use App\Controllers\UserController;
 use App\Controllers\SettingsController;
 use App\Controllers\UpdateController;
+use App\Controllers\ChannelTransitionController;
 use App\Controllers\BackupController;
 use App\Controllers\ExpenseController;
 use App\Controllers\TelemetryController;
@@ -13,6 +14,8 @@ use App\Middleware\AuthMiddleware;
 use App\Middleware\PermissionMiddleware;
 
 // Reports
+$router->post('/api/updates/transition/preview', [ChannelTransitionController::class, 'preview', [AuthMiddleware::class, PermissionMiddleware::require('updates.check'), \App\Middleware\EndpointRateLimiter::limit('transition_preview', 10, 60)]]);
+$router->post('/api/updates/transition/apply', [ChannelTransitionController::class, 'apply', [AuthMiddleware::class, PermissionMiddleware::require('updates.apply'), PermissionMiddleware::require('updates.manage_channel'), \App\Middleware\EndpointRateLimiter::limit('transition_apply', 2, 300)]]);
 $router->get('/api/reports/daily',    [ReportController::class, 'daily',        [AuthMiddleware::class, PermissionMiddleware::require('reports.view')]]);
 $router->get('/api/reports/monthly',  [ReportController::class, 'monthly',      [AuthMiddleware::class, PermissionMiddleware::require('reports.view')]]);
 $router->get('/api/reports/products', [ReportController::class, 'topProducts',  [AuthMiddleware::class, PermissionMiddleware::require('reports.view')]]);

@@ -61,7 +61,7 @@ if(in_array($mode,['prepare-compatibility','inspect-compatibility'],true)) {
     $description=(new App\Services\UpdateDataCompatibilityService())->describe($db);
     try{$db->exec("UPDATE pos_update_compatibility_metadata SET definition='altered'");throw new RuntimeException('Metadata view was writable');}
     catch(PDOException $expected){/* TEMPTABLE view is intentionally not updatable. */}
-    echo json_encode(['schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'objects'=>count($description['schema']['objects']),'runtime_metadata_readable'=>true,'metadata_view_read_only'=>true],JSON_THROW_ON_ERROR);exit;
+    echo json_encode(['format'=>1,'metadata_migration'=>App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION,'schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'objects'=>count($description['schema']['objects']),'runtime_metadata_readable'=>true,'metadata_view_read_only'=>true],JSON_THROW_ON_ERROR);exit;
 }
 if($mode==='seed') {
     $query=$db->prepare('INSERT INTO customers (branch_id,name,phone,initial_balance,loyalty_points) VALUES (1, ?, ?, 27.50, 13)');

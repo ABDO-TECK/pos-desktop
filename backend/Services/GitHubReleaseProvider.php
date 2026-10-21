@@ -136,10 +136,10 @@ class GitHubReleaseProvider
         return ['ok'=>false,'release'=>null,'error'=>'Setup release pagination limit exceeded.'];
     }
 
-    public function getReleaseByTag(string $tag): array
+    public function getReleaseByTag(string $tag, string $repo = 'pos-desktop-updates'): array
     {
         if (!ReleaseVersionPolicy::isValid(ltrim($tag, 'vV'))) return ['ok'=>false,'release'=>null,'error'=>'Invalid release tag.'];
-        $result = $this->transitionMetadata('pos-desktop-updates', $tag);
+        $result = $this->transitionMetadata($repo, $tag);
         if (!$result['ok']) return $result;
         $release = $result['releases'][0] ?? null;
         if (!$release || $release['tag_name'] !== $tag || $release['draft']) return ['ok'=>false,'release'=>null,'error'=>'Release is unavailable.'];

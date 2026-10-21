@@ -36,6 +36,7 @@ import useCartStore from '../../store/cartStore'
 import { useConfirmStore } from '../../store/confirmStore'
 import SectionTitle from '../../components/common/SectionTitle'
 import RollbackPoints from './RollbackPoints'
+import ChannelTransitionPanel from './ChannelTransitionPanel'
 import { isUpdateRestarting, withUpdateRestart } from '../../utils/updateRestart'
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
@@ -65,7 +66,9 @@ export default function UpdateSection() {
     updateErrorMessage 
   } = useUpdateStore()
 
-  const [applyingUpdate, setApplyingUpdate] = useState(false)
+  const [normalApplyingUpdate, setApplyingUpdate] = useState(false)
+  const [transitionBusy, setTransitionBusy] = useState(false)
+  const applyingUpdate = normalApplyingUpdate || transitionBusy
   const [showChangelog, setShowChangelog] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showSnapshots, setShowSnapshots] = useState(false)
@@ -174,8 +177,8 @@ export default function UpdateSection() {
     try {
       await setUpdateChannel(newChan)
       setCurrentChannel(newChan)
-      toast.success(`تم تغيير قناة التحديث إلى: ${newChan.toUpperCase()}`)
-      await handleCheckUpdate()
+      toast.success(`تم حفظ متابعة ${newChan.toUpperCase()}. النسخة المثبتة لم تتغير.`)
+      await loadStatusAndHistory()
     } catch {
       toast.error('فشل تغيير قناة التحديث')
     } finally {
@@ -191,7 +194,7 @@ export default function UpdateSection() {
 
   // Polling update progress during apply
   useEffect(() => {
-    if (!applyingUpdate) return
+    if (!applyingUpdate || transitionBusy) return
 
     let polling = false
     const interval = setInterval(async () => {
@@ -220,7 +223,7 @@ export default function UpdateSection() {
     }, 2000)
 
     return () => clearInterval(interval)
-  }, [applyingUpdate])
+  }, [applyingUpdate, transitionBusy])
 
   const handleCheckUpdate = async () => {
     try {
@@ -434,6 +437,8 @@ export default function UpdateSection() {
         </div>
       </div>
 
+
+      <ChannelTransitionPanel channel={currentChannel} installedVersion={updateStatus?.current_version || currentVersion || '—'} installedChannel={updateStatus?.installed_channel || 'retired'} disabled={savingChannel || normalApplyingUpdate || rollingBack} onBusy={setTransitionBusy} />
 
       {/* Interrupted Update Recovery Banner */}
       {updateStatus?.interrupted_update?.interrupted && (

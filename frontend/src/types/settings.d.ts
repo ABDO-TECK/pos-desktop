@@ -1,4 +1,23 @@
 declare global {
+  type ActiveUpdateChannel = 'stable' | 'beta';
+  interface ChannelTransitionPreview {
+    status: 'ready' | 'same_release' | 'waiting' | 'blocked' | 'unreachable';
+    installed: { version: string; channel: ActiveUpdateChannel | 'retired'; shell_sha256: string };
+    selected_channel: ActiveUpdateChannel;
+    target: { version: string; channel: ActiveUpdateChannel; repo: string; tag: string; inventory_sha256: string } | null;
+    package_type: 'delta' | 'full' | null;
+    preview_id: string | null;
+    expires_at: number | null;
+    reason_code: string | null;
+    message: string;
+  }
+  interface ChannelTransitionPrepared {
+    ok: boolean;
+    requires_desktop_handoff: boolean;
+    handoff_version: string;
+    receipt_id: string;
+    logs: string[];
+  }
   interface AppSettings {
     store_name?: string;
     tax_rate?: string;
@@ -21,6 +40,9 @@ declare global {
   }
 
   interface UpdateStateData {
+    transition_receipt?: string;
+    transition_verified?: boolean;
+    requires_recovery?: boolean;
     state: 'pending' | 'downloading' | 'verifying' | 'backing_up' | 'applying' | 'migrating' | 'completed' | 'failed' | 'rolled_back' | 'idle';
     started_at?: string;
     updated_at?: string;

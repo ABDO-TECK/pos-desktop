@@ -135,6 +135,8 @@ export const getUpdateJob = (id: number) => api.get<ApiResponse<UpdateJobResult>
 
 export const getUpdateChannel = () => api.get<ApiResponse<{ channel: string; available_channels: string[]; device_id: string }>>('/updates/channel')
 export const setUpdateChannel = (channel: string) => api.post<ApiResponse<{ ok: boolean; channel: string }>>('/updates/channel', { channel })
+export const previewChannelTransition = () => api.post<ApiResponse<ChannelTransitionPreview>>('/updates/transition/preview', {}, { timeout: 90_000, hideGlobalError: true } as UpdateRequestConfig)
+export const applyChannelTransition = (previewId: string, deltaCapable: boolean) => api.post<ApiResponse<ChannelTransitionPrepared>>('/updates/transition/apply', { preview_id: previewId, delta_capable: deltaCapable }, { timeout: 1_260_000, hideGlobalError: true } as UpdateRequestConfig)
 
 export interface CustomerUpdateStatusData {
   current_version: string

@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+const metadata=JSON.parse(fs.readFileSync('version.json'));
+assert.equal(metadata.channel,'beta');
+assert.equal(metadata.installer_version,'0.0.1');
+assert.match(metadata.version,/^0\.0\.10-beta\.\d+$/);
+assert.deepEqual(metadata.delta_baseline_tags,['v0.0.1',...Array.from({length:4},(_,i)=>`v0.0.10-beta.${i+1}`)]);
+assert.ok(fs.existsSync('scripts/build-channel-transition.php'),'Signed channel package builder missing');
+execFileSync('git',['diff','v0.0.1','--exit-code','--','electron','build','package.json','package-lock.json','scripts/desktop-runtime.json'],{stdio:'pipe'});
+console.log('PASS beta-only candidate metadata, original installer identity and immutable shell source');
