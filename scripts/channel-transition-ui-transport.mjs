@@ -28,8 +28,8 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   let server,starting,base,preparing=false,beforeApplyResponse=null;
   const tasks=new Set();
   async function ensureServer(){
-    if(server&&server.exitCode===null)return base;
     if(starting)return starting;
+    if(server&&server.exitCode===null)return base;
     starting=(async()=>{
       const listener=net.createServer();await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
       const current=ports();
@@ -49,7 +49,9 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   }
   async function handle(params){
     const {requestId,request}=params;
-    const url=new URL(request.url),mutation=/\/(?:apply|rollback)$/.test(url.pathname);
+    // Preserve the real runtime's preflight response; OPTIONS never prepares a handoff.
+    if(request.method==='OPTIONS'){await ui.call('Fetch.continueRequest',{requestId});return;}
+    const url=new URL(request.url),mutation=request.method==='POST'&&/\/(?:apply|rollback)$/.test(url.pathname);
     if(preparing){await ui.call('Fetch.continueRequest',{requestId});return;}
     if(mutation){preparing=true;await Promise.allSettled([...tasks]);}
     try{
