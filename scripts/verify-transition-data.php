@@ -23,6 +23,13 @@ function dataAssert(bool $condition,string $message):void{if(!$condition)throw n
 $db=new CompatibilityDatabase();$service=new UpdateDataCompatibilityService();$description=$service->describe($db);
 $contract=['format'=>1,'schema_sha256'=>$description['schema_sha256'],'ledger_sha256'=>$description['ledger_sha256'],'metadata_migration'=>UpdateDataCompatibilityService::METADATA_MIGRATION];
 dataAssert($service->assess($db,$contract,true)['compatible'],'Exact compatible schema rejected');
+$original=$db->trigger;$db->trigger="SET  \r\n    NEW.name = NEW.name";
+dataAssert($service->assess($db,$contract,true)['compatible'],'Equivalent restored trigger indentation changed the structural contract');$db->trigger=$original;
+foreach(["SET NEW.name = 'two  spaces'","SET NEW.name = 'it\\'s  two'","SET NEW.name = 'it''s  two'","SET NEW.name = `two  spaces`","SET NEW.name = 1 /* keep  comment */","-- keep  comment\nSET NEW.name = 1"] as $definition){
+    $db->trigger=$definition;$literalContract=[...$contract,...array_intersect_key($service->describe($db),array_flip(['schema_sha256','ledger_sha256']))];
+    $db->trigger=str_replace('  ',' ',$definition);dataAssert(!$service->assess($db,$literalContract,true)['compatible'],'Quoted or commented SQL content was normalized away: '.$definition);
+}
+$db->trigger=$original;
 $db->ledger[]=UpdateDataCompatibilityService::METADATA_MIGRATION;
 dataAssert($service->assess($db,$contract,true)['compatible'],'Read-only updater metadata blocks historical app');
 $db->ledger[]='060_business_change.sql';dataAssert(!$service->assess($db,$contract,true)['compatible'],'Unknown later migration accepted');array_pop($db->ledger);

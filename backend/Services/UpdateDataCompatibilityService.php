@@ -31,6 +31,8 @@ final class UpdateDataCompatibilityService
                 if (!is_string($row['definition'] ?? null) || $row['definition'] === '') throw new RuntimeException('Schema object definitions are not fully visible.');
             }
             $rows = array_values(array_filter($rows, static fn(array $row):bool => ($row['table_name']??$row['name']??'') !== self::METADATA_VIEW));
+            if ($kind === 'objects') foreach ($rows as &$row) $row['definition']=$this->canonicalDefinition($row['definition']);
+            unset($row);
             foreach ($rows as &$row) {
                 foreach ($row as &$value) if ($value !== null) $value = (string)$value;
                 unset($value); ksort($row);
@@ -49,6 +51,36 @@ final class UpdateDataCompatibilityService
         sort($ledger, SORT_STRING);
         if (!$ledger || count($ledger)!==count(array_unique($ledger))) throw new RuntimeException('Migration ledger is empty or duplicated.');
         return ['format'=>1,'schema_sha256'=>hash('sha256',json_encode($schema,JSON_THROW_ON_ERROR)),'ledger_sha256'=>hash('sha256',json_encode($ledger,JSON_THROW_ON_ERROR)),'schema'=>$schema,'ledger'=>$ledger];
+    }
+
+    /** Ignore formatting outside SQL literals/identifiers; preserve comments verbatim. */
+    private function canonicalDefinition(string $sql): string
+    {
+        $result='';$pendingSpace=false;$length=strlen($sql);
+        for($position=0;$position<$length;$position++) {
+            $character=$sql[$position];
+            if(str_contains(" \t\r\n\v\f",$character)) { $pendingSpace=true;continue; }
+            if($pendingSpace && $result!=='')$result.=' ';
+            $pendingSpace=false;
+            if(in_array($character,["'",'"','`'],true)) {
+                $quote=$character;$result.=$character;
+                while(++$position<$length) {
+                    $character=$sql[$position];$result.=$character;
+                    if($character==='\\' && $position+1<$length) { $result.=$sql[++$position];continue; }
+                    if($character===$quote) {
+                        if($position+1<$length && $sql[$position+1]===$quote) { $result.=$sql[++$position];continue; }
+                        break;
+                    }
+                }
+            } elseif(substr($sql,$position,2)==='/*') {
+                $end=strpos($sql,'*/',$position+2);$end=$end===false?$length:$end+2;
+                $result.=substr($sql,$position,$end-$position);$position=$end-1;
+            } elseif($character==='#' || (substr($sql,$position,2)==='--' && ($position+2===$length || ord($sql[$position+2])<=32))) {
+                $end=strpos($sql,"\n",$position);$end=$end===false?$length:$end+1;
+                $result.=substr($sql,$position,$end-$position);$position=$end-1;
+            } else $result.=$character;
+        }
+        return $result;
     }
 
     public function assess(PDO $db, array $contract, bool $downgrade): array
