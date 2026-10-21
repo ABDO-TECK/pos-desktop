@@ -27,13 +27,14 @@ export default function ChannelTransitionPanel({ channel, installedVersion, inst
         {preview?.status === 'ready' && (
           <>
             <button className="btn btn-primary" disabled={disabled || transition.busy} onClick={() => void transition.apply()} data-testid="apply-channel-transition">تثبيت {preview.target?.channel.toUpperCase()} v{preview.target?.version}</button>
-            <button className="btn btn-secondary" disabled={transition.busy} onClick={transition.cancel}>انتظار دون تثبيت</button>
+            <button className="btn btn-secondary" disabled={transition.busy || transition.waiting} onClick={transition.cancel}>انتظار دون تثبيت</button>
           </>
         )}
       </div>
       {preview && <div role="status" data-testid="transition-preview-result">
         {preview.target && <p style={{ margin: '0 0 .4rem' }}>الإصدار المتاح للقناة: v{preview.target.version}{preview.package_type ? ` · ${preview.package_type === 'delta' ? 'ملفات متغيرة فقط (Delta)' : 'حزمة ملفات البرنامج كاملة'}` : ''}</p>}
         {preview.status === 'ready' || preview.status === 'same_release' ? preview.message : transitionReason(preview.reason_code)}
+        {transition.waiting && <p style={{ margin: '.4rem 0 0' }}>اخترت الانتظار على نسختك الحالية ومتابعة {channel.toUpperCase()}. تظل معلومات الإصدار ظاهرة؛ لن يتم تثبيته إلا بتأكيد جديد منك.</p>}
       </div>}
       {transition.busy && <p role="status">جاري تنزيل الحزمة والتحقق منها؛ سيُعاد تشغيل الخدمات تلقائيًا، ثم التحقق من الملفات والبيانات.</p>}
       {transition.error && <p role="alert" style={{ color: 'var(--danger, #ef4444)', margin: 0 }}>{transition.error}</p>}

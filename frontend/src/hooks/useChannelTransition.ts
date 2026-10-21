@@ -6,6 +6,15 @@ import useCartStore from '../store/cartStore'
 import { useConfirmStore } from '../store/confirmStore'
 import { withUpdateRestart } from '../utils/updateRestart'
 
+const waitingPreferenceKey = 'pos.channel-transition.waiting'
+function retainedWaitingChoice(preview: ChannelTransitionPreview): boolean {
+  try {
+    const saved: unknown = JSON.parse(sessionStorage.getItem(waitingPreferenceKey) ?? 'null')
+    return typeof saved === 'object' && saved !== null && 'channel' in saved && 'installed' in saved && 'target' in saved
+      && saved.channel === preview.selected_channel && saved.installed === preview.installed.version && saved.target === preview.target?.version
+  } catch { return false }
+}
+
 export function transitionReason(reason: string | null): string {
   const messages: Record<string, string> = {
     transition_package_unavailable: 'حزمة انتقال معتمدة لهذا الإصدار غير متاحة بعد. يمكنك الانتظار أو متابعة القناة الحالية.',
@@ -30,30 +39,41 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [waiting, setWaiting] = useState(false)
   const generation = useRef(0)
   const { confirm } = useConfirmStore()
-
-  useEffect(() => {
-    generation.current += 1
-    setPreview(null)
-    setError(null)
-    setChecking(false)
-  }, [channel])
 
   const check = useCallback(async () => {
     const request = ++generation.current
     setChecking(true)
     setError(null)
     setPreview(null)
+    setWaiting(false)
     try {
       const result = await previewChannelTransition()
-      if (request === generation.current && result.data.data?.selected_channel === channel) setPreview(result.data.data)
+      if (request === generation.current && result.data.data?.selected_channel === channel) {
+        setPreview(result.data.data)
+        setWaiting(retainedWaitingChoice(result.data.data))
+      }
     } catch {
       if (request === generation.current) setError('تعذر التحقق من انتقال القناة. لم تتغير النسخة المثبتة.')
     } finally {
       if (request === generation.current) setChecking(false)
     }
   }, [channel])
+
+  useEffect(() => {
+    void check()
+    return () => { generation.current += 1 }
+  }, [check])
+
+  const wait = () => {
+    if (!preview?.target) return
+    setWaiting(true)
+    try {
+      sessionStorage.setItem(waitingPreferenceKey, JSON.stringify({ channel, installed: preview.installed.version, target: preview.target.version }))
+    } catch { /* The choice still remains visible when browser storage is unavailable. */ }
+  }
 
   const apply = async () => {
     if (!preview?.preview_id || !preview.target || busy) return
@@ -68,6 +88,8 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
     const accepted = await confirm(`تثبيت ${target.channel.toUpperCase()} v${target.version} بدلًا من v${snapshot.installed.version}؟\n\nسيتم استبدال ملفات البرنامج مع الحفاظ على بيانات العمل. عند الرجوع إلى إصدار أقدم تعود واجهته وسلوكه القديمان. لن تُسترجع قاعدة بيانات قديمة فوق مبيعاتك الحالية.`)
     if (!accepted || request !== generation.current) return
     setBusy(true)
+    setWaiting(false)
+    try { sessionStorage.removeItem(waitingPreferenceKey) } catch { /* Optional UI preference. */ }
     setError(null)
     try {
       const capability = Boolean((await window.posRuntime?.getDeltaCapability?.())?.capable)
@@ -99,5 +121,5 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
     }
   }
 
-  return { preview, checking, busy, error, check, apply, cancel: () => setPreview(null) }
+  return { preview, checking, busy, error, waiting, check, apply, cancel: wait }
 }

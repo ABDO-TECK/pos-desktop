@@ -12,6 +12,7 @@ const storage=path.join(process.env.PROGRAMDATA,'POS System');
 const php=process.env.PHP_BINARY||'php';
 const fixture=path.resolve('scripts/fixtures/channel-transition-capability.php');
 const sql=mode=>JSON.parse(execFileSync(php,[fixture,mode],{encoding:'utf8',windowsHide:true}));
+const restore=()=>JSON.parse(execFileSync(php,[path.resolve('scripts/fixtures/channel-transition-restore.php'),root],{encoding:'utf8',windowsHide:true}));
 const target=JSON.parse(fs.readFileSync(path.join(lab,'deployment-inventory.json')));
 const source=JSON.parse(fs.readFileSync(path.join(assets,'deployment-inventory.json')));
 const version=source.version;
@@ -116,12 +117,15 @@ try {
  const common=Object.keys(target.files).filter(file=>source.files[file]?.sha256===target.files[file].sha256);
  const identities=Object.fromEntries(common.map(file=>{const s=fs.statSync(path.join(root,file));return [file,{ino:s.ino,mtimeMs:s.mtimeMs,birthtimeMs:s.birthtimeMs}];}));
  const shellBefore=[ui.hash(path.join(application,'POS Desktop.exe')),ui.hash(path.join(application,'resources/app.asar'))];
- await forward();verifyInventory(source);await ui.system();await chooseChannel('stable');
+ await forward();verifyInventory(source);
+ assert.equal(restore().extended_metadata,true,'Current-version backup restore lost extended metadata');assert.deepEqual(sql('inspect'),before);assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore);
+ await ui.system();await chooseChannel('stable');
  // A signed transport failure is shown without attempting full fallback.
  mode('corrupt_signature');await preview();assert.equal(await ui.evaluate('Boolean(document.querySelector("[data-testid=apply-channel-transition]"))'),false);assert.equal(await ui.evaluate('document.querySelector("[data-testid=transition-preview-result]").innerText.includes("توقيع")'),true);await ui.screenshot('invalid-signature-blocked');
  mode('delta');const failedReceipt=await failLateHandoff();assert.deepEqual(sql('inspect'),before);
  const deltaReceipt=await returnStable('delta');assert.deepEqual(sql('inspect'),before);assert.deepEqual(await pendingSale('get'),offlineBefore);
- await forward();verifyInventory(source);
+ assert.equal(restore().extended_metadata,false,'Historical restore fixture did not recreate the historical metadata shape');assert.deepEqual(sql('inspect'),before);
+ await forward();verifyInventory(source);assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore,'Forward startup did not repair metadata after historical restore');
  // Respect the production 2/300s apply limiter across both old/new interfaces.
  while(Date.now()<firstTransitionAt+310000){console.log('Waiting for the unchanged production apply rate window before full return');await delay(Math.min(15000,firstTransitionAt+310000-Date.now()));}
  mode('full');const fullReceipt=await returnStable('full');
@@ -132,6 +136,7 @@ try {
  assert.equal(await ui.evaluate('Boolean(document.querySelector("option[value=rc]"))'),false);
  const trace=fs.readFileSync(transport.trace,'utf8');assert.ok(trace.includes('delta-0.0.1-to-'+version+'.zip'),'Frozen signed candidate transport was not exercised');
  const result={ok:true,actualOriginalSetup:true,transport:'isolated copied signed packages; live GitHub feeds verified separately after publication',sourceVersion:version,targetVersion:'0.0.1',transitions:['0.0.1',version,'0.0.1',version,'0.0.1',version],deltaAndFull:true,productionHttpPreparation:true,independentVerifierSurvived:true,deltaReceipt,fullReceipt,failedReceipt,lateFailureRecoveredSource:true,realFailureVisibleWithoutConnectionSpam:true,productionRateLimitsUnchanged:true,sourceInventorySha256:ui.hash(path.join(assets,'deployment-inventory.json')),targetInventorySha256:ui.hash(path.join(lab,'deployment-inventory.json')),sqlSchemaLedgerCustomerSettingsPreserved:true,offlineSalePreserved:true,unchangedFileIdentityPreserved:true,unchangedFilesChecked:common.length,shellUnchanged:true,selectionDoesNotInstall:true,waitDoesNotInstall:true,invalidSignatureBlocked:true,activeRcRemoved:true};
+ result.currentAndHistoricalSqlRestoreVerified=true;
  fs.writeFileSync(path.join(evidence,'acceptance.json'),JSON.stringify(result,null,2));await ui.screenshot('candidate-final');
  console.log('PASS real original Setup UI: stable-beta-stable-beta, signed delta and full return, HTTP preparation, independent receipt, exact artifacts, unchanged file identity and SQL/offline data preservation');
 } catch(error){try{await ui.screenshot('failure');}catch{}throw error;}

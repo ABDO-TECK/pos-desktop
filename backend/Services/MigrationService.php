@@ -375,15 +375,23 @@ class MigrationService {
 
         // This read-only metadata view contains no business data and is not
         // exported by restricted-account backups. Recreate it after restore.
-        if ($this->hasMigrationRun('058_add_catalog_trigger_diagnostics_view.sql')) {
+        $extended = $this->hasMigrationRun('059_add_update_compatibility_metadata.sql');
+        $metadataMigration = $extended
+            ? '059_add_update_compatibility_metadata.sql'
+            : ($this->hasMigrationRun('058_add_catalog_trigger_diagnostics_view.sql')
+                ? '058_add_catalog_trigger_diagnostics_view.sql' : null);
+        if ($metadataMigration !== null) {
             try {
-                $view = $this->db->query(
-                    "SELECT TABLE_NAME FROM information_schema.VIEWS
+                $columns = $this->db->query(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS
                      WHERE TABLE_SCHEMA = DATABASE()
                        AND TABLE_NAME = 'product_catalog_trigger_metadata'"
-                )->fetchColumn();
-                if (!$view) {
-                    if (!$this->executeMigration('058_add_catalog_trigger_diagnostics_view.sql')) {
+                )->fetchAll(PDO::FETCH_COLUMN);
+                $required = $extended
+                    ? ['trigger_name', 'object_type', 'object_name', 'definition', 'context', 'table_name']
+                    : ['trigger_name'];
+                if (array_diff($required, array_map('strtolower', $columns))) {
+                    if (!$this->executeMigration($metadataMigration)) {
                         $errors[] = 'Catalog trigger diagnostics view could not be restored.';
                     }
                 }
