@@ -1,16 +1,16 @@
 {
-  "version": "0.0.10-beta.5",
-  "application_version": "0.0.10-beta.5",
+  "version": "0.0.10-beta.6",
+  "application_version": "0.0.10-beta.6",
   "update_engine_version": "1.0.0",
   "channel": "beta",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
   "release_generation": 3,
-  "released_at": "2026-10-21",
+  "released_at": "2026-10-22",
   "changelog": [
-    "Separate the installed release from the selected stable or beta channel, with explicit preview and confirmation for safe channel transitions.",
-    "Verify signed source and target inventories, compatible data structure and the unchanged desktop shell before a channel transition.",
-    "Retire the active rc channel while retaining historical records and preserving business data."
+    "Self-heal migration ledger on startup: automatically normalize extensions, deduplicate entries, and retire legacy pre-release tracking tables.",
+    "Resilient database compatibility checks: normalize migration filenames and ignore legacy tables during schema assessments.",
+    "Add detailed diagnostic error logging for channel transition assessment failures."
   ],
   "requires_npm_install": false,
   "update_channel": "beta",
@@ -20,7 +20,8 @@
     "v0.0.10-beta.1",
     "v0.0.10-beta.2",
     "v0.0.10-beta.3",
-    "v0.0.10-beta.4"
+    "v0.0.10-beta.4",
+    "v0.0.10-beta.5"
   ],
   "installer_version": "0.0.1"
 }
