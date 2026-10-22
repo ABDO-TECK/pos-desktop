@@ -241,17 +241,11 @@ function buildUserProvisioningStatements(appPassword, migrationPassword) {
     `CREATE USER IF NOT EXISTS ${appUserLit}@${hostLit} IDENTIFIED BY ${appPassLit}; ` +
     `ALTER USER ${appUserLit}@${hostLit} IDENTIFIED BY ${appPassLit}; ` +
     `REVOKE ALL PRIVILEGES, GRANT OPTION FROM ${appUserLit}@${hostLit}; ` +
-    `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, TRIGGER ON pos_db.* TO ${appUserLit}@${hostLit};`,
+    `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE ON pos_db.* TO ${appUserLit}@${hostLit};`,
 
     `CREATE USER IF NOT EXISTS ${migrationUserLit}@${hostLit} IDENTIFIED BY ${migPassLit}; ` +
     `ALTER USER ${migrationUserLit}@${hostLit} IDENTIFIED BY ${migPassLit}; ` +
     `GRANT ALL PRIVILEGES ON pos_db.* TO ${migrationUserLit}@${hostLit};`,
-
-    // Compatibility safeguard: if legacy backups or older scripts created triggers with definer 'root'@'localhost'
-    // or 'pos_migration'@'localhost', ensure those definers exist to prevent MySQL 1449 errors.
-    `CREATE USER IF NOT EXISTS 'root'@'localhost'; ` +
-    `CREATE USER IF NOT EXISTS ${migrationUserLit}@'localhost' IDENTIFIED BY ${migPassLit}; ` +
-    `GRANT ALL PRIVILEGES ON pos_db.* TO ${migrationUserLit}@'localhost';`,
 
     'FLUSH PRIVILEGES;',
   ];
