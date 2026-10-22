@@ -1,6 +1,6 @@
 {
-  "version": "0.0.10-beta.6",
-  "application_version": "0.0.10-beta.6",
+  "version": "0.0.10-beta.7",
+  "application_version": "0.0.10-beta.7",
   "update_engine_version": "1.0.0",
   "channel": "beta",
   "minimum_supported_version": "0.0.1",
@@ -8,9 +8,9 @@
   "release_generation": 3,
   "released_at": "2026-10-22",
   "changelog": [
-    "Self-heal migration ledger on startup: automatically normalize extensions, deduplicate entries, and retire legacy pre-release tracking tables.",
-    "Resilient database compatibility checks: normalize migration filenames and ignore legacy tables during schema assessments.",
-    "Add detailed diagnostic error logging for channel transition assessment failures."
+    "Implement root-cause database self-healing for trigger definers and runtime privileges (resolving MySQL 1449 / 1142).",
+    "Grant explicit TRIGGER privileges to runtime database accounts on startup.",
+    "Ensure automatic catalog trigger self-repair and graceful fallback on product creation, update, and deletion."
   ],
   "requires_npm_install": false,
   "update_channel": "beta",
@@ -21,7 +21,8 @@
     "v0.0.10-beta.2",
     "v0.0.10-beta.3",
     "v0.0.10-beta.4",
-    "v0.0.10-beta.5"
+    "v0.0.10-beta.5",
+    "v0.0.10-beta.6"
   ],
   "installer_version": "0.0.1"
 }
