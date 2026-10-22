@@ -30,7 +30,7 @@ final class UpdateDataCompatibilityService
             if ($kind === 'objects') foreach ($rows as $row) {
                 if (!is_string($row['definition'] ?? null) || $row['definition'] === '') throw new RuntimeException('Schema object definitions are not fully visible.');
             }
-            $rows = array_values(array_filter($rows, static fn(array $row):bool => ($row['table_name']??$row['name']??'') !== self::METADATA_VIEW));
+            $rows = array_values(array_filter($rows, static fn(array $row):bool => !in_array($row['table_name']??$row['name']??'', [self::METADATA_VIEW, 'migrations'], true)));
             if ($kind === 'objects') foreach ($rows as &$row) $row['definition']=$this->canonicalDefinition($row['definition']);
             unset($row);
             foreach ($rows as &$row) {
@@ -45,11 +45,15 @@ final class UpdateDataCompatibilityService
         $ledgerRows = $db->query('SELECT version FROM schema_versions ORDER BY version')->fetchAll(PDO::FETCH_ASSOC);
         $ledger = [];
         foreach ($ledgerRows as $row) {
-            if (!is_string($row['version']??null) || !preg_match('/^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/',$row['version'])) throw new RuntimeException('Migration ledger is invalid.');
-            if ($row['version'] !== self::METADATA_MIGRATION) $ledger[] = $row['version'];
+            $version = trim((string)($row['version'] ?? ''));
+            if ($version === '') continue;
+            if (!str_ends_with($version, '.sql')) $version .= '.sql';
+            if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/', $version)) continue;
+            if ($version !== self::METADATA_MIGRATION) $ledger[] = $version;
         }
+        $ledger = array_values(array_unique($ledger));
         sort($ledger, SORT_STRING);
-        if (!$ledger || count($ledger)!==count(array_unique($ledger))) throw new RuntimeException('Migration ledger is empty or duplicated.');
+        if (!$ledger) throw new RuntimeException('Migration ledger is empty.');
         return ['format'=>1,'schema_sha256'=>hash('sha256',json_encode($schema,JSON_THROW_ON_ERROR)),'ledger_sha256'=>hash('sha256',json_encode($ledger,JSON_THROW_ON_ERROR)),'schema'=>$schema,'ledger'=>$ledger];
     }
 

@@ -58,7 +58,14 @@ final class ChannelTransitionService
             $fresh=$this->resolve($this->updates->getClientChannel());
             if ($fresh['preview']['status']!=='ready' || ($fresh['binding']??null)!==$context['binding']) throw new RuntimeException('preview_expired_or_changed');
             // Recheck the schema and every source byte after potentially slow network I/O.
-            if (!$this->compatibility->assess($this->database(),$descriptor['data_compatibility'],version_compare($descriptor['version'],$descriptor['from_version'],'<'))['compatible']) throw new RuntimeException('data_schema_incompatible');
+            $compatCheck = $this->compatibility->assess($this->database(),$descriptor['data_compatibility'],version_compare($descriptor['version'],$descriptor['from_version'],'<'));
+            if (!$compatCheck['compatible']) {
+                \App\Helpers\Logger::warning('Channel transition prepare data assessment blocked', [
+                    'reason_code' => $compatCheck['reason_code'],
+                    'error' => $compatCheck['error'] ?? null,
+                ]);
+                throw new RuntimeException('data_schema_incompatible');
+            }
             if (!(new UpdateManifestService())->verifyBaselineFiles($this->delta->getRootDir(),$manifest)) throw new RuntimeException('source_inventory_mismatch');
             $recovery=(new MigrationSafetyBackupService($this->backup,$this->delta->getStorageDir()))->createMigrationSafetyBackup($descriptor['from_version'],$descriptor['version'],'transition-'.bin2hex(random_bytes(8)));
             if (!$recovery['ok']) throw new RuntimeException('manual_recovery_backup_failed');
@@ -124,7 +131,13 @@ final class ChannelTransitionService
                 $package=ChannelTransitionReleaseCatalog::asset($carrier,$descriptor['package']['asset']);
                 if (!$package) continue;
                 $assessment=$this->compatibility->assess($this->database(),$descriptor['data_compatibility'],version_compare($target['version'],$version,'<'));
-                if (!$assessment['compatible']) throw new RuntimeException($assessment['reason_code']);
+                if (!$assessment['compatible']) {
+                    \App\Helpers\Logger::warning('Channel transition data assessment blocked', [
+                        'reason_code' => $assessment['reason_code'],
+                        'error' => $assessment['error'] ?? null,
+                    ]);
+                    throw new RuntimeException($assessment['reason_code']);
+                }
                 $binding=['installed_version'=>$version,'source_inventory'=>$installed['inventory_sha256'],'shell'=>$installed['shell_sha256'],'channel'=>$channel,'target'=>$preview['target'],'descriptor'=>hash('sha256',$raw),'schema'=>$assessment['schema_sha256'],'ledger'=>$assessment['ledger_sha256']];
                 return ['preview'=>[...$preview,'status'=>'ready','package_type'=>$descriptor['type'],'reason_code'=>null,'message'=>'يمكن تثبيت إصدار القناة المختارة بعد تأكيدك. الرجوع يعيد واجهة الإصدار القديم؛ بيانات العمل تُحفظ.'],'descriptor'=>$descriptor,'package'=>$package,'binding'=>$binding];
             }

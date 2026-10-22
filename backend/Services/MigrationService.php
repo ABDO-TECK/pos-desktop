@@ -73,6 +73,7 @@ class MigrationService {
 
         // ── Smart skip: لا حاجة للتنفيذ إذا لم تتغير الملفات ──
         if (!$force && $this->isUpToDate()) {
+            $this->reconcileLegacyArtifacts();
             return ['executed' => 0, 'errors' => [], 'skipped' => true];
         }
 
@@ -355,8 +356,99 @@ class MigrationService {
     public function reconcileLegacyArtifacts(): array
     {
         $errors = $this->reconcileBackupMetadata();
+        $errors = array_merge($errors, $this->reconcileCatalogTriggers());
 
-        return array_merge($errors, $this->reconcileCatalogTriggers());
+        return array_merge($errors, $this->reconcileMigrationLedger());
+    }
+
+    /**
+     * Normalize, deduplicate and self-heal the migration ledger table (schema_versions),
+     * and clean up any obsolete legacy tracking tables (e.g. migrations from April 2026).
+     *
+     * @return string[]
+     */
+    public function reconcileMigrationLedger(): array
+    {
+        $errors = [];
+        try {
+            try {
+                $this->db->query("SELECT 1 FROM schema_versions LIMIT 1");
+            } catch (\Throwable) {
+                return $errors;
+            }
+
+            $rows = $this->db->query("SELECT id, version, executed_at FROM schema_versions ORDER BY id ASC")->fetchAll(PDO::FETCH_ASSOC);
+            if (!$rows) {
+                return $errors;
+            }
+
+            $canonicals = [];
+            foreach ($rows as $row) {
+                $v = $row['version'] ?? '';
+                if (is_string($v) && str_ends_with($v, '.sql')) {
+                    $canonicals[$v] = true;
+                }
+            }
+
+            $seen = [];
+            $toDelete = [];
+            $toNormalize = [];
+
+            foreach ($rows as $row) {
+                $id = (int)$row['id'];
+                $v = trim((string)($row['version'] ?? ''));
+
+                if ($v === '') {
+                    $toDelete[] = $id;
+                    continue;
+                }
+
+                $canonicalName = str_ends_with($v, '.sql') ? $v : $v . '.sql';
+
+                if (!str_ends_with($v, '.sql')) {
+                    if (isset($canonicals[$canonicalName])) {
+                        $toDelete[] = $id;
+                        continue;
+                    } else {
+                        $toNormalize[$id] = $canonicalName;
+                        $canonicals[$canonicalName] = true;
+                    }
+                }
+
+                if (isset($seen[$canonicalName])) {
+                    $toDelete[] = $id;
+                } else {
+                    $seen[$canonicalName] = $id;
+                }
+            }
+
+            if (!empty($toDelete)) {
+                $placeholders = implode(',', array_fill(0, count($toDelete), '?'));
+                $stmt = $this->db->prepare("DELETE FROM schema_versions WHERE id IN ($placeholders)");
+                $stmt->execute($toDelete);
+            }
+
+            if (!empty($toNormalize)) {
+                $stmt = $this->db->prepare("UPDATE schema_versions SET version = ? WHERE id = ?");
+                foreach ($toNormalize as $id => $normalizedVersion) {
+                    $stmt->execute([$normalizedVersion, $id]);
+                }
+            }
+
+            try {
+                $this->db->query("SELECT 1 FROM migrations LIMIT 1");
+                $this->db->exec("DROP TABLE IF EXISTS migrations");
+            } catch (\Throwable $dropErr) {
+                // Table does not exist or drop may be restricted under runtime connection; best effort.
+            }
+        } catch (\Throwable $e) {
+            Logger::warning('Migration ledger reconciliation warning: ' . $e->getMessage(), [
+                'exception' => get_class($e),
+            ]);
+            $errors[] = 'Migration ledger reconciliation: ' . $e->getMessage();
+        }
+
+        return $errors;
     }
 
     /** Restore only derived metadata for migrations already present in a backup. */
