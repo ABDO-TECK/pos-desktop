@@ -355,6 +355,15 @@ class MigrationService {
      */
     public function reconcileLegacyArtifacts(): array
     {
+        try {
+            $driver = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($driver !== 'mysql') {
+                return $this->reconcileMigrationLedger();
+            }
+        } catch (\Throwable) {
+            // Best effort driver inspection
+        }
+
         $errors = $this->reconcileBackupMetadata();
         $errors = array_merge($errors, $this->reconcileCatalogTriggers());
 
@@ -495,9 +504,18 @@ class MigrationService {
         return $errors;
     }
 
-    private function reconcileCatalogTriggers(): array
+    public function reconcileCatalogTriggers(bool $forceRebuild = false): array
     {
         $errors = [];
+
+        try {
+            $driver = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($driver !== 'mysql') {
+                return $errors;
+            }
+        } catch (\Throwable) {
+            // Best effort driver check
+        }
 
         // Legacy compatibility: Migration 043 introduced product catalog change triggers,
         // but backups created prior to trigger-export support mark 043 as applied without
@@ -512,13 +530,28 @@ class MigrationService {
                 ")->fetchColumn();
 
                 if ($tableCheck) {
+                    $this->db->exec("
+                        CREATE TABLE IF NOT EXISTS product_catalog_changes (
+                            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                            branch_id INT NOT NULL,
+                            product_id INT NOT NULL,
+                            changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (id),
+                            KEY idx_catalog_changes_branch_sequence (branch_id, id),
+                            KEY idx_catalog_changes_product (product_id, id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                    ");
+
                     $stmt = $this->db->query("
-                        SELECT TRIGGER_NAME
+                        SELECT TRIGGER_NAME, DEFINER
                         FROM information_schema.TRIGGERS
                         WHERE TRIGGER_SCHEMA = DATABASE()
                           AND EVENT_OBJECT_TABLE = 'products'
                     ");
-                    $existingTriggers = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+                    $existingTriggers = [];
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $existingTriggers[$row['TRIGGER_NAME']] = (string)($row['DEFINER'] ?? '');
+                    }
 
                     $requiredTriggers = [
                         'trg_products_catalog_insert' => "
@@ -544,31 +577,34 @@ class MigrationService {
                         ",
                     ];
 
-                    $missingTriggers = [];
+                    $currentUser = '';
+                    try {
+                        $currentUser = (string)$this->db->query("SELECT CURRENT_USER()")->fetchColumn();
+                    } catch (\Throwable) {}
+
+                    $triggersToRebuild = [];
                     foreach (array_keys($requiredTriggers) as $triggerName) {
-                        if (!in_array($triggerName, $existingTriggers, true)) {
-                            $missingTriggers[] = $triggerName;
+                        if ($forceRebuild || !isset($existingTriggers[$triggerName])) {
+                            $triggersToRebuild[] = $triggerName;
+                            continue;
+                        }
+
+                        $definer = $existingTriggers[$triggerName];
+
+                        // Rebuild if definer points to localhost (breaks in MariaDB under --skip-name-resolve)
+                        // or if definer is orphaned/not aligned with valid runtime/migration accounts.
+                        if (
+                            str_contains($definer, 'localhost')
+                            || ($currentUser !== '' && !str_starts_with($definer, 'pos_migration@') && !str_starts_with($definer, 'pos_app@') && $definer !== $currentUser)
+                        ) {
+                            $triggersToRebuild[] = $triggerName;
                         }
                     }
 
-                    if (!empty($missingTriggers)) {
-                        $this->db->exec("
-                            CREATE TABLE IF NOT EXISTS product_catalog_changes (
-                                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                                branch_id INT NOT NULL,
-                                product_id INT NOT NULL,
-                                changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                                PRIMARY KEY (id),
-                                KEY idx_catalog_changes_branch_sequence (branch_id, id),
-                                KEY idx_catalog_changes_product (product_id, id)
-                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                        ");
-
-                        foreach ($missingTriggers as $triggerName) {
-                            $this->db->exec("DROP TRIGGER IF EXISTS `{$triggerName}`");
-                            $this->db->exec(trim($requiredTriggers[$triggerName]));
-                            Logger::info("Reconciled missing legacy trigger: {$triggerName}");
-                        }
+                    foreach ($triggersToRebuild as $triggerName) {
+                        $this->db->exec("DROP TRIGGER IF EXISTS `{$triggerName}`");
+                        $this->db->exec(trim($requiredTriggers[$triggerName]));
+                        Logger::info("Reconciled catalog trigger: {$triggerName} (recreated with valid definer)");
                     }
                 }
             } catch (\Throwable $e) {

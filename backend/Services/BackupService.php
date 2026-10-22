@@ -316,7 +316,7 @@ class BackupService implements BackupServiceInterface {
         if (!$runMigrations) {
             try {
                 $migrationService = new MigrationService(Database::getMigrationConnection($connectionOverrides));
-                $metadataErrors = $migrationService->reconcileBackupMetadata();
+                $metadataErrors = $migrationService->reconcileLegacyArtifacts();
             } catch (\Throwable $exception) {
                 $metadataErrors = ['Backup metadata could not be restored.'];
             }
