@@ -159,4 +159,37 @@ class Expense
         ]);
         return (float) $stmt->fetchColumn();
     }
+
+    public function getDashboardTotals(string $today): array
+    {
+        $dayStart = $today . ' 00:00:00';
+        $dayEnd   = date('Y-m-d 00:00:00', strtotime($today . ' +1 day'));
+
+        $month = (int) date('n', strtotime($today));
+        $year  = (int) date('Y', strtotime($today));
+        $monthStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
+        $monthEnd   = date('Y-m-d 00:00:00', strtotime($monthStart . ' +1 month'));
+
+        $stmt = $this->db->prepare(
+            'SELECT
+                COALESCE(SUM(CASE WHEN expense_date >= ? AND expense_date < ? THEN amount ELSE 0 END), 0) AS today_expenses,
+                COALESCE(SUM(amount), 0) AS month_expenses
+             FROM expenses
+             WHERE branch_id = ?
+               AND expense_date >= ?
+               AND expense_date < ?'
+        );
+        $stmt->execute([
+            $dayStart,
+            $dayEnd,
+            AuthService::getGlobalBranchId(),
+            $monthStart,
+            $monthEnd,
+        ]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        return [
+            'today_expenses' => (float) ($row['today_expenses'] ?? 0),
+            'month_expenses' => (float) ($row['month_expenses'] ?? 0),
+        ];
+    }
 }

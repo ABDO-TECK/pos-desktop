@@ -172,6 +172,16 @@ class InvoiceRepository implements RepositoryInterface
         return $this->model->getTodayInvoicesCount();
     }
 
+    public function getDashboardRevenueTotals(): array
+    {
+        return $this->model->getDashboardRevenueTotals();
+    }
+
+    public function getDashboardItemTotals(string $today): array
+    {
+        return $this->model->getDashboardItemTotals($today);
+    }
+
     public function getModel(): Invoice
     {
         return $this->model;

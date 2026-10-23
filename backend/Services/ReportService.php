@@ -135,30 +135,44 @@ class ReportService {
     }
 
     /**
+     * الحصول على تاريخ اليوم (بصيغة Y-m-d) لحسابات لوحة التحكم.
+     * يمكن تجاوزه في الاختبارات للتحكم في تاريخ اليوم والشهر.
+     */
+    protected function getDashboardDate(): string {
+        return date('Y-m-d');
+    }
+
+    /**
      * جلب ملخص عام لجميع المؤشرات ليوم وشهر محددين (للوحة التحكم).
      *
      * @return array ملخص الإحصائيات
      */
     public function getDashboardSummary(): array {
-        $todayRevenue   = $this->invoiceRepo->getTodayRevenue();
-        $monthRevenue   = $this->invoiceRepo->getMonthRevenue();
-        $todayInvoices  = $this->invoiceRepo->getTodayInvoicesCount();
-        
+        $today = $this->getDashboardDate();
+
+        $revenueTotals = $this->invoiceRepo->getDashboardRevenueTotals();
+        $itemTotals    = $this->invoiceRepo->getDashboardItemTotals($today);
+        $expenseTotals = $this->expenseRepo->getDashboardTotals($today);
+
         $totalProducts  = $this->productRepo->getTotalProductsCount();
         $lowStockCount  = $this->productRepo->getLowStockProductsCount();
         $totalSuppliers = $this->supplierRepo->getTotalSuppliersCount();
 
-        $monthProfit = $this->invoiceRepo->getTotalProfitForMonth((int)date('n'), (int)date('Y'));
-        $todayProfit = $this->invoiceRepo->getTotalProfitForDate(date('Y-m-d'));
-        $todayCost   = $this->invoiceRepo->getTotalCostForDate(date('Y-m-d'));
-        $monthCost   = $this->invoiceRepo->getTotalCostForMonth((int)date('n'), (int)date('Y'));
-        
-        $todayExpenses = $this->expenseRepo->getTotalExpensesForDate(date('Y-m-d'));
-        $monthExpenses = $this->expenseRepo->getTotalExpensesForMonth((int)date('n'), (int)date('Y'));
+        $todayRevenue  = (float) ($revenueTotals['today_revenue'] ?? 0);
+        $monthRevenue  = (float) ($revenueTotals['month_revenue'] ?? 0);
+        $todayInvoices = (int) ($revenueTotals['today_invoices'] ?? 0);
+
+        $todayCost   = (float) ($itemTotals['today_cost'] ?? 0);
+        $monthCost   = (float) ($itemTotals['month_cost'] ?? 0);
+        $todayProfit = (float) ($itemTotals['today_profit'] ?? 0);
+        $monthProfit = (float) ($itemTotals['month_profit'] ?? 0);
+
+        $todayExpenses = (float) ($expenseTotals['today_expenses'] ?? 0);
+        $monthExpenses = (float) ($expenseTotals['month_expenses'] ?? 0);
 
         return [
-            'today_revenue'  => (float)$todayRevenue,
-            'month_revenue'  => (float)$monthRevenue,
+            'today_revenue'  => $todayRevenue,
+            'month_revenue'  => $monthRevenue,
             'today_cost'     => $todayCost,
             'month_cost'     => $monthCost,
             'today_profit'   => $todayProfit,
@@ -167,7 +181,7 @@ class ReportService {
             'month_expenses' => $monthExpenses,
             'today_net_profit' => $todayProfit - $todayExpenses,
             'month_net_profit' => $monthProfit - $monthExpenses,
-            'today_invoices' => (int)$todayInvoices,
+            'today_invoices' => $todayInvoices,
             'total_products' => (int)$totalProducts,
             'low_stock_count'=> (int)$lowStockCount,
             'total_suppliers'=> (int)$totalSuppliers,

@@ -49,6 +49,11 @@ class ExpenseRepository implements RepositoryInterface
         return $this->model->getTotalExpensesForMonth($month, $year);
     }
 
+    public function getDashboardTotals(string $today): array
+    {
+        return $this->model->getDashboardTotals($today);
+    }
+
     public function getModel(): Expense
     {
         return $this->model;

@@ -9,6 +9,7 @@ use App\Helpers\JobQueue;
 use App\Helpers\Logger;
 use App\Helpers\Response;
 use App\Services\AuthService;
+use App\Services\BackgroundUpdateCheckService;
 use App\Services\ReleaseVersionPolicy;
 use App\Services\UpdateService;
 use Throwable;
@@ -17,11 +18,16 @@ class UpdateController extends Controller
 {
     private AuthService $authService;
     private UpdateService $updateService;
+    private ?BackgroundUpdateCheckService $backgroundUpdateService;
 
-    public function __construct(AuthService $authService, UpdateService $updateService)
-    {
-        $this->authService   = $authService;
-        $this->updateService = $updateService;
+    public function __construct(
+        AuthService $authService,
+        UpdateService $updateService,
+        ?BackgroundUpdateCheckService $backgroundUpdateService = null
+    ) {
+        $this->authService             = $authService;
+        $this->updateService           = $updateService;
+        $this->backgroundUpdateService = $backgroundUpdateService;
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -43,8 +49,8 @@ class UpdateController extends Controller
         $currentVersion = $local['version'] ?? '0.0.0';
         $state = $this->updateService->getDeltaUpdateService()->getUpdateState();
 
-        // Check if there is cached or active release info
-        $remote = $this->updateService->fetchRemoteVersion(null, false) ?? [];
+        // Check if there is cached release info (cache-only accessor, never external discovery on GET status)
+        $remote = $this->updateService->getCachedRemoteVersion() ?? [];
         $latestVersion = $remote['version'] ?? null;
         $compatibility = ReleaseVersionPolicy::assess($currentVersion, $latestVersion);
         $hasUpdate = $compatibility['compatible']
@@ -145,6 +151,20 @@ class UpdateController extends Controller
     public function check()
     {
         $body = $this->getBody();
+        $isBackground = false;
+        if (isset($body['background'])) {
+            $isBackground = filter_var($body['background'], FILTER_VALIDATE_BOOLEAN);
+        } elseif (isset($_GET['background'])) {
+            $isBackground = filter_var($_GET['background'], FILTER_VALIDATE_BOOLEAN);
+        }
+
+        if ($isBackground) {
+            $backgroundService = $this->backgroundUpdateService
+                ?? new BackgroundUpdateCheckService($this->updateService);
+            $result = $backgroundService->readOrSchedule($this->hasDesktopHandoffCapability());
+            return Response::success($result);
+        }
+
         $force = isset($body['force']) ? filter_var($body['force'], FILTER_VALIDATE_BOOLEAN) : true;
         $result = $this->updateService->checkForUpdate($this->hasDesktopHandoffCapability(), $force);
         return Response::success($result);

@@ -82,6 +82,9 @@ declare global {
     changelog: { version: string; date: string; changes: string[] }[];
     requires_npm_install?: boolean;
     status?: string;
+    pending?: boolean;
+    ok?: boolean;
+    success?: boolean;
     requires_desktop_handoff?: boolean;
     handoff_version?: string;
     message?: string;

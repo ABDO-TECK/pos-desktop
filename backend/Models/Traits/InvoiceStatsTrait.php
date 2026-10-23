@@ -221,4 +221,68 @@ trait InvoiceStatsTrait {
         $stmt->execute([AuthService::getGlobalBranchId(), 'completed']);
         return (int) $stmt->fetchColumn();
     }
+
+    public function getDashboardRevenueTotals(): array {
+        $stmt = $this->db->prepare(
+            'SELECT
+                COALESCE(SUM(CASE WHEN created_at >= CURDATE() AND created_at < CURDATE() + INTERVAL 1 DAY THEN total ELSE 0 END), 0) AS today_revenue,
+                COALESCE(SUM(total), 0) AS month_revenue,
+                COALESCE(SUM(CASE WHEN created_at >= CURDATE() AND created_at < CURDATE() + INTERVAL 1 DAY THEN 1 ELSE 0 END), 0) AS today_invoices
+             FROM invoices
+             WHERE branch_id = ?
+               AND status = ?
+               AND created_at >= DATE_FORMAT(CURDATE(), "%Y-%m-01")
+               AND created_at < DATE_FORMAT(CURDATE() + INTERVAL 1 MONTH, "%Y-%m-01")'
+        );
+        $stmt->execute([AuthService::getGlobalBranchId(), 'completed']);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        return [
+            'today_revenue'  => (float)($row['today_revenue'] ?? 0),
+            'month_revenue'  => (float)($row['month_revenue'] ?? 0),
+            'today_invoices' => (int)($row['today_invoices'] ?? 0),
+        ];
+    }
+
+    public function getDashboardItemTotals(string $today): array {
+        $dayStart = $today . ' 00:00:00';
+        $dayEnd   = date('Y-m-d 00:00:00', strtotime($today . ' +1 day'));
+
+        $month = (int)date('n', strtotime($today));
+        $year  = (int)date('Y', strtotime($today));
+        if (method_exists($this, 'getMonthDateRange')) {
+            [$monthStart, $monthEnd] = $this->getMonthDateRange($month, $year);
+        } else {
+            $monthStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
+            $monthEnd   = date('Y-m-d 00:00:00', strtotime($monthStart . ' +1 month'));
+        }
+
+        $stmt = $this->db->prepare(
+            'SELECT
+                COALESCE(SUM(CASE WHEN inv.created_at >= ? AND inv.created_at < ? THEN ii.unit_cost * ii.quantity ELSE 0 END), 0) AS today_cost,
+                COALESCE(SUM(ii.unit_cost * ii.quantity), 0) AS month_cost,
+                COALESCE(SUM(CASE WHEN inv.created_at >= ? AND inv.created_at < ? THEN (ii.price - ii.unit_cost) * ii.quantity ELSE 0 END), 0) AS today_profit,
+                COALESCE(SUM((ii.price - ii.unit_cost) * ii.quantity), 0) AS month_profit
+             FROM invoice_items ii
+             INNER JOIN invoices inv ON inv.id = ii.invoice_id AND inv.status = "completed"
+             WHERE inv.branch_id = ?
+               AND inv.created_at >= ?
+               AND inv.created_at < ?'
+        );
+        $stmt->execute([
+            $dayStart,
+            $dayEnd,
+            $dayStart,
+            $dayEnd,
+            AuthService::getGlobalBranchId(),
+            $monthStart,
+            $monthEnd,
+        ]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        return [
+            'today_cost'   => (float)($row['today_cost'] ?? 0),
+            'month_cost'   => (float)($row['month_cost'] ?? 0),
+            'today_profit' => (float)($row['today_profit'] ?? 0),
+            'month_profit' => (float)($row['month_profit'] ?? 0),
+        ];
+    }
 }

@@ -27,6 +27,8 @@ const SORT_OPTIONS = [
   { id: 'price_asc', label: 'السعر (الأدنى أولاً)' },
 ]
 
+const ARABIC_COLLATOR = new Intl.Collator('ar', { sensitivity: 'base' })
+
 function StatCard({ icon, label, value, color }: { icon: React.ReactNode, label: React.ReactNode, value: React.ReactNode, color?: string }) {
   return (
     <div className="stat-card">
@@ -110,7 +112,7 @@ export default function ProductsTab({
     }
 
     const sorted = [...list]
-    const nameCmp = (a: Product, b: Product) => String(a.name || '').localeCompare(String(b.name || ''), 'ar', { sensitivity: 'base' })
+    const nameCmp = (a: Product, b: Product) => ARABIC_COLLATOR.compare(String(a.name || ''), String(b.name || ''))
 
     switch (sortKey) {
       case 'name_desc':
@@ -152,9 +154,19 @@ export default function ProductsTab({
   }, [allProducts, q, categoryFilter, stockFilter, sortKey])
 
   // ── Computed stats ──
-  const totalUnits = allProducts.reduce((s, p) => s + Number(p.quantity), 0)
-  const stockValue = allProducts.reduce((s, p) => s + Number(p.quantity) * Number(p.cost), 0)
-  const outOfStock = allProducts.filter((p) => p.quantity <= 0).length
+  const { totalUnits, stockValue, outOfStock } = useMemo(() => {
+    return allProducts.reduce(
+      (acc, p) => {
+        acc.totalUnits += Number(p.quantity)
+        acc.stockValue += Number(p.quantity) * Number(p.cost)
+        if (p.quantity <= 0) {
+          acc.outOfStock += 1
+        }
+        return acc
+      },
+      { totalUnits: 0, stockValue: 0, outOfStock: 0 }
+    )
+  }, [allProducts])
 
   const filtersActive =
     stockFilter !== 'all' ||

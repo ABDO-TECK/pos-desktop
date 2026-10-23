@@ -80,6 +80,11 @@ class UpdateService
         return $this->rootDir;
     }
 
+    public function getRepoUrl(): string
+    {
+        return $this->repoUrl;
+    }
+
     public function getDeltaUpdateService(): DeltaUpdateService
     {
         return $this->deltaUpdateService;
@@ -197,28 +202,106 @@ class UpdateService
     }
 
     /**
-     * جلب النسخة البعيدة من GitHub Releases أو خادم التحديثات
+     * قراءة النسخة البعيدة من الكاش المحلي فقط بدون أي اتصال خارجي.
      */
-    public function fetchRemoteVersion(?string $channel = null, bool $force = false): ?array
+    public function getCachedRemoteVersion(?string $channel = null): ?array
     {
         $targetChannel = $channel ?? $this->getClientChannel();
         $safeChannel = preg_replace('/[^a-z0-9_-]/i', '', $targetChannel) ?: 'stable';
         $storageDir = $this->deltaUpdateService->getStorageDir();
         $cacheFile = rtrim($storageDir, '/\\') . '/remote_version_cache_' . $safeChannel . '.json';
 
-        if (!$force && is_file($cacheFile)) {
+        if (is_file($cacheFile)) {
             $mtime = @filemtime($cacheFile);
             if ($mtime !== false && (time() - $mtime) < 300) {
                 $cached = @json_decode((string) @file_get_contents($cacheFile), true);
                 if (is_array($cached) && !empty($cached['ok']) && !empty($cached['data'])) {
                     $cachedVersion = $cached['data']['version'] ?? null;
-                    if ($cachedVersion === null || (is_string($cachedVersion) && $this->manifestService->checkChannelCompatibility($targetChannel, UpdateChannelPolicy::installedChannel($cachedVersion))['compatible'])) return $cached['data'];
+                    if ($cachedVersion === null || (is_string($cachedVersion) && $this->manifestService->checkChannelCompatibility($targetChannel, UpdateChannelPolicy::installedChannel($cachedVersion))['compatible'])) {
+                        return $cached['data'];
+                    }
                 }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * جلب النسخة البعيدة من GitHub Releases أو خادم التحديثات
+     */
+    public function fetchRemoteVersion(?string $channel = null, bool $force = false): ?array
+    {
+        if (!$force) {
+            $cached = $this->getCachedRemoteVersion($channel);
+            if ($cached !== null) {
+                return $cached;
             }
         }
 
         $result = $this->fetchRemoteVersionDiagnostics($channel, $force);
         return $result['ok'] ? $result['data'] : null;
+    }
+
+    /**
+     * سياق آمن ومهشر لفحص التحديثات بدون كشف أسرار أو روابط داخلية.
+     */
+    public function getContextFingerprint(bool $deltaCapable = false): array
+    {
+        $local = $this->getLocalVersion();
+        $repoUrlHash = hash('sha256', (string) $this->repoUrl);
+        $appVersion = (string) ($local['version'] ?? '0.0.0');
+        $rawEngineVersion = $local['update_engine_version'] ?? null;
+        $engineVersion = ($rawEngineVersion !== null && $rawEngineVersion !== '')
+            ? (string) $rawEngineVersion
+            : null;
+        $channel = (string) $this->getClientChannel();
+        $requireSignature = $this->requiresUpdateSignature();
+        $allowedHosts = $this->allowedUpdateHosts;
+        sort($allowedHosts);
+        $allowedHostsHash = hash('sha256', implode(',', $allowedHosts));
+
+        $keyHashes = [];
+        $keySources = [];
+        if ($this->signatureService) {
+            $pk = $this->signatureService->getPublicKeyPath();
+            if ($pk !== null && $pk !== '') {
+                $keySources[] = $pk;
+            }
+            foreach ($this->signatureService->getTrustedKeyPaths() as $tp) {
+                if (is_string($tp) && $tp !== '') {
+                    $keySources[] = $tp;
+                }
+            }
+        }
+        $keySources = array_unique($keySources);
+        foreach ($keySources as $ks) {
+            if (str_contains($ks, '-----BEGIN ') && (str_contains($ks, 'PUBLIC KEY') || str_contains($ks, 'RSA PUBLIC KEY'))) {
+                $keyHashes[] = hash('sha256', $ks);
+            } elseif (is_file($ks) && is_readable($ks)) {
+                $content = @file_get_contents($ks);
+                $keyHashes[] = hash('sha256', (string) $content);
+            } else {
+                $keyHashes[] = 'missing_or_unreadable';
+            }
+        }
+        sort($keyHashes);
+        $signatureKeysHash = hash('sha256', implode(';', $keyHashes));
+
+        $canonical = [
+            'repo_url_hash'         => $repoUrlHash,
+            'application_version'   => $appVersion,
+            'update_engine_version' => $engineVersion,
+            'channel'               => $channel,
+            'delta_capable'         => $deltaCapable,
+            'require_signature'     => $requireSignature,
+            'signature_keys_hash'   => $signatureKeysHash,
+            'allowed_hosts_hash'    => $allowedHostsHash,
+        ];
+
+        $canonical['fingerprint'] = hash('sha256', json_encode($canonical, JSON_UNESCAPED_SLASHES));
+
+        return $canonical;
     }
 
     /**

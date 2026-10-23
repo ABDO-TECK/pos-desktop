@@ -299,6 +299,12 @@ class JobQueue
                     );
                 }
             },
+            'check_for_updates' => static function (array $p): void {
+                $container = new \App\Core\Container();
+                /** @var \App\Services\BackgroundUpdateCheckService $service */
+                $service = $container->get(\App\Services\BackgroundUpdateCheckService::class);
+                $service->processWorkerJob($p);
+            },
         ];
 
         if (!isset($handlers[$jobName])) {
