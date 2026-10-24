@@ -4,7 +4,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) { throw 'Installer execution is restricted to an ephemeral GitHub Actions runner' }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$installer = Join-Path $repo 'dist-electron/POS-Desktop-Setup-0.0.1.exe'
+$versionMeta = Get-Content -LiteralPath (Join-Path $repo 'version.json') -Raw | ConvertFrom-Json
+$installerVersion = if ($versionMeta.installer_version) { $versionMeta.installer_version } else { (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version }
+$installer = Join-Path $repo "dist-electron/POS-Desktop-Setup-$installerVersion.exe"
 $install = Join-Path $env:RUNNER_TEMP 'POS Installer Acceptance'
 $evidence = Join-Path $env:RUNNER_TEMP 'pos-installer-evidence'
 New-Item -ItemType Directory -Path $evidence -Force | Out-Null
@@ -115,5 +117,5 @@ $first = Get-Content (Join-Path $evidence 'first-install.json') -Raw | ConvertFr
 $second = Get-Content (Join-Path $evidence 'reinstall.json') -Raw | ConvertFrom-Json
 if ($first.passwordDigest -eq $second.passwordDigest) { throw 'Reinstall reused the previous temporary password' }
 Uninstall-Pos
-@{ version='0.0.1'; installedUi=$true; logoEmbedded=$true; shortcutVerified=$true; upgradePreservedData=$true; uninstallRemovedManagedData=$true; ownedPrintingFilesAndTrustRemoved=$true; unrelatedSharedFilesPreserved=$true; reinstallCreatedNewTemporaryPassword=$true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'acceptance.json')
+@{ version=$installerVersion; installedUi=$true; logoEmbedded=$true; shortcutVerified=$true; upgradePreservedData=$true; uninstallRemovedManagedData=$true; ownedPrintingFilesAndTrustRemoved=$true; unrelatedSharedFilesPreserved=$true; reinstallCreatedNewTemporaryPassword=$true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'acceptance.json')
 Write-Host 'PASS: actual Setup install, upgrade preservation, complete uninstall, fresh reinstall and temporary password UI'

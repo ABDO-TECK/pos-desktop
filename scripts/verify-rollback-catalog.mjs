@@ -6,15 +6,15 @@ const require=createRequire(import.meta.url);
 const handoff=require('../electron/services/delta-update-handoff.js');
 const php=(...args)=>JSON.parse(execFileSync(process.env.PHP_BINARY||'php',['scripts/verify-rollback-catalog.php',...args],{encoding:'utf8',windowsHide:true}));
 const lab=php();
-const apply=(version,n)=>{
-  const result=handoff.applyPendingDelta(lab.storage,version,lab.root);assert.equal(result.ok,true,result.error);
+const apply=async (version,n)=>{
+  const result=await handoff.applyPendingDelta(lab.storage,version,lab.root);assert.equal(result.ok,true,result.error);
   assert.equal(fs.readFileSync(lab.root+'/backend/backend.phar','utf8'),'phar-'+n);
   assert.equal(JSON.parse(fs.readFileSync(lab.root+'/version.json')).version,version);
   for(let i=0;i<=2;i++)assert.equal(fs.existsSync(lab.root+'/frontend/dist/feature-'+i+'.js'),i===n);
   assert.equal(fs.readFileSync(lab.root+'/frontend/dist/keep.js','utf8'),'unchanged');
   assert.equal(fs.readFileSync(lab.storage+'/business.db','utf8'),'preserved customer fixture');
 };
-apply(lab.version,1);
+await apply(lab.version,1);
 const next=php(lab.root,lab.storage,'0.0.1');assert.equal(next.ok,true,next.error);
-apply('0.0.1',0);php(lab.root,lab.storage,'none');
+await apply('0.0.1',0);php(lab.root,lab.storage,'none');
 console.log('PASS rollback catalog and real handoff: valid destinations 3 -> 2 -> 1, safety/corrupt/history hidden, newer features removed, unchanged files and business data preserved');

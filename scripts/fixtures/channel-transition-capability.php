@@ -79,4 +79,6 @@ foreach($db->query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"')->fetchAll
     $schema[$name]=preg_replace('/AUTO_INCREMENT=\d+\s*/','',$create);
 }
 ksort($schema);
-echo json_encode(['schema_sha256'=>hash('sha256',json_encode($schema)),'ledger'=>$db->query('SELECT version FROM schema_versions ORDER BY version')->fetchAll(PDO::FETCH_COLUMN),'business_rows'=>$db->query("SELECT id,name,phone,initial_balance,loyalty_points FROM customers WHERE name='codex-transition-sentinel' ORDER BY id")->fetchAll(PDO::FETCH_ASSOC),'settings'=>$db->query("SELECT `key`,`value` FROM settings WHERE `key`='codex_transition_sentinel'")->fetchAll(PDO::FETCH_ASSOC)],JSON_THROW_ON_ERROR);
+$adminRow=$db->query("SELECT id, name, email, password, role FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+$adminDigest=$adminRow?hash('sha256',json_encode($adminRow,JSON_THROW_ON_ERROR)):null;
+echo json_encode(['schema_sha256'=>hash('sha256',json_encode($schema)),'ledger'=>$db->query('SELECT version FROM schema_versions ORDER BY version')->fetchAll(PDO::FETCH_COLUMN),'admin_digest'=>$adminDigest,'business_rows'=>$db->query("SELECT id,name,phone,initial_balance,loyalty_points FROM customers WHERE name='codex-transition-sentinel' ORDER BY id")->fetchAll(PDO::FETCH_ASSOC),'settings'=>$db->query("SELECT `key`,`value` FROM settings WHERE `key`='codex_transition_sentinel'")->fetchAll(PDO::FETCH_ASSOC)],JSON_THROW_ON_ERROR);

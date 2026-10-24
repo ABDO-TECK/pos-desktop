@@ -64,21 +64,122 @@ function getPhpServerInfo() {
   return serverInfo;
 }
 
-function stopPhpServer() {
-  const processToStop = phpProcess;
-  phpProcess = null;
-  serverInfo = null;
-
-  if (!processToStop || processToStop.killed) return;
-  try {
-    processToStop.kill();
-  } catch (error) {
-    console.warn('[PHP] Failed to stop PHP process:', error.message);
+function isProcessAlive(child) {
+  if (!child) return false;
+  if (typeof child === 'object') {
+    if (child.exitCode !== null && child.exitCode !== undefined) return false;
+    if (child.signalCode !== null && child.signalCode !== undefined) return false;
   }
+  const pid = typeof child === 'number' ? child : (typeof child?.pid === 'number' ? child.pid : null);
+  if (typeof pid === 'number' && pid > 0) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if (err.code === 'ESRCH') return false;
+      if (err.code === 'EPERM') return true;
+      return false;
+    }
+  }
+  return false;
 }
 
-function stopPHP() {
-  stopPhpServer();
+function stopPhpServerAwaitable({ timeoutMs = 5000, processRef = null } = {}) {
+  const child = processRef || phpProcess;
+  if (!child) {
+    serverInfo = null;
+    return Promise.resolve({ stopped: true, alreadyStopped: true });
+  }
+
+  if (child.exitCode !== null || child.signalCode !== null || !isProcessAlive(child)) {
+    if (phpProcess === child) {
+      phpProcess = null;
+      serverInfo = null;
+    }
+    return Promise.resolve({ stopped: true, pid: child.pid });
+  }
+
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    let forceTimer = null;
+    let settled = false;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onClose);
+    };
+
+    const handleSuccess = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (phpProcess === child) {
+        phpProcess = null;
+        serverInfo = null;
+      }
+      resolve({ stopped: true, pid: child.pid });
+    };
+
+    const onExit = () => handleSuccess();
+    const onClose = () => handleSuccess();
+
+    child.once('exit', onExit);
+    child.once('close', onClose);
+
+    try {
+      child.kill('SIGTERM');
+    } catch (err) {
+      if (!isProcessAlive(child)) {
+        handleSuccess();
+        return;
+      }
+      cleanup();
+      const error = new Error(`Failed to terminate PHP server (PID ${child.pid}): ${err.message}`);
+      error.code = 'PHP_STOP_FAILED';
+      reject(error);
+      return;
+    }
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      if (!isProcessAlive(child) || child.exitCode !== null) {
+        handleSuccess();
+        return;
+      }
+
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+
+      forceTimer = setTimeout(() => {
+        if (settled) return;
+        if (!isProcessAlive(child) || child.exitCode !== null) {
+          handleSuccess();
+          return;
+        }
+
+        settled = true;
+        cleanup();
+        const timeoutError = new Error(`PHP server process (PID ${child.pid}) did not exit within ${timeoutMs}ms.`);
+        timeoutError.code = 'PHP_STOP_TIMEOUT';
+        reject(timeoutError);
+      }, 500);
+    }, timeoutMs);
+  });
+}
+
+function stopPhpServer(options = {}) {
+  const promise = stopPhpServerAwaitable(options);
+  promise.catch((error) => {
+    console.warn('[PHP] Failed to stop PHP process:', error.message);
+  });
+  return promise;
+}
+
+function stopPHP(options = {}) {
+  return stopPhpServer(options);
 }
 
 function resolveBackendRuntimeConfig({ packaged, isLanDeployment, environment = process.env }) {
@@ -148,7 +249,7 @@ function createPhpProcessError(code, message, details, cause) {
   return error;
 }
 
-function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations = null, force = false }) {
+function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations = null, force = false, spawnProcess = spawnRuntimeProcess }) {
   const {
     getBackendDir,
     getLogsDir,
@@ -186,6 +287,7 @@ function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations =
   return new Promise((resolve, reject) => {
     console.log('[Migration] Applying pending database migrations before starting PHP workers...');
     const logPath = path.join(getLogsDir(), 'database-migrations.log');
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
     const logStream = fs.createWriteStream(logPath, { flags: 'a' });
     let stdout = '';
     let stderr = '';
@@ -200,7 +302,7 @@ function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations =
 
     let child;
     try {
-      child = spawnRuntimeProcess(phpBin, migrationArgs, {
+      child = spawnProcess(phpBin, migrationArgs, {
         cwd,
         env,
         windowsHide: true,
@@ -372,6 +474,15 @@ async function startPhpServer(options = {}) {
   const mysqlPort = options.mysqlPort || 3307;
   const dbCredentials = options.dbCredentials;
   const maxStartupAttempts = Math.max(1, Number(options.maxStartupAttempts) || 2);
+  const startupMigrations = options.startupMigrations;
+
+  if (phpProcess && isProcessAlive(phpProcess)) {
+    throw createPhpProcessError(
+      'PHP_PROCESS_ALREADY_RUNNING',
+      `Cannot start PHP: previous PHP process (PID ${phpProcess.pid}) is still running.`,
+      { stage: 'php-server', pid: phpProcess.pid },
+    );
+  }
 
   if (!dbCredentials?.user || !dbCredentials?.password) {
     throw createPhpProcessError(
@@ -400,7 +511,16 @@ async function startPhpServer(options = {}) {
     const selectedPort = await findAvailablePort(preferredPort + attempt - 1);
     try {
       console.log(`[PHP] Startup attempt ${attempt}/${maxStartupAttempts}; selected port ${selectedPort}.`);
-      await runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort: selectedPort });
+      if (Array.isArray(startupMigrations)) {
+        await runDatabaseMigrations({
+          mysqlPort,
+          dbCredentials,
+          apiPort: selectedPort,
+          migrations: startupMigrations,
+        });
+      } else {
+        await runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort: selectedPort });
+      }
 
       const env = {
         ...createBackendEnv({ mysqlPort, dbCredentials, apiPort: selectedPort }),
@@ -488,11 +608,19 @@ async function startPhpServer(options = {}) {
       return serverInfo;
     } catch (error) {
       lastError = error;
-      if (phpProcess && !phpProcess.killed) {
-        try { phpProcess.kill(); } catch { /* best effort */ }
+      if (phpProcess) {
+        try {
+          await stopPhpServerAwaitable({ timeoutMs: 2000, processRef: phpProcess });
+          phpProcess = null;
+          serverInfo = null;
+        } catch (stopErr) {
+          console.error('[PHP] Failed to terminate child process after startup error:', stopErr.message);
+          // Retain live child reference and abort retry immediately
+          break;
+        }
+      } else {
+        serverInfo = null;
       }
-      phpProcess = null;
-      serverInfo = null;
       if (error.code && !['PHP_PROCESS_EXITED', 'PHP_SERVER_NOT_READY'].includes(error.code)) break;
       if (attempt < maxStartupAttempts) await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -608,6 +736,8 @@ module.exports = {
   runDatabaseMigrations,
   startPhpServer,
   stopPhpServer,
+  stopPhpServerAwaitable,
+  isProcessAlive,
   getPhpServerInfo,
   startPHP,
   stopPHP,

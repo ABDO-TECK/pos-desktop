@@ -1,8 +1,11 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { spawnSync } from 'node:child_process';
 if (process.env.GITHUB_ACTIONS !== 'true') throw Error('Installer UI verification is restricted to an ephemeral GitHub runner');
-const [port, expectation, receipt] = process.argv.slice(2);
+const [port, expectation, receipt, expectedVersionParam, fixtureAction, fixtureOutput] = process.argv.slice(2);
+const expectedVersion = expectedVersionParam || (fs.existsSync('package.json') ? JSON.parse(fs.readFileSync('package.json', 'utf8')).version : '0.0.1');
 const until = Date.now() + 240_000;
 let target;
 while (Date.now() < until) {
@@ -49,7 +52,7 @@ while (Date.now() < until) {
   await new Promise(resolve => setTimeout(resolve, 500));
 }
 assert.equal(result?.ready, true);
-assert.equal(result.version, '0.0.1');
+assert.equal(result.version, expectedVersion);
 assert.equal(result.newAdmin, expectation === 'fresh');
 assert.equal(result.modal, expectation === 'fresh');
 if (expectation === 'fresh') {
@@ -58,7 +61,7 @@ if (expectation === 'fresh') {
   assert.ok(result.passwordLength >= 16);
 }
 fs.writeFileSync(receipt, JSON.stringify(result, null, 2));
-console.log(`PASS: installed UI version 0.0.1, ${expectation === 'fresh' ? 'new temporary credentials visible' : 'existing administrator retained'}`);
+console.log(`PASS: installed UI version ${expectedVersion}, ${expectation === 'fresh' ? 'new temporary credentials visible' : 'existing administrator retained'}`);
 // Printing starts in the background after the login UI. Do not quit while
 // its certificate setup is still running, or the ownership receipt cannot
 // be written and the following uninstall test would be premature.
@@ -78,6 +81,56 @@ while (Date.now() < printingDeadline) {
 }
 assert.ok(printingReady, 'Printing service did not finish background initialization');
 console.log('PASS: printing service finished background initialization');
+
+if (fixtureAction) {
+  const repoRoot = process.cwd();
+  const fixtureScript = path.join(repoRoot, 'scripts/fixtures/channel-transition-capability.php');
+  const phpCandidates = [
+    process.env.PHP_BINARY,
+    'php',
+    path.join(repoRoot, 'portable/php/php.exe'),
+    'C:\\xampp\\php\\php.exe'
+  ].filter(Boolean);
+
+  let phpExe = null;
+  for (const candidate of phpCandidates) {
+    if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) continue;
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', windowsHide: true });
+    if (!probe.error && probe.status === 0) {
+      phpExe = candidate;
+      break;
+    }
+  }
+
+  if (!phpExe) {
+    throw new Error('PHP CLI not found for running fixtureAction ' + fixtureAction);
+  }
+
+  const actions = fixtureAction.split(',').map(s => s.trim()).filter(Boolean);
+  const outputs = fixtureOutput ? fixtureOutput.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+  for (let i = 0; i < actions.length; i++) {
+    const action = actions[i];
+    const outputFile = outputs[i];
+
+    const fixtureResult = spawnSync(phpExe, [fixtureScript, action], {
+      cwd: repoRoot,
+      env: process.env,
+      encoding: 'utf8',
+      windowsHide: true
+    });
+
+    if (fixtureResult.status !== 0) {
+      throw new Error(`Fixture hook '${action}' failed (exit ${fixtureResult.status}): ${fixtureResult.stderr || fixtureResult.stdout}`);
+    }
+
+    if (outputFile) {
+      fs.writeFileSync(outputFile, fixtureResult.stdout);
+      console.log(`PASS: fixture hook '${action}' completed, output saved to ${outputFile}`);
+    }
+  }
+}
+
 // Close the app via Chromium so Electron runs its normal service shutdown.
 socket.send(JSON.stringify({ id: ++sequence, method: 'Browser.close' }));
 socket.close();

@@ -53,7 +53,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
           coverage: none
       - name: Install locked dependencies
         shell: pwsh
@@ -64,9 +64,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Validate and build application source
+      - name: Validate release readiness and source
         shell: pwsh
         run: |
+          node scripts/verify-setup-release-readiness.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/validate-release-source.mjs --mode working-tree --root .
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ($env:GITHUB_REF_TYPE -eq 'tag' -or '${{ inputs.publish }}' -eq 'true') {
@@ -102,6 +104,18 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-delta-flow.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-delta-handoff-recovery.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/verify-delta-handoff-windows.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-catalog-trigger-recovery.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-admin-update-center.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-admin-update-center.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-admin-update-ui.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Cache pinned vendor archives
         uses: actions/cache@v4
         with:
@@ -128,6 +142,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-installer-package.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-setup-recovery.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $tag = "v$((Get-Content package.json -Raw | ConvertFrom-Json).version)"
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
           ./scripts/verify-desktop-release.ps1 -ReleaseDirectory dist-electron -Tag $tag
@@ -141,6 +157,17 @@ jobs:
         with:
           name: installer-acceptance
           path: ${{ runner.temp }}/pos-installer-evidence
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Verify true upgrade from original 0.0.1 baseline to new Setup
+        shell: pwsh
+        run: ./scripts/verify-original-setup-upgrade.ps1
+      - name: Save upgrade acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-acceptance
+          path: ${{ runner.temp }}/pos-upgrade-evidence
           if-no-files-found: ignore
           retention-days: 14
       - name: Start packaged app on the clean runner

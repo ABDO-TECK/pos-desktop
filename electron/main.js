@@ -73,29 +73,19 @@ function assertRecoveryRenderer(event) {
   }
 }
 
-function stopJobWorker() {
+async function stopJobWorker(options = {}) {
   const worker = jobWorkerProcess;
-  jobWorkerProcess = null;
-  if (!worker || worker.killed) {
-    return Promise.resolve();
+  if (!worker) {
+    return;
   }
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    worker.once('exit', finish);
-    worker.once('error', finish);
-    try {
-      worker.kill();
-    } catch {
-      finish();
-      return;
-    }
-    setTimeout(finish, 2000);
-  });
+  const { stopPhpServerAwaitable, isProcessAlive } = require('./services/php-server');
+  if (!isProcessAlive(worker)) {
+    jobWorkerProcess = null;
+    return;
+  }
+  const timeoutMs = options.timeoutMs || 3000;
+  await stopPhpServerAwaitable({ timeoutMs, processRef: worker });
+  jobWorkerProcess = null;
 }
 
 /**
@@ -104,7 +94,8 @@ function stopJobWorker() {
  * worker, then must bring the exact same runtime back online.
  */
 function startJobWorker() {
-  if (jobWorkerProcess && !jobWorkerProcess.killed) {
+  const { isProcessAlive } = require('./services/php-server');
+  if (jobWorkerProcess && isProcessAlive(jobWorkerProcess)) {
     return;
   }
   if (!dbCredentials) {
@@ -252,12 +243,13 @@ function validateDesktopSqlPath(filePath) {
 }
 
 async function restartPhpAndWorker(options = {}) {
-  const { startWorker = true } = options;
+  const { startWorker = true, startupMigrations } = options;
   const phpServer = require('./services/php-server');
   const phpServerInfo = await phpServer.startPhpServer({
     preferredPort: phpPort,
     mysqlPort,
     dbCredentials,
+    startupMigrations,
   });
   phpPort = phpServerInfo.port;
   await phpServer.waitForHealth(phpServerInfo.baseUrl, { maxTime: 30000 });
@@ -1127,7 +1119,8 @@ app.whenReady().then(async () => {
     }
 
     const { getAppUnpackedPath, getDataDir } = require('./utils/paths');
-    const { applyPendingDelta, rollback, setHandoffState } = require('./services/delta-update-handoff');
+    const { orchestrateDeltaInstall } = require('./services/delta-update-handoff');
+    const { stopPhpServerAwaitable } = require('./services/php-server');
     const storageDir = getDataDir();
     const currentState = readUpdateState(storageDir);
     if (isActiveUpdateState(currentState) && currentState.state !== 'desktop_handoff_pending') {
@@ -1156,68 +1149,39 @@ app.whenReady().then(async () => {
         owner: lease.owner || null,
       };
     }
-    let applied;
     try {
-      writeUpdateState(storageDir, 'applying', {
-        operation: 'electron_delta_install',
-        owner_id: lease.owner_id,
-        target_version: version,
-      });
-      await stopJobWorker();
-      stopPHP();
-      applied = applyPendingDelta(getDataDir(), version, getAppUnpackedPath());
-      if (!applied.ok) throw new Error(applied.error);
-      if (Array.isArray(applied.plan.manifest?.migrations) && applied.plan.manifest.migrations.length > 0) {
-        setHandoffState(applied.plan, 'migrating', { migration_started: true });
-        await runDatabaseMigrations({
-          mysqlPort,
-          dbCredentials,
-          apiPort: phpPort,
-          migrations: applied.plan.manifest.migrations,
-        });
-      }
-      await restartPhpAndWorker();
-      setHandoffState(applied.plan, 'completed', { migration_completed: true });
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        await mainWindow.loadURL('app://pos-app/index.html');
-      }
-      return { ok: true };
-    } catch (error) {
-      let recoveryError = null;
-      if (applied?.plan?.db_recovery?.backup_path && applied.plan.db_recovery.recovery_id) {
-        try {
-          await runPrivilegedBackendCli([
+      const result = await orchestrateDeltaInstall({
+        storageDir,
+        version,
+        expectedRoot: getAppUnpackedPath(),
+        lease,
+        hooks: {
+          stopJobWorker,
+          stopPHP: () => stopPhpServerAwaitable({ timeoutMs: 5000 }),
+          runDatabaseMigrations: (migrations) => runDatabaseMigrations({
+            mysqlPort,
+            dbCredentials,
+            apiPort: phpPort,
+            migrations,
+          }),
+          restoreDatabaseSafety: (backupPath, recoveryId) => runPrivilegedBackendCli([
             'restore-migration-safety',
-            applied.plan.db_recovery.backup_path,
-            applied.plan.db_recovery.recovery_id,
-          ]);
-        } catch (restoreError) {
-          recoveryError = restoreError;
-          setHandoffState(applied.plan, 'database_recovery_failed', {
-            error: 'Migration safety database restore failed.',
-          });
-        }
-      }
-      if (applied?.plan && !recoveryError) {
-        rollback(applied.plan);
-        setHandoffState(applied.plan, 'rolled_back', { migration_recovery_completed: true });
-      } else if (!applied?.plan) {
-        writeUpdateState(storageDir, 'failed', {
-          operation: 'electron_delta_install',
-          owner_id: lease.owner_id,
-          target_version: version,
-          error: error.message || 'Desktop delta hand-off failed.',
-        });
-      }
-      try { await restartPhpAndWorker(); } catch (restartError) {
-        console.error('[Delta] Failed to restart runtime after hand-off failure:', restartError.message);
-      }
-      return {
-        ok: false,
-        error: recoveryError
-          ? 'Desktop delta failed and database recovery requires manual intervention.'
-          : (error.message || 'Desktop delta hand-off failed.'),
-      };
+            backupPath,
+            recoveryId,
+          ]),
+          restartPhpAndWorker: (opts = {}) => restartPhpAndWorker({
+            startupMigrations: [],
+            ...opts,
+          }),
+          writeUpdateState: (state, ctx) => writeUpdateState(storageDir, state, ctx),
+          onSuccess: async () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              await mainWindow.loadURL('app://pos-app/index.html');
+            }
+          },
+        },
+      });
+      return result;
     } finally {
       releaseUpdateLock(lease);
     }
