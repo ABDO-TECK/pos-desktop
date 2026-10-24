@@ -11,6 +11,7 @@
  *   4. Exact backend and frontend source retention vs published beta10 (96f6a9c) with dependency metadata-only diffs
  *   5. Workflow safety contracts (publish=false default, ephemeral runner guards, true upgrade phase, readiness gate)
  *   6. Static PowerShell syntax parsing (using safe parser API, no execution)
+ *   7. Windows ACL fixture SDDL normalization and cleanup comparison regression (pure fixtures, zero local ACL changes)
  *
  * Requires NO node_modules, no built artifacts, no database connection, and executes no installers.
  */
@@ -37,7 +38,7 @@ function readJson(relPath) {
 console.log('--- POS Desktop Setup 0.0.11 Release Readiness Verification ---');
 
 // 1. Consistent Version Metadata across all manifests
-console.log('[1/6] Verifying consistent version metadata (0.0.11 / stable / setup)...');
+console.log('[1/7] Verifying consistent version metadata (0.0.11 / stable / setup)...');
 const targetVersion = '0.0.11';
 const versionJson = readJson('version.json');
 const rootPkg = readJson('package.json');
@@ -74,7 +75,7 @@ assert.equal(frontendLock.packages?.['']?.version, targetVersion, 'frontend/pack
 console.log('      PASS: Metadata 0.0.11 strictly verified across 5 manifest files.');
 
 // 2. Strict Approved Hashes for 3 Production Electron Files + Portable Reference Check
-console.log('[2/6] Verifying pinned approved hashes for 3 production Electron files...');
+console.log('[2/7] Verifying pinned approved hashes for 3 production Electron files...');
 const PINNED_APPROVED_ELECTRON_HASHES = {
   'electron/main.js': '56306d1a88c60cab4ce8d996907007a58eeb6661025975e2c3db1b53ace83aa0',
   'electron/services/delta-update-handoff.js': '48edddd8b214a025c5ad230f3c33c7a2db5577eaeddff5289eec8c3618ae8c71',
@@ -118,7 +119,7 @@ if (fs.existsSync(localReferenceRoot)) {
 }
 
 // 3. Git Ancestry & Beta10 Basis Verification
-console.log('[3/6] Verifying git ancestry and commit heritage...');
+console.log('[3/7] Verifying git ancestry and commit heritage...');
 try {
   execFileSync('git', ['merge-base', '--is-ancestor', '96f6a9c', 'HEAD'], {
     cwd: repoRoot,
@@ -131,7 +132,7 @@ try {
 }
 
 // 4. Exact Backend and Frontend Source Retention vs Published Beta10 (96f6a9c)
-console.log('[4/6] Verifying exact backend/frontend source retention vs published beta10 (96f6a9c)...');
+console.log('[4/7] Verifying exact backend/frontend source retention vs published beta10 (96f6a9c)...');
 
 // A. Backend source tree must have 0 diff against beta10
 const backendDiff = execFileSync('git', ['diff', '96f6a9c', '--stat', 'backend/'], {
@@ -166,7 +167,7 @@ assert.deepEqual(
 console.log('      PASS: Exact backend and frontend/src source retention vs beta10 verified (0 source drift).');
 
 // 5. Workflow Gate & Upgrade Safety Contracts
-console.log('[5/6] Verifying GitHub Actions workflow gates and upgrade contracts...');
+console.log('[5/7] Verifying GitHub Actions workflow gates and upgrade contracts...');
 const workflowPath = path.join(repoRoot, '.github/workflows/windows-setup.yml');
 assert.ok(fs.existsSync(workflowPath), '.github/workflows/windows-setup.yml missing');
 const workflowContent = fs.readFileSync(workflowPath, 'utf8');
@@ -219,7 +220,7 @@ assert.ok(lifecycleScriptContent.includes('$env:GITHUB_ACTIONS -ne \'true\' -or 
 console.log('      PASS: CI workflow gates, readiness gate, and upgrade safety contracts verified.');
 
 // 6. Safe Static PowerShell Syntax Parsing (No execution)
-console.log('[6/6] Parsing PowerShell scripts statically via PowerShell Parser API (no execution)...');
+console.log('[6/7] Parsing PowerShell scripts statically via PowerShell Parser API (no execution)...');
 const psScripts = [
   'scripts/verify-original-setup-upgrade.ps1',
   'scripts/verify-installer-lifecycle.ps1',
@@ -256,6 +257,132 @@ for (const rel of psScripts) {
   }
 }
 console.log(`      PASS: All ${psScripts.length} PowerShell scripts parsed cleanly with 0 syntax errors.`);
+
+// 7. Windows ACL Fixture SDDL Normalization & Semantic Equivalence Regression (Pure in-memory fixtures, no local ACL changes)
+console.log('[7/7] Verifying Windows ACL fixture SDDL normalization and semantic comparison regression (pure fixtures)...');
+
+// Pure SDDL normalization replicating the exact script regex contract
+function normalizeSddlDescriptorDaclAi(sddl) {
+  if (!sddl || typeof sddl !== 'string') return sddl;
+  const match = sddl.match(/^(.*?D:)([^()S]*?)(\(.*|S:.*|$)$/);
+  if (match) {
+    const prefix = match[1];
+    const flags = match[2].replace(/AI/g, '');
+    const rest = match[3];
+    return `${prefix}${flags}${rest}`;
+  }
+  return sddl;
+}
+
+// Fixtures observed on real Windows GitHub Actions runner (run 40141680363)
+const FIXTURE_ORIGINAL_SDDL = 'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)';
+const FIXTURE_RESTORED_SDDL_AI = 'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)';
+
+// 7.1 Verify raw fixture strings differ only by the recomputed auto-inherited AI flag in the DACL control header
+assert.notEqual(FIXTURE_ORIGINAL_SDDL, FIXTURE_RESTORED_SDDL_AI, 'Raw fixture strings must differ before normalization');
+const normalizedOriginal = normalizeSddlDescriptorDaclAi(FIXTURE_ORIGINAL_SDDL);
+const normalizedRestored = normalizeSddlDescriptorDaclAi(FIXTURE_RESTORED_SDDL_AI);
+assert.equal(normalizedRestored, normalizedOriginal, 'Normalized restored SDDL must equal normalized original SDDL');
+
+// 7.2 Verify normalization preserves protection (P) and auto-inherit-required (AR) descriptor flags
+assert.equal(
+  normalizeSddlDescriptorDaclAi('O:BAG:BAD:PAI(A;;FA;;;SY)'),
+  'O:BAG:BAD:P(A;;FA;;;SY)',
+  'DACL protection flag (P) must be strictly preserved'
+);
+assert.equal(
+  normalizeSddlDescriptorDaclAi('O:BAG:BAD:ARAI(A;;FA;;;SY)'),
+  'O:BAG:BAD:AR(A;;FA;;;SY)',
+  'DACL auto-inherit-required flag (AR) must be strictly preserved'
+);
+
+// 7.3 Verify ACE inheritance flags inside parentheses (e.g. ID in OICIID) remain untouched
+assert.ok(normalizedRestored.includes('(A;OICIID;FA;;;SY)'), 'ACE flags inside parens must remain intact');
+
+// 7.4 Verify detection of genuine security drifts (must never match normalized original)
+const genuineDrifts = [
+  // Deny ACE added / not cleaned up
+  'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(D;OICI;FA;;;LA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+  // DACL protection flag changed (blocked inheritance)
+  'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:PAI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+  // Rights relaxed or restricted (Read instead of FullControl)
+  'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(A;OICIID;FR;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+  // SID / Trustee drift
+  'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(A;OICIID;FA;;;WD)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+  // Owner drift
+  'O:SYG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+  // Group drift
+  'O:BAG:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)',
+];
+
+for (const drift of genuineDrifts) {
+  assert.notEqual(
+    normalizeSddlDescriptorDaclAi(drift),
+    normalizedOriginal,
+    `Normalization must NOT mask genuine security drift: ${drift}`
+  );
+}
+
+// 7.5 Pure in-memory .NET DirectorySecurity test via PowerShell (no disk files or actual Windows ACL changes)
+const dotNetTestScript = `
+  $origFixture = '${FIXTURE_ORIGINAL_SDDL}'
+  $restFixture = '${FIXTURE_RESTORED_SDDL_AI}'
+  $denyFixture = 'O:BAG:S-1-5-21-3776380004-1005456608-3524014338-513D:AI(D;OICI;FA;;;LA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;LA)'
+
+  $dsOrig = New-Object System.Security.AccessControl.DirectorySecurity
+  $dsOrig.SetSecurityDescriptorSddlForm($origFixture)
+
+  $dsRest = New-Object System.Security.AccessControl.DirectorySecurity
+  $dsRest.SetSecurityDescriptorSddlForm($restFixture)
+
+  $dsDeny = New-Object System.Security.AccessControl.DirectorySecurity
+  $dsDeny.SetSecurityDescriptorSddlForm($denyFixture)
+
+  # Check owner, group, protection equality in-memory
+  if ($dsOrig.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $dsRest.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) {
+    throw 'Owner mismatch in in-memory test'
+  }
+  if ($dsOrig.GetGroup([System.Security.Principal.SecurityIdentifier]).Value -ne $dsRest.GetGroup([System.Security.Principal.SecurityIdentifier]).Value) {
+    throw 'Group mismatch in in-memory test'
+  }
+  if ($dsOrig.AreAccessRulesProtected -ne $dsRest.AreAccessRulesProtected) {
+    throw 'Protection mismatch in in-memory test'
+  }
+
+  # Check in-memory Deny ACE detection on $dsDeny
+  $denyCount = @($dsDeny.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny }).Count
+  if ($denyCount -ne 1) {
+    throw "Expected 1 deny ACE in test fixture, got $denyCount"
+  }
+  $restDenyCount = @($dsRest.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny }).Count
+  if ($restDenyCount -ne 0) {
+    throw "Expected 0 deny ACEs in restored fixture, got $restDenyCount"
+  }
+
+  exit 0
+`;
+
+try {
+  execFileSync(psCommand, ['-NoProfile', '-NonInteractive', '-Command', dotNetTestScript], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+} catch (err) {
+  throw new Error(`In-memory pure .NET DirectorySecurity test failed: ${err.stderr || err.stdout || err.message}`);
+}
+
+// 7.6 Script contract checks on scripts/verify-delta-handoff-windows.ps1
+const windowsLabContent = fs.readFileSync(windowsLabScript, 'utf8');
+assert.ok(windowsLabContent.includes('Normalize-SddlDescriptorDaclAi'), 'verify-delta-handoff-windows.ps1 must define Normalize-SddlDescriptorDaclAi');
+assert.ok(windowsLabContent.includes('Assert-RestoredAclMatchesOriginal'), 'verify-delta-handoff-windows.ps1 must define Assert-RestoredAclMatchesOriginal');
+assert.ok(windowsLabContent.includes('Format-CanonicalAceRule'), 'verify-delta-handoff-windows.ps1 must define Format-CanonicalAceRule');
+assert.ok(windowsLabContent.includes('Set-Acl -LiteralPath $protectedDir -AclObject $originalAcl'), 'verify-delta-handoff-windows.ps1 must preserve original Set-Acl call');
+assert.ok(windowsLabContent.includes('AssertOwnedLabPath $protectedDir'), 'verify-delta-handoff-windows.ps1 must preserve AssertOwnedLabPath guard');
+assert.ok(windowsLabContent.includes('AreAccessRulesProtected'), 'verify-delta-handoff-windows.ps1 must verify AreAccessRulesProtected');
+assert.ok(windowsLabContent.includes('test-probe-plan'), 'verify-delta-handoff-windows.ps1 must verify writable preflight probe after restore');
+
+console.log('      PASS: Pure fixture SDDL normalization, in-memory .NET semantics, drift detection, and script contracts verified.');
 
 console.log('\n===============================================================');
 console.log(' ALL SETUP 0.0.11 RELEASE READINESS CHECKS PASSED SUCCESSFULLY!');

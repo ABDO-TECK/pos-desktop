@@ -81,6 +81,98 @@ function AssertOwnedLabPath([string]$targetPath) {
     }
 }
 
+function Normalize-SddlDescriptorDaclAi([string]$sddl) {
+    if ([string]::IsNullOrWhiteSpace($sddl)) { return $sddl }
+    # Normalize ONLY the non-permission SE_DACL_AUTO_INHERITED ('AI') descriptor control flag
+    # located in the DACL control header (between D: and the first '(' or 'S:').
+    # All ACE contents, identity SIDs, rights, inheritance flags within ACEs, DACL protection ('P'),
+    # and owner/group remain strictly unnormalized and enforced.
+    if ($sddl -match '^(.*?D:)([^()S]*?)(\(.*|S:.*|$)$') {
+        $prefix = $Matches[1]
+        $flags = $Matches[2] -replace 'AI', ''
+        $rest = $Matches[3]
+        return "$prefix$flags$rest"
+    }
+    return $sddl
+}
+
+function Format-CanonicalAceRule($rule) {
+    $sid = $null
+    try {
+        $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        $sid = $rule.IdentityReference.Value
+    }
+    $type = $rule.AccessControlType.ToString()
+    $rights = [int]$rule.FileSystemRights
+    $inherit = $rule.InheritanceFlags.ToString()
+    $prop = $rule.PropagationFlags.ToString()
+    $isInherited = $rule.IsInherited
+    return "$type|$sid|$rights|$inherit|$prop|$isInherited"
+}
+
+function Assert-RestoredAclMatchesOriginal($origAcl, $restAcl, [string]$targetDesc = "restored path") {
+    if ($origAcl -eq $null -or $restAcl -eq $null) {
+        throw "Assert-RestoredAclMatchesOriginal: Original or restored ACL object is null"
+    }
+
+    # 1. Assert deny ACE removed: Ensure no unexpected Deny ACEs remain on restored path
+    $denyAces = @($restAcl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny })
+    $origDenyAces = @($origAcl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny })
+    if ($denyAces.Count -gt $origDenyAces.Count) {
+        throw "Assert-RestoredAclMatchesOriginal: Deny ACE was not removed from $targetDesc (found $($denyAces.Count) deny ACEs, expected $($origDenyAces.Count))"
+    }
+
+    # 2. Compare Owner SID / Identity
+    $origOwner = $null
+    $restOwner = $null
+    try { $origOwner = $origAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+    try { $restOwner = $restAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+    if (-not $origOwner) { $origOwner = $origAcl.Owner }
+    if (-not $restOwner) { $restOwner = $restAcl.Owner }
+    if ($origOwner -ne $restOwner) {
+        throw "Assert-RestoredAclMatchesOriginal: Owner mismatch on $targetDesc (expected '$origOwner', got '$restOwner')"
+    }
+
+    # 3. Compare Primary Group SID / Identity
+    $origGroup = $null
+    $restGroup = $null
+    try { $origGroup = $origAcl.GetGroup([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+    try { $restGroup = $restAcl.GetGroup([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+    if (-not $origGroup) { $origGroup = $origAcl.Group }
+    if (-not $restGroup) { $restGroup = $restAcl.Group }
+    if ($origGroup -ne $restGroup) {
+        throw "Assert-RestoredAclMatchesOriginal: Group mismatch on $targetDesc (expected '$origGroup', got '$restGroup')"
+    }
+
+    # 4. Compare DACL protection flag (AreAccessRulesProtected)
+    if ($origAcl.AreAccessRulesProtected -ne $restAcl.AreAccessRulesProtected) {
+        throw "Assert-RestoredAclMatchesOriginal: DACL protection mismatch on $targetDesc (expected $($origAcl.AreAccessRulesProtected), got $($restAcl.AreAccessRulesProtected))"
+    }
+
+    # 5. Canonical sorted comparison of all ACE rules (type, SID, rights, inheritance, propagation, inherited status)
+    $origAces = @($origAcl.Access | ForEach-Object { Format-CanonicalAceRule $_ }) | Sort-Object
+    $restAces = @($restAcl.Access | ForEach-Object { Format-CanonicalAceRule $_ }) | Sort-Object
+
+    if ($origAces.Count -ne $restAces.Count) {
+        throw "Assert-RestoredAclMatchesOriginal: ACE count mismatch on $targetDesc (expected $($origAces.Count), got $($restAces.Count))"
+    }
+    for ($i = 0; $i -lt $origAces.Count; $i++) {
+        if ($origAces[$i] -ne $restAces[$i]) {
+            throw "Assert-RestoredAclMatchesOriginal: ACE semantic mismatch on $targetDesc at index $i (expected '$($origAces[$i])', got '$($restAces[$i])')"
+        }
+    }
+
+    # 6. Normalized SDDL equivalence (comparing SDDL with ONLY non-permission SE_DACL_AUTO_INHERITED normalized)
+    $origSddlStr = if ($origAcl.Sddl) { $origAcl.Sddl } else { $originalSddl }
+    $restSddlStr = $restAcl.Sddl
+    $normOrigSddl = Normalize-SddlDescriptorDaclAi $origSddlStr
+    $normRestSddl = Normalize-SddlDescriptorDaclAi $restSddlStr
+    if ($normOrigSddl -ne $normRestSddl) {
+        throw "Assert-RestoredAclMatchesOriginal: Normalized SDDL mismatch on $targetDesc (expected '$normOrigSddl', got '$normRestSddl')"
+    }
+}
+
 try {
     # 2. Write the Node test runner script into the isolated lab
     $runnerScript = Join-Path $lab "runner.mjs"
@@ -397,7 +489,7 @@ try {
         }
 
         # Assert no leftover probe files (.probe-*)
-        $leftoverProbes = Get-ChildItem -LiteralPath $protectedDir -Filter "*probe*" -Force
+        $leftoverProbes = @(Get-ChildItem -LiteralPath $protectedDir -Filter "*probe*" -Force)
         if ($leftoverProbes.Count -gt 0) {
             Write-Error "Test 3 failed: Leftover probe files found in protected directory: $($leftoverProbes.Name -join ', ')"
             exit 1
@@ -438,14 +530,46 @@ finally {
             if ($originalAcl -ne $null) {
                 Set-Acl -LiteralPath $protectedDir -AclObject $originalAcl
                 $restoredAcl = Get-Acl -LiteralPath $protectedDir
-                if ($restoredAcl.Sddl -ne $originalSddl) {
-                    Write-Error "Cleanup failed: Restored SDDL mismatch ($($restoredAcl.Sddl) != $originalSddl)"
+                Assert-RestoredAclMatchesOriginal -origAcl $originalAcl -restAcl $restoredAcl -targetDesc $protectedDir
+                Write-Host "  -> Successfully restored exact original ACL and verified security semantics and SDDL: $protectedDir"
+
+                # Assert directory is writable after restore via direct file probe
+                $cleanupProbe = Join-Path $protectedDir ".cleanup-verify-probe-$([guid]::NewGuid().ToString('N'))"
+                [System.IO.File]::WriteAllText($cleanupProbe, "cleanup probe verification")
+                Remove-Item -LiteralPath $cleanupProbe -Force
+
+                # Run writable preflight probe after restore if runner and plan storage are intact
+                if ((Test-Path -LiteralPath $runnerScript) -and (Test-Path -LiteralPath $testPlanStorage)) {
+                    $resultPostRestore = Join-Path $lab "result_post_restore.json"
+                    & node $runnerScript --mode=test-probe-plan "--storage=$testPlanStorage" "--version=0.0.10-beta.8" "--root=$protectedDir" "--result=$resultPostRestore"
+                    if (-not (Test-Path -LiteralPath $resultPostRestore)) {
+                        Write-Error "Cleanup failed: Writable preflight result file not generated after restore"
+                        $cleanupFailed = $true
+                    } else {
+                        $resPost = Get-Content -Encoding UTF8 -LiteralPath $resultPostRestore | ConvertFrom-Json
+                        if ($resPost.ok -ne $true) {
+                            Write-Error "Cleanup failed: Writable preflight probe failed after ACL restore: $($resPost | ConvertTo-Json)"
+                            $cleanupFailed = $true
+                        } else {
+                            Write-Host "  -> Verified writable preflight probe ok: true after ACL restore"
+                        }
+                    }
+                }
+
+                # Assert no leftover probe files exist in protectedDir
+                $leftoverProbes = @(Get-ChildItem -LiteralPath $protectedDir -Filter "*probe*" -Force)
+                if ($leftoverProbes.Count -gt 0) {
+                    Write-Error "Cleanup failed: Leftover probe files found in protected directory after restore: $($leftoverProbes.Name -join ', ')"
                     $cleanupFailed = $true
-                } else {
-                    Write-Host "  -> Successfully restored exact original ACL and verified SDDL"
                 }
             } elseif ($currentSid) {
                 icacls $protectedDir /remove:d "*$($currentSid)" *>$null
+                $restoredAcl = Get-Acl -LiteralPath $protectedDir
+                $denyAces = @($restoredAcl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny })
+                if ($denyAces.Count -gt 0) {
+                    Write-Error "Cleanup failed: Deny ACE still present after icacls /remove:d"
+                    $cleanupFailed = $true
+                }
             }
         } catch {
             Write-Error "Cleanup failed: Could not restore ACL on protectedDir: $($_.Exception.Message)"
