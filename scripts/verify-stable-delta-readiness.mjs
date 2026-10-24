@@ -8,6 +8,12 @@ import {
   buildOwnedProcessInspectionScript,
   parseOwnedProcessInspectionOutput,
   getRunningOwnedProcesses,
+  normalizeRuntimePorts,
+  assertRuntimePortsPreserved,
+  verifyRuntimePorts,
+  snapshotRuntimeKeyMaterial,
+  verifyRuntimeKeyMaterial,
+  ALLOWED_RUNTIME_PORTS_FIELDS,
 } from './verify-stable-delta-ui.mjs';
 
 const root = path.resolve('.');
@@ -366,6 +372,9 @@ assert.ok(verifyUiScript.includes('-ErrorAction Stop'), 'verify-stable-delta-ui.
 assert.ok(verifyUiScript.includes('FromBase64String'), 'verify-stable-delta-ui.mjs must use base64 path decoding in process script');
 assert.ok(verifyUiScript.includes('DirectorySeparatorChar'), 'verify-stable-delta-ui.mjs must ensure trailing separator boundary in process path');
 assert.ok(verifyUiScript.includes('snapshotRuntimeKeyMaterial'), 'verify-stable-delta-ui.mjs must snapshot runtime key material');
+assert.ok(verifyUiScript.includes('verifyRuntimeKeyMaterial'), 'verify-stable-delta-ui.mjs must verify runtime key material');
+assert.ok(verifyUiScript.includes('normalizeRuntimePorts'), 'verify-stable-delta-ui.mjs must export normalizeRuntimePorts');
+assert.ok(verifyUiScript.includes('assertRuntimePortsPreserved'), 'verify-stable-delta-ui.mjs must export assertRuntimePortsPreserved');
 assert.ok(verifyUiScript.includes('waitForRuntimeKeyMaterial'), 'verify-stable-delta-ui.mjs must wait for runtime key material bootstrap');
 assert.ok(verifyUiScript.includes('qz_private_key'), 'verify-stable-delta-ui.mjs must require QZ private key');
 assert.ok(verifyUiScript.includes('inspect-compatibility'), 'verify-stable-delta-ui.mjs must inspect normalized compatibility');
@@ -879,6 +888,196 @@ console.log(`PASS: All ${caseResults.length} candidate tag authorization and ide
 const realWorkspaceTagRefs = execFileSync('git', ['show-ref', '--tags'], { cwd: root, encoding: 'utf8' }).trim();
 assert.equal(realWorkspaceTagRefs, initialWorkspaceTagRefs, 'Readiness tests must preserve every existing workspace tag and create none');
 console.log('PASS: Real local workspace confirmed pristine: zero local Git ref or tag changes.');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9. Safe Pure Runtime Ports Normalization & Assertion Regressions
+// ══════════════════════════════════════════════════════════════════════════════
+console.log('Testing runtime_ports normalization and assertion contracts...');
+
+// 9.1 Baseline valid ports payload
+const baselinePorts = {
+  mysqlPort: 3307,
+  apiPort: 8000,
+  apiBaseUrl: 'http://127.0.0.1:8000',
+  updatedAt: '2026-10-25T10:00:00.000Z',
+};
+
+// 9.2 Exact identical payload passes
+assertRuntimePortsPreserved(baselinePorts, baselinePorts);
+verifyRuntimePorts(baselinePorts, baselinePorts);
+
+// 9.3 Volatile updatedAt timestamp diff is allowed when all other fields match
+{
+  const upgradedPortsWithTimestampDiff = {
+    mysqlPort: 3307,
+    apiPort: 8000,
+    apiBaseUrl: 'http://127.0.0.1:8000',
+    updatedAt: '2026-10-25T10:05:32.184Z',
+  };
+  assertRuntimePortsPreserved(upgradedPortsWithTimestampDiff, baselinePorts);
+  const normBefore = normalizeRuntimePorts(baselinePorts);
+  const normAfter = normalizeRuntimePorts(upgradedPortsWithTimestampDiff);
+  assert.deepEqual(normBefore, normAfter);
+}
+
+// 9.4 Reject port modifications
+{
+  // mysqlPort difference rejected
+  assert.throws(() => {
+    assertRuntimePortsPreserved({ ...baselinePorts, mysqlPort: 3308 }, baselinePorts);
+  }, /Runtime ports configuration modified|values do not match/);
+
+  // apiPort difference rejected
+  assert.throws(() => {
+    assertRuntimePortsPreserved(
+      { ...baselinePorts, apiPort: 8080, apiBaseUrl: 'http://127.0.0.1:8080' },
+      baselinePorts
+    );
+  }, /Runtime ports configuration modified|values do not match/);
+}
+
+// 9.5 Reject apiBaseUrl modifications
+{
+  assert.throws(() => {
+    assertRuntimePortsPreserved(
+      { ...baselinePorts, apiBaseUrl: 'http://localhost:8000' },
+      baselinePorts
+    );
+  }, /Runtime ports configuration modified|values do not match/);
+}
+
+// 9.6 Reject apiBaseUrl inconsistent with apiPort
+{
+  assert.throws(() => {
+    normalizeRuntimePorts({
+      ...baselinePorts,
+      apiPort: 8000,
+      apiBaseUrl: 'http://127.0.0.1:9000',
+    });
+  }, /does not match apiPort/);
+}
+
+// 9.7 Reject invalid or non-http/https apiBaseUrl
+{
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, apiBaseUrl: 'ftp://127.0.0.1:8000' });
+  }, /must have http: or https: protocol/);
+
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, apiBaseUrl: 'not-a-valid-url' });
+  }, /not a valid URL/);
+
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, apiBaseUrl: '' });
+  }, /non-empty string/);
+}
+
+// 9.8 Reject invalid port types and values outside 1..65535
+for (const invalidPort of [0, -1, 65536, 70000, 8000.5, '8000', null, NaN]) {
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, mysqlPort: invalidPort });
+  }, /mysqlPort must be an integer between 1 and 65535/);
+
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, apiPort: invalidPort, apiBaseUrl: `http://127.0.0.1:${invalidPort}` });
+  }, /apiPort must be an integer between 1 and 65535/);
+}
+
+// 9.9 Reject invalid updatedAt timestamps
+for (const invalidTs of ['invalid-date', '', '   ', 1600000000, null, true]) {
+  assert.throws(() => {
+    normalizeRuntimePorts({ ...baselinePorts, updatedAt: invalidTs });
+  }, /updatedAt/);
+}
+
+// 9.10 Reject missing required fields
+for (const missingField of ALLOWED_RUNTIME_PORTS_FIELDS) {
+  const incomplete = { ...baselinePorts };
+  delete incomplete[missingField];
+  assert.throws(() => {
+    normalizeRuntimePorts(incomplete);
+  }, new RegExp(`missing required field: ${missingField}`));
+}
+
+// 9.11 Reject arbitrary field drift / extra unexpected fields
+assert.throws(() => {
+  normalizeRuntimePorts({ ...baselinePorts, extraField: 'unexpected-drift' });
+}, /contains unexpected\/extra field: extraField/);
+
+assert.throws(() => {
+  normalizeRuntimePorts({ ...baselinePorts, customPort: 9999 });
+}, /contains unexpected\/extra field: customPort/);
+
+// 9.12 Reject non-object JSON payloads and invalid JSON text
+for (const nonObj of ['null', '[]', '[1, 2, 3]', '12345', '"string"']) {
+  assert.throws(() => {
+    normalizeRuntimePorts(nonObj);
+  }, /runtime_ports must be a valid JSON object/);
+}
+
+assert.throws(() => {
+  normalizeRuntimePorts('{ invalid: json }');
+}, /Invalid JSON/);
+
+assert.throws(() => {
+  normalizeRuntimePorts(path.join(root, 'non-existent-runtime_ports.json'));
+}, /runtime_ports file does not exist/);
+
+// 9.13 Isolated filesystem fixture integration with snapshotRuntimeKeyMaterial & verifyRuntimeKeyMaterial
+{
+  const tempFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-ports-test-'));
+  const tempConfigDir = path.join(tempFixtureDir, 'config');
+  const tempUserDataDir = path.join(tempFixtureDir, 'userData');
+  const tempQzDir = path.join(tempUserDataDir, 'qz-certs');
+
+  try {
+    fs.mkdirSync(tempConfigDir, { recursive: true });
+    fs.mkdirSync(tempQzDir, { recursive: true });
+
+    // Seed mock credential files and private keypairs
+    const dbCredsFile = path.join(tempConfigDir, 'db_credentials.json');
+    const portsFile = path.join(tempConfigDir, 'runtime_ports.json');
+    const qzKeyFile = path.join(tempQzDir, 'private-key.pem');
+    const qzCertFile = path.join(tempQzDir, 'digital-certificate.pem');
+
+    fs.writeFileSync(dbCredsFile, JSON.stringify({ user: 'root', pass: 'secret123' }), 'utf8');
+    fs.writeFileSync(portsFile, JSON.stringify(baselinePorts, null, 2), 'utf8');
+    fs.writeFileSync(qzKeyFile, '-----BEGIN RSA PRIVATE KEY-----\nMIIEogIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----', 'utf8');
+    fs.writeFileSync(qzCertFile, '-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJ...\n-----END CERTIFICATE-----', 'utf8');
+
+    // Snapshot pre-upgrade key and credential material
+    const snapshot = snapshotRuntimeKeyMaterial(tempConfigDir, tempUserDataDir);
+    assert.equal(snapshot.size, 4);
+
+    // Simulate post-upgrade application start: php-server.js rewrites runtime_ports.json with fresh updatedAt
+    const postUpgradePorts = {
+      ...baselinePorts,
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(portsFile, JSON.stringify(postUpgradePorts, null, 2), 'utf8');
+
+    // verifyRuntimeKeyMaterial must pass because only volatile updatedAt timestamp changed
+    verifyRuntimeKeyMaterial(snapshot);
+
+    // Tampering with runtime_ports mysqlPort must be rejected
+    fs.writeFileSync(portsFile, JSON.stringify({ ...postUpgradePorts, mysqlPort: 3308 }, null, 2), 'utf8');
+    assert.throws(() => {
+      verifyRuntimeKeyMaterial(snapshot);
+    }, /Runtime ports configuration modified/);
+
+    // Restore runtime_ports and tamper with db_credentials.json to assert byte-exact verification
+    fs.writeFileSync(portsFile, JSON.stringify(postUpgradePorts, null, 2), 'utf8');
+    fs.writeFileSync(dbCredsFile, JSON.stringify({ user: 'root', pass: 'tampered-secret' }), 'utf8');
+    assert.throws(() => {
+      verifyRuntimeKeyMaterial(snapshot);
+    }, /Runtime key\/credential file modified after upgrade: db_credentials\.json/);
+
+  } finally {
+    fs.rmSync(tempFixtureDir, { recursive: true, force: true });
+  }
+}
+
+console.log('PASS: Runtime ports normalization, assertion helper, and isolated lifecycle regressions verified.');
 
 console.log('\n========================================================================');
 console.log('ALL STABLE DELTA 0.0.10 READINESS VERIFICATIONS PASSED SUCCESSFULLY.');

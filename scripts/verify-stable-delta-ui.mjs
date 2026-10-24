@@ -214,6 +214,149 @@ export async function waitForRuntimeKeyMaterial(userDataDir, timeoutMs = 25000) 
   throw new Error('Timed out waiting for production QZ certificates to be generated in userData/qz-certs');
 }
 
+export const ALLOWED_RUNTIME_PORTS_FIELDS = Object.freeze([
+  'mysqlPort',
+  'apiPort',
+  'apiBaseUrl',
+  'updatedAt',
+]);
+
+export function parseRuntimePortsPayload(input) {
+  if (typeof input === 'object' && input !== null) {
+    if (input.portsData) {
+      return parseRuntimePortsPayload(input.portsData);
+    }
+    if ('mysqlPort' in input || 'apiPort' in input) {
+      return input;
+    }
+    if (input.path && typeof input.path === 'string') {
+      return parseRuntimePortsPayload(input.path);
+    }
+    return input;
+  }
+  if (typeof input !== 'string') {
+    throw new Error(`runtime_ports payload must be a file path, JSON string, or object; got ${typeof input}`);
+  }
+
+  const trimmed = input.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed === 'null') {
+    try {
+      return JSON.parse(input);
+    } catch (err) {
+      throw new Error(`Invalid JSON in runtime_ports payload: ${err.message}`);
+    }
+  }
+
+  if (fs.existsSync(input)) {
+    let stat;
+    try {
+      stat = fs.statSync(input);
+    } catch {}
+    if (stat && stat.isFile()) {
+      let raw;
+      try {
+        raw = fs.readFileSync(input, 'utf8');
+      } catch (err) {
+        throw new Error(`Failed to read runtime_ports file at ${input}: ${err.message}`);
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        throw new Error(`Invalid JSON in runtime_ports file at ${input}: ${err.message}`);
+      }
+    }
+  }
+
+  try {
+    return JSON.parse(input);
+  } catch {
+    throw new Error(`runtime_ports file does not exist or content is not valid JSON: ${input}`);
+  }
+}
+
+export function normalizeRuntimePorts(input) {
+  const data = parseRuntimePortsPayload(input);
+
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    throw new Error(`runtime_ports must be a valid JSON object, got: ${data === null ? 'null' : Array.isArray(data) ? 'array' : typeof data}`);
+  }
+
+  const keys = Object.keys(data);
+  for (const field of ALLOWED_RUNTIME_PORTS_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(data, field)) {
+      throw new Error(`runtime_ports missing required field: ${field}`);
+    }
+  }
+  for (const key of keys) {
+    if (!ALLOWED_RUNTIME_PORTS_FIELDS.includes(key)) {
+      throw new Error(`runtime_ports contains unexpected/extra field: ${key}`);
+    }
+  }
+
+  const { mysqlPort, apiPort, apiBaseUrl, updatedAt } = data;
+
+  if (typeof mysqlPort !== 'number' || !Number.isInteger(mysqlPort) || mysqlPort < 1 || mysqlPort > 65535) {
+    throw new Error(`runtime_ports mysqlPort must be an integer between 1 and 65535, got: ${mysqlPort} (${typeof mysqlPort})`);
+  }
+
+  if (typeof apiPort !== 'number' || !Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535) {
+    throw new Error(`runtime_ports apiPort must be an integer between 1 and 65535, got: ${apiPort} (${typeof apiPort})`);
+  }
+
+  if (typeof apiBaseUrl !== 'string' || apiBaseUrl.trim() === '') {
+    throw new Error(`runtime_ports apiBaseUrl must be a non-empty string, got: ${typeof apiBaseUrl}`);
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(apiBaseUrl);
+  } catch (err) {
+    throw new Error(`runtime_ports apiBaseUrl is not a valid URL: ${apiBaseUrl} (${err.message})`);
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error(`runtime_ports apiBaseUrl must have http: or https: protocol, got: ${parsedUrl.protocol}`);
+  }
+
+  const urlPort = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
+  if (urlPort !== apiPort) {
+    throw new Error(`runtime_ports apiBaseUrl port (${urlPort}) does not match apiPort (${apiPort})`);
+  }
+
+  if (typeof updatedAt !== 'string' || updatedAt.trim() === '') {
+    throw new Error(`runtime_ports updatedAt must be a non-empty string timestamp, got: ${typeof updatedAt}`);
+  }
+
+  const parsedTimestamp = Date.parse(updatedAt);
+  if (Number.isNaN(parsedTimestamp)) {
+    throw new Error(`runtime_ports updatedAt is not a valid date/timestamp: ${updatedAt}`);
+  }
+
+  return {
+    mysqlPort,
+    apiPort,
+    apiBaseUrl,
+  };
+}
+
+export function assertRuntimePortsPreserved(actual, expected) {
+  if (typeof actual === 'string' && !actual.trim().startsWith('{')) {
+    assert.ok(fs.existsSync(actual), `runtime_ports.json must exist at ${actual}`);
+  }
+  if (typeof expected === 'string' && !expected.trim().startsWith('{')) {
+    assert.ok(fs.existsSync(expected), `runtime_ports.json must exist at ${expected}`);
+  }
+  const normActual = normalizeRuntimePorts(actual);
+  const normExpected = normalizeRuntimePorts(expected);
+  assert.deepEqual(
+    normActual,
+    normExpected,
+    'Runtime ports configuration modified after upgrade (excluding volatile updatedAt)'
+  );
+}
+
+export const verifyRuntimePorts = assertRuntimePortsPreserved;
+
 export function snapshotRuntimeKeyMaterial(configDir, userDataDir) {
   const qzKeyPath = path.join(userDataDir, 'qz-certs', 'private-key.pem');
   const qzCertPath = path.join(userDataDir, 'qz-certs', 'digital-certificate.pem');
@@ -257,11 +400,16 @@ export function snapshotRuntimeKeyMaterial(configDir, userDataDir) {
 
   for (const item of candidateKeys) {
     if (fs.existsSync(item.path)) {
-      snapshot.set(item.id, {
+      const entry = {
         path: item.path,
         sha256: hash(item.path),
         size: fs.statSync(item.path).size,
-      });
+      };
+      if (item.id === 'runtime_ports.json') {
+        normalizeRuntimePorts(item.path);
+        entry.portsData = JSON.parse(fs.readFileSync(item.path, 'utf8'));
+      }
+      snapshot.set(item.id, entry);
     } else if (item.required) {
       throw new Error(`Required runtime credential/key file missing: ${item.path}`);
     }
@@ -282,6 +430,10 @@ export function snapshotRuntimeKeyMaterial(configDir, userDataDir) {
 export function verifyRuntimeKeyMaterial(snapshot) {
   for (const [id, expected] of snapshot.entries()) {
     assert.ok(fs.existsSync(expected.path), `Runtime key/credential file disappeared after upgrade: ${id} (${expected.path})`);
+    if (id === 'runtime_ports.json') {
+      assertRuntimePortsPreserved(expected.path, expected.portsData || expected);
+      continue;
+    }
     const currentHash = hash(expected.path);
     assert.equal(currentHash, expected.sha256, `Runtime key/credential file modified after upgrade: ${id}`);
     assert.equal(fs.statSync(expected.path).size, expected.size, `Runtime key/credential file size changed: ${id}`);
