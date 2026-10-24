@@ -13,7 +13,14 @@ if (mode === 'setup' && pkg.version !== installerVersion) throw Error('Setup pac
 if (version.application_version && version.application_version !== version.version) throw Error('Application version fields must agree.');
 if (mode === 'setup' && version.version !== installerVersion) throw Error('Setup application version must match installer_version.');
 const baselines = version.delta_baseline_tags || [];
-if (mode === 'delta' && (!Array.isArray(baselines) || !baselines.length || baselines.length > 10 || baselines.some(tag => !/^v\d+\.\d+\.\d+(?:-beta\.\d+)?$/.test(tag)))) throw Error('Provide 1-10 explicit delta_baseline_tags.');
+if (mode === 'delta') {
+  if (!Array.isArray(baselines) || !baselines.length || baselines.length > 16 || baselines.some(tag => typeof tag !== 'string' || !/^v\d+\.\d+\.\d+(?:-beta\.\d+)?$/.test(tag))) {
+    throw Error('Provide 1-16 explicit delta_baseline_tags.');
+  }
+  if (new Set(baselines).size !== baselines.length) {
+    throw Error('Duplicate delta_baseline_tags are not allowed.');
+  }
+}
 const values = { mode, channel, tag, version: version.version, installer_version: installerVersion, prerelease: String(channel !== 'stable'), baselines: JSON.stringify(baselines) };
 if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n');
 console.log(JSON.stringify(values));

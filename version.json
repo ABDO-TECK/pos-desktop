@@ -1,20 +1,24 @@
 {
-  "version": "0.0.10-beta.10",
-  "application_version": "0.0.10-beta.10",
+  "version": "0.0.10",
+  "application_version": "0.0.10",
   "update_engine_version": "1.0.0",
-  "channel": "beta",
+  "channel": "stable",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
   "release_generation": 3,
-  "released_at": "2026-10-24",
+  "released_at": "2026-10-25",
   "changelog": [
-    "Immediate local installed version/channel independent remote checks.",
-    "Queued background apply so HTTP polling stays responsive.",
-    "Honest byte download progress and indeterminate verification/install.",
-    "Stale check/unknown admission and persistent handoff guards."
+    "Responsive Admin Update Center with honest byte download progress, decoupled fast local status hydration, queued background apply, and persistent handoff guards.",
+    "MariaDB catalog trigger root-cause healing and DEFINER alignment to privileged migration identity with fail-closed integrity.",
+    "Automatic database migration ledger healing, schema normalization, and resilient compatibility verification.",
+    "Catalog request deduplication, consolidated dashboard queries, and performance caching across product operations.",
+    "Explicit signed channel transitions between stable and beta channels with source and target inventory validation.",
+    "Verified restore points and rollback with baseline file verification and rejection of corrupted recovery payloads.",
+    "Resilient signed delta downloads with bounded retries, connection recovery, and verified repair capability.",
+    "Persistent local LAN and phone-access preferences across navigation and application restarts."
   ],
   "requires_npm_install": false,
-  "update_channel": "beta",
+  "update_channel": "stable",
   "release_type": "delta",
   "delta_baseline_tags": [
     "v0.0.1",
@@ -26,7 +30,8 @@
     "v0.0.10-beta.6",
     "v0.0.10-beta.7",
     "v0.0.10-beta.8",
-    "v0.0.10-beta.9"
+    "v0.0.10-beta.9",
+    "v0.0.10-beta.10"
   ],
   "installer_version": "0.0.1"
 }
