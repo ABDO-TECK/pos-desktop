@@ -83,6 +83,22 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-phar-runtime.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Cache pinned vendor archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-tools/desktop-runtime-downloads
+            build-tools/qz-tray-2.2.6-x86_64.exe
+          key: windows-portable-${{ hashFiles('scripts/desktop-runtime.json') }}
+      - name: Prepare portable PHP, MariaDB, Java and QZ Tray
+        shell: pwsh
+        run: |
+          npm run prepare:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run prepare:print-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run verify:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify stable and beta delta flows in isolated deployments
         shell: pwsh
         run: |
@@ -115,22 +131,6 @@ jobs:
           node scripts/verify-admin-update-center.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-admin-update-ui.mjs
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Cache pinned vendor archives
-        uses: actions/cache@v4
-        with:
-          path: |
-            build-tools/desktop-runtime-downloads
-            build-tools/qz-tray-2.2.6-x86_64.exe
-          key: windows-portable-${{ hashFiles('scripts/desktop-runtime.json') }}
-      - name: Prepare portable PHP, MariaDB, Java and QZ Tray
-        shell: pwsh
-        run: |
-          npm run prepare:desktop-runtime
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npm run prepare:print-runtime
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npm run verify:desktop-runtime
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build Windows x64 Setup
         shell: pwsh

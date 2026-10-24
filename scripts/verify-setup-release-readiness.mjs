@@ -182,6 +182,21 @@ assert.ok(workflowContent.includes('scripts/verify-catalog-trigger-recovery.php'
 assert.ok(workflowContent.includes('scripts/verify-admin-update-center.php'), 'windows-setup.yml must run verify-admin-update-center.php');
 assert.ok(workflowContent.includes('pdo_sqlite'), 'windows-setup.yml must include pdo_sqlite in setup-php extensions');
 
+// CI step ordering regression: Prepare portable runtime must precede isolated tests, and tests must precede Build Setup
+const cacheStepIndex = workflowContent.indexOf('Cache pinned vendor archives');
+const prepareStepIndex = workflowContent.indexOf('Prepare portable PHP, MariaDB, Java and QZ Tray');
+const isolatedTestsStepIndex = workflowContent.indexOf('Verify stable and beta delta flows in isolated deployments');
+const buildSetupStepIndex = workflowContent.indexOf('Build Windows x64 Setup');
+
+assert.ok(cacheStepIndex !== -1, 'windows-setup.yml must contain Cache pinned vendor archives step');
+assert.ok(prepareStepIndex !== -1, 'windows-setup.yml must contain Prepare portable step');
+assert.ok(isolatedTestsStepIndex !== -1, 'windows-setup.yml must contain isolated deployment tests step');
+assert.ok(buildSetupStepIndex !== -1, 'windows-setup.yml must contain Build Setup step');
+
+assert.ok(cacheStepIndex < prepareStepIndex, 'windows-setup.yml: Cache pinned vendor archives must precede Prepare portable runtime');
+assert.ok(prepareStepIndex < isolatedTestsStepIndex, 'windows-setup.yml: Prepare portable runtime must precede isolated deployment tests');
+assert.ok(isolatedTestsStepIndex < buildSetupStepIndex, 'windows-setup.yml: Isolated deployment tests must precede Build Windows x64 Setup');
+
 // Verify upgrade script contracts
 const upgradeScriptPath = path.join(repoRoot, 'scripts/verify-original-setup-upgrade.ps1');
 assert.ok(fs.existsSync(upgradeScriptPath), 'scripts/verify-original-setup-upgrade.ps1 missing');
