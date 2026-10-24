@@ -116,9 +116,10 @@ export const checkUpdate = (deltaCapable = false, config?: UpdateRequestConfig) 
   ...config,
   headers: { ...config?.headers, 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 })
-export const applyUpdate = (force = false, deltaCapable = false) => api.post<ApiResponse<UpdateApplyResult>>('/updates/apply', {
+export const applyUpdate = (force = false, deltaCapable = false, background = false) => api.post<ApiResponse<UpdateApplyResult>>('/updates/apply', {
   ...(force ? { force: true } : {}),
   delta_capable: deltaCapable,
+  background,
 }, {
   // Allow the server's bounded signed update and recovery snapshot
   // to finish before handing the verified files to Electron.
@@ -131,7 +132,7 @@ export const rollbackUpdate = (snapshotPath?: string, deltaCapable = false) => a
   ...(snapshotPath ? { snapshot_path: snapshotPath } : {}), delta_capable: deltaCapable,
 }, { timeout: 1_260_000, hideGlobalError: true } as UpdateRequestConfig)
 export const getUpdateSnapshots = (config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateSnapshot[]>>('/updates/snapshots', config)
-export const getUpdateJob = (id: number) => api.get<ApiResponse<UpdateJobResult>>(`/update/jobs/${id}`, { timeout: 15_000 })
+export const getUpdateJob = (id: number, config?: UpdateRequestConfig) => api.get<ApiResponse<UpdateJobResult>>(`/update/jobs/${id}`, { timeout: 15_000, ...config })
 
 export const getUpdateChannel = () => api.get<ApiResponse<{ channel: string; available_channels: string[]; device_id: string }>>('/updates/channel')
 export const setUpdateChannel = (channel: string) => api.post<ApiResponse<{ ok: boolean; channel: string }>>('/updates/channel', { channel })

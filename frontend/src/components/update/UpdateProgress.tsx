@@ -1,7 +1,18 @@
 import React from 'react'
 import { Loader2, ShieldCheck, HardDrive, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react'
 
-export type UpdateStep = 'downloading' | 'verifying' | 'preparing' | 'installing' | 'completed' | 'error'
+export type UpdateStep =
+  | 'downloading'
+  | 'verifying'
+  | 'preparing'
+  | 'installing'
+  | 'completed'
+  | 'error'
+  | 'desktop_handoff_pending'
+  | 'rollback_failed'
+  | 'database_recovery_failed'
+  | 'backup_failed'
+  | 'needs_attention'
 
 export interface UpdateProgressProps {
   step: UpdateStep
@@ -29,12 +40,15 @@ export const UpdateProgress: React.FC<UpdateProgressProps> = ({
     { key: 'installing', label: 'التثبيت والتشغيل', icon: CheckCircle2 },
   ]
 
+  const isErrorStep = step === 'error' || step === 'rollback_failed' || step === 'database_recovery_failed' || step === 'backup_failed' || step === 'needs_attention'
+
   const getStepIndex = (s: UpdateStep) => {
     switch (s) {
       case 'downloading': return 0
       case 'verifying': return 1
       case 'preparing': return 2
-      case 'installing': return 3
+      case 'installing':
+      case 'desktop_handoff_pending': return 3
       case 'completed': return 4
       default: return 0
     }
@@ -48,17 +62,31 @@ export const UpdateProgress: React.FC<UpdateProgressProps> = ({
     return mb >= 1 ? `${mb.toFixed(1)} ميجابايت` : `${Math.round(bytes / 1024)} كيلوبايت`
   }
 
+  const resolvedPercent = (transferredBytes !== undefined && totalBytes && totalBytes > 0)
+    ? Math.min(100, Math.max(0, (transferredBytes / totalBytes) * 100))
+    : Math.min(100, Math.max(0, percent))
+
+  const getErrorTitle = () => {
+    switch (step) {
+      case 'rollback_failed': return 'فشل التراجع عن التحديث'
+      case 'database_recovery_failed': return 'فشل استعادة قاعدة البيانات'
+      case 'backup_failed': return 'فشل إنشاء النسخة الاحتياطية'
+      case 'needs_attention': return 'المهمة بحاجة إلى مراجعة'
+      default: return 'تعذر إكمال التحديث'
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <div className="bg-white dark:bg-gray-900 border border-emerald-500/20 dark:border-emerald-500/30 rounded-2xl shadow-2xl max-w-lg w-full p-6 space-y-6">
         {/* Title */}
         <div className="text-center space-y-1">
-          {step === 'error' ? (
+          {isErrorStep ? (
             <div className="flex flex-col items-center gap-2">
               <div className="p-3 bg-red-100 dark:bg-red-950/50 text-red-600 dark:text-red-400 rounded-full">
                 <AlertTriangle className="w-8 h-8" />
               </div>
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">تعذر إكمال التحديث</h3>
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">{getErrorTitle()}</h3>
               <p className="text-sm text-gray-500 dark:text-gray-400 max-w-sm">
                 {errorMessage || 'تعذر تحميل التحديث، يرجى التحقق من الاتصال بالإنترنت والمحاولة مجدداً.'}
               </p>
@@ -87,7 +115,7 @@ export const UpdateProgress: React.FC<UpdateProgressProps> = ({
         </div>
 
         {/* Steps Progress Checklist */}
-        {step !== 'error' && (
+        {!isErrorStep && (
           <div className="grid grid-cols-4 gap-2 pt-2">
             {stepsMeta.map((s, idx) => {
               const isPast = currentIndex > idx || step === 'completed'
@@ -123,19 +151,25 @@ export const UpdateProgress: React.FC<UpdateProgressProps> = ({
         )}
 
         {/* Progress Bar & Details */}
-        {step !== 'error' && step !== 'completed' && (
+        {!isErrorStep && step !== 'completed' && (
           <div className="space-y-2 pt-1">
             <div className="flex justify-between text-xs font-semibold text-gray-700 dark:text-gray-300">
-              <span>{step === 'downloading' ? 'جاري التحميل...' : step === 'verifying' ? 'التحقق من السلامة...' : 'تجهيز التحديث...'}</span>
-              <span>{Math.round(percent)}%</span>
+              <span>{step === 'downloading' ? 'جاري التحميل...' : step === 'verifying' ? 'التحقق من السلامة...' : step === 'desktop_handoff_pending' ? 'تسليم التحديث لخدمة سطح المكتب...' : 'تجهيز التحديث...'}</span>
+              <span>{step === 'downloading' && totalBytes && totalBytes > 0 ? `${Math.round(resolvedPercent)}%` : 'قيد المعالجة...'}</span>
             </div>
             <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-3.5 overflow-hidden p-0.5 border border-gray-200 dark:border-gray-700">
               <div
-                className="bg-gradient-to-r from-emerald-500 to-teal-500 h-full rounded-full transition-all duration-300 shadow-sm"
-                style={{ width: `${Math.max(5, Math.min(100, percent))}%` }}
+                className={`bg-gradient-to-r from-emerald-500 to-teal-500 h-full rounded-full transition-all duration-300 shadow-sm ${
+                  step !== 'downloading' || !totalBytes || totalBytes <= 0 ? 'animate-pulse w-full' : ''
+                }`}
+                style={
+                  step === 'downloading' && totalBytes && totalBytes > 0
+                    ? { width: `${resolvedPercent}%` }
+                    : undefined
+                }
               />
             </div>
-            {Boolean(totalBytes && totalBytes > 0) && (
+            {Boolean(step === 'downloading' && totalBytes && totalBytes > 0) && (
               <div className="flex justify-between text-[11px] text-gray-400 dark:text-gray-500">
                 <span>تم تحميل: {formatBytes(transferredBytes)}</span>
                 <span>الحجم الكلي: {formatBytes(totalBytes)}</span>
@@ -145,7 +179,7 @@ export const UpdateProgress: React.FC<UpdateProgressProps> = ({
         )}
 
         {/* Actions for Error State */}
-        {step === 'error' && (
+        {isErrorStep && (
           <div className="flex items-center justify-center gap-3 pt-2">
             {onDismiss && (
               <button

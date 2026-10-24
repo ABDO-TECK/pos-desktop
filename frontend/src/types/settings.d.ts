@@ -43,12 +43,15 @@ declare global {
     transition_receipt?: string | null;
     transition_verified?: boolean;
     requires_recovery?: boolean;
-    state: 'pending' | 'downloading' | 'verifying' | 'backing_up' | 'applying' | 'migrating' | 'completed' | 'failed' | 'rolled_back' | 'idle';
+    state: 'pending' | 'downloading' | 'verifying' | 'backing_up' | 'applying' | 'migrating' | 'completed' | 'failed' | 'rolled_back' | 'idle' | 'desktop_handoff_pending';
     started_at?: string;
     updated_at?: string;
     error?: string | null;
     applied_files?: string[];
     backup_snapshot?: string | null;
+    download_bytes?: number;
+    total_bytes?: number;
+    download_attempt?: number;
   }
 
   interface UpdateStatusData {
@@ -112,6 +115,9 @@ declare global {
 
 
   interface UpdateApplyResult {
+    ok?: boolean;
+    operation_id?: string;
+    verified?: boolean;
     message?: string;
     latest_version?: string;
     update_type?: string;
@@ -161,13 +167,21 @@ declare global {
   interface UpdateJobResult {
     id: number;
     job_name: 'apply_update';
-    status: 'pending' | 'processing' | 'completed' | 'failed';
+    status: 'pending' | 'processing' | 'completed' | 'failed' | 'needs_attention';
     attempts: number;
     max_attempts: number;
     last_error: string | null;
     failure_code: number | null;
+    settlement_error?: string | null;
     created_at: string;
     completed_at: string | null;
+    progress?: {
+      downloaded_bytes: number;
+      total_bytes: number;
+      download_attempt: number;
+    } | null;
+    update_state?: string | null;
+    result?: UpdateApplyResult | null;
   }
 
   interface FleetAlert {

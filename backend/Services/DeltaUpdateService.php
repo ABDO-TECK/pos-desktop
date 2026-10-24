@@ -129,6 +129,28 @@ class DeltaUpdateService
     //  1. Update Transaction State Management
     // ══════════════════════════════════════════════════════════════
 
+    private float $lastProgressWriteTime = 0.0;
+    private int $lastRecordedAttempt = 0;
+
+    public function recordDownloadProgress(int $bytes = 0, int $total = 0, int $attempt = 1): void
+    {
+        $now = microtime(true);
+        $attemptChanged = ($attempt !== $this->lastRecordedAttempt);
+        $isResetOrTerminal = ($bytes === 0 && $total === 0) || ($total > 0 && $bytes >= $total);
+
+        // Exempt attempt change, reset, or terminal 100% from throttling; otherwise throttle to >= 1.0s
+        if ($attemptChanged || $isResetOrTerminal || $this->lastProgressWriteTime <= 0.0 || ($now - $this->lastProgressWriteTime >= 1.0)) {
+            $this->lastProgressWriteTime = $now;
+            $this->lastRecordedAttempt = $attempt;
+
+            $this->setUpdateState('downloading', [
+                'download_bytes'   => max(0, $bytes),
+                'total_bytes'      => max(0, $total),
+                'download_attempt' => max(1, $attempt),
+            ]);
+        }
+    }
+
     /**
      * Update the current transaction state in storage/update-state.json
      */
@@ -139,10 +161,50 @@ class DeltaUpdateService
         }
 
         $current = $this->getUpdateState() ?? [];
+
+        // If transitioning out of 'downloading', clear progress counters
+        if ($state !== 'downloading') {
+            unset($current['download_bytes'], $current['total_bytes'], $current['download_attempt']);
+            unset($context['download_bytes'], $context['total_bytes'], $context['download_attempt']);
+        }
+
+        // Operation marker handling:
+        $operationChanged = (isset($context['operation']) && isset($current['operation']) && $context['operation'] !== $current['operation']);
+        $ownerChanged = (isset($context['owner_id']) && isset($current['owner_id']) && $context['owner_id'] !== $current['owner_id']);
+        $operationIdChanged = (isset($context['operation_id']) && isset($current['operation_id']) && $context['operation_id'] !== $current['operation_id']);
+        $isTerminalState = in_array($current['state'] ?? null, ['completed', 'failed', 'rolled_back'], true);
+        $enteringTerminalState = in_array($state, ['completed', 'failed', 'rolled_back'], true);
+
+        // Clear old progress counters when owner, operation, or operation_id changes
+        if ($ownerChanged || $operationChanged || $operationIdChanged) {
+            unset($current['download_bytes'], $current['total_bytes'], $current['download_attempt']);
+        }
+
+        // If new owner/operation begins without an explicit operation_id, or entering/moving out of terminal state, clear background marker
+        if ($operationChanged || $ownerChanged || ($isTerminalState && !isset($context['operation_id'])) || ($enteringTerminalState && !isset($context['operation_id'])) || (isset($context['operation']) && !isset($context['operation_id']))) {
+            if (!isset($context['operation_id'])) {
+                unset($current['operation_id']);
+            }
+        }
+
+        // If context explicitly passes operation_id => null, clear it for synchronous/non-background operations
+        if (array_key_exists('operation_id', $context) && $context['operation_id'] === null) {
+            unset($current['operation_id']);
+            unset($context['operation_id']);
+        }
+
+        // Detect new operation to reset started_at instead of persisting across old ops
+        $isNewOperation = $operationChanged || $ownerChanged || $operationIdChanged || $isTerminalState
+            || ($state === 'applying') || ($state === 'downloading' && empty($current['started_at']));
+
+        $startedAt = ($isNewOperation || empty($current['started_at']))
+            ? date('Y-m-d\TH:i:sP')
+            : (string) $current['started_at'];
+
         $payload = array_merge(
             $current,
             [
-                'started_at' => date('Y-m-d\TH:i:sP'),
+                'started_at' => $startedAt,
                 'updated_at' => date('Y-m-d\TH:i:sP'),
             ],
             $context,
@@ -538,7 +600,9 @@ class DeltaUpdateService
         $zipPath = $stagingDir . '/delta_package.zip';
 
         $provider ??= new GitHubReleaseProvider(caCertPath: $this->resolveCurlCaBundlePath());
-        $provider->setDownloadProgress(function (): void { $this->setUpdateState('downloading'); });
+        $provider->setDownloadProgress(function (int $bytes = 0, int $total = 0, int $attempt = 1): void {
+            $this->recordDownloadProgress($bytes, $total, $attempt);
+        });
         try {
             $dlResult = $provider->downloadAssetFile($zipUrl, $zipPath);
         } finally {
@@ -1537,7 +1601,9 @@ class DeltaUpdateService
     {
         if (!$this->isAllowedUrl($url)) return ['ok'=>false, 'error'=>'Download host is not approved'];
         return (new UpdateAssetDownloader($this->resolveCurlCaBundlePath()))->download(
-            $url, $destPath, function (): void { $this->setUpdateState('downloading'); }
+            $url, $destPath, function (int $bytes = 0, int $total = 0, int $attempt = 1): void {
+                $this->recordDownloadProgress($bytes, $total, $attempt);
+            }
         );
     }
 

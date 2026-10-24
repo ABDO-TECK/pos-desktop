@@ -180,7 +180,9 @@ final class ChannelTransitionService
         $directory=$this->delta->getStagingDir($version);
         if (!mkdir($directory,0700,true)) throw new RuntimeException('staging_unavailable');
         $zipPath=$directory.'/transition.zip';
-        $this->provider->setDownloadProgress(function():void{$this->delta->setUpdateState('downloading');});
+        $this->provider->setDownloadProgress(function(int $bytes = 0, int $total = 0, int $attempt = 1):void{
+            $this->delta->recordDownloadProgress($bytes, $total, $attempt);
+        });
         try { $download=$this->provider->downloadAssetFile($asset['browser_download_url'],$zipPath); }
         finally { $this->provider->setDownloadProgress(null); }
         if (!$download['ok'] || !is_file($zipPath) || filesize($zipPath)!==$descriptor['package']['size'] || !hash_equals($descriptor['package']['sha256'],hash_file('sha256',$zipPath))) throw new RuntimeException('package_download_or_digest_failed');

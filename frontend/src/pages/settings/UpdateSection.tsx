@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { isAxiosError } from 'axios'
 import { 
   RefreshCw, 
@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { 
-  getUpdateStatus, 
+  getUpdateJob,
   applyUpdate, 
   getUpdateHistory, 
   rollbackUpdate, 
@@ -38,6 +38,67 @@ import SectionTitle from '../../components/common/SectionTitle'
 import RollbackPoints from './RollbackPoints'
 import ChannelTransitionPanel from './ChannelTransitionPanel'
 import { isUpdateRestarting, withUpdateRestart } from '../../utils/updateRestart'
+import type { TransitionPhase } from '../../hooks/useChannelTransition'
+
+const ACTIVE_JOB_STORAGE_KEY = 'pos.active_update_job_id'
+const ADMISSION_UNKNOWN_STORAGE_KEY = 'pos.update_admission_unknown'
+const HANDOFF_STORAGE_KEY_PREFIX = 'pos.update_handoff_'
+
+function isAdmissionUnknown(): boolean {
+  try {
+    return sessionStorage.getItem(ADMISSION_UNKNOWN_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function setAdmissionUnknown(val: boolean) {
+  try {
+    if (val) {
+      sessionStorage.setItem(ADMISSION_UNKNOWN_STORAGE_KEY, 'true')
+    } else {
+      sessionStorage.removeItem(ADMISSION_UNKNOWN_STORAGE_KEY)
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function getHandoffMarker(jobId: number): 'idle' | 'running' | 'done' | 'failed' {
+  try {
+    const raw = sessionStorage.getItem(HANDOFF_STORAGE_KEY_PREFIX + jobId)
+    if (raw === 'running' || raw === 'done' || raw === 'failed') return raw
+  } catch {
+    // Ignore storage errors
+  }
+  return 'idle'
+}
+
+function setHandoffMarker(jobId: number, marker: 'idle' | 'running' | 'done' | 'failed') {
+  try {
+    if (marker === 'idle') {
+      sessionStorage.removeItem(HANDOFF_STORAGE_KEY_PREFIX + jobId)
+    } else {
+      sessionStorage.setItem(HANDOFF_STORAGE_KEY_PREFIX + jobId, marker)
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function getInitialActiveJobId(): number | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_JOB_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = Number(raw)
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed
+    }
+  } catch {
+    // sessionStorage unavailable
+  }
+  return null
+}
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
   try {
@@ -60,14 +121,46 @@ export default function UpdateSection() {
     changelog, 
     isChecking, 
     forceCheck, 
+    hydrateLocalStatus,
+    setChannelState,
     updatesDisabled, 
     updatesDisabledMessage, 
     updatesUnreachable, 
     updateErrorMessage 
   } = useUpdateStore()
 
-  const [normalApplyingUpdate, setApplyingUpdate] = useState(false)
+  const handoffDoneRef = useRef(false)
+  const handoffStatusRef = useRef<'idle' | 'running' | 'done' | 'failed'>('idle')
+  const isBootstrapActiveRef = useRef(false)
+  const localStatusGenerationRef = useRef(0)
+
+  const [activeJobId, setActiveJobIdState] = useState<number | null>(() => getInitialActiveJobId())
+  const [pollNonce, setPollNonce] = useState(0)
+
+  const setActiveJobId = useCallback((id: number | null) => {
+    setActiveJobIdState(id)
+    try {
+      if (id !== null && Number.isInteger(id) && id > 0) {
+        sessionStorage.setItem(ACTIVE_JOB_STORAGE_KEY, String(id))
+      } else {
+        sessionStorage.removeItem(ACTIVE_JOB_STORAGE_KEY)
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, [])
+
+  const [normalApplyingUpdate, setApplyingUpdate] = useState<boolean>(() => {
+    return getInitialActiveJobId() !== null || isAdmissionUnknown()
+  })
   const [transitionBusy, setTransitionBusy] = useState(false)
+  const [transitionPhase, setTransitionPhase] = useState<TransitionPhase>('idle')
+
+  const handleTransitionBusy = useCallback((busy: boolean, phase?: TransitionPhase) => {
+    setTransitionBusy(busy)
+    setTransitionPhase(phase ?? (busy ? 'preparing' : 'idle'))
+  }, [])
+
   const applyingUpdate = normalApplyingUpdate || transitionBusy
   const [showChangelog, setShowChangelog] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
@@ -75,14 +168,25 @@ export default function UpdateSection() {
   const [updateLogs, setUpdateLogs] = useState<string[]>([])
   const [bootstrapRequired, setBootstrapRequired] = useState(false)
 
-  
   // Status and Real-time progress data
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusData | null>(null)
   const [historyList, setHistoryList] = useState<UpdateHistoryRecord[]>([])
   const [snapshotsList, setSnapshotsList] = useState<UpdateSnapshot[]>([])
   const [rollingBack, setRollingBack] = useState(false)
-  const [currentChannel, setCurrentChannel] = useState<'stable' | 'beta'>('stable')
+  const [currentChannel, setCurrentChannel] = useState<'stable' | 'beta' | null>(null)
   const [savingChannel, setSavingChannel] = useState(false)
+  const [jobProgress, setJobProgress] = useState<{ downloaded_bytes: number; total_bytes: number; download_attempt: number } | null>(null)
+  const [jobState, setJobState] = useState<string | null>(() => {
+    if (isAdmissionUnknown()) return 'needs_attention'
+    const initialJob = getInitialActiveJobId()
+    if (initialJob) {
+      const marker = getHandoffMarker(initialJob)
+      if (marker === 'running' || marker === 'failed') return 'needs_attention'
+      if (marker === 'done') return 'completed'
+      return 'processing'
+    }
+    return null
+  })
 
   // Recovery & Self-Healing states
   const [recoveryDiag, setRecoveryDiag] = useState<RecoveryDiagnosisData | null>(null)
@@ -95,39 +199,62 @@ export default function UpdateSection() {
     ? changelog
     : (Array.isArray(updateStatus?.release_info?.changelog) ? updateStatus.release_info.changelog : [])
 
-  // Fetch initial status and history
-  const loadStatusAndHistory = useCallback(async () => {
+  // Fast authoritative hydration of local status shared with global store
+  const loadStatusOnly = useCallback(async (force = false) => {
+    const generation = ++localStatusGenerationRef.current
     try {
-      const [statusRes, histRes, snapRes, diagRes, auditRes] = await Promise.allSettled([
-        getUpdateStatus(await hasDeltaHandoffCapability(), { hideGlobalError: true }),
-        getUpdateHistory({ hideGlobalError: true }),
-        getUpdateSnapshots({ hideGlobalError: true }),
+      const data = await hydrateLocalStatus(force)
+      if (generation < localStatusGenerationRef.current) return
+      if (data) {
+        setUpdateStatus(data)
+        if (data.channel) {
+          setCurrentChannel(data.channel)
+        }
+      }
+    } catch {
+      // Non-blocking
+    }
+  }, [hydrateLocalStatus])
+
+  // Independent and lazy retrieval of history, snapshots, recovery diagnostics, and audit logs
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await getUpdateHistory({ hideGlobalError: true })
+      if (Array.isArray(res.data?.data)) {
+        setHistoryList(res.data.data)
+      }
+    } catch { /* Non-blocking */ }
+  }, [])
+
+  const loadSnapshots = useCallback(async () => {
+    try {
+      const res = await getUpdateSnapshots({ hideGlobalError: true })
+      if (Array.isArray(res.data?.data)) {
+        setSnapshotsList(res.data.data)
+      }
+    } catch { /* Non-blocking */ }
+  }, [])
+
+  const loadRecoveryData = useCallback(async () => {
+    try {
+      const [diagRes, auditRes] = await Promise.allSettled([
         diagnoseUpdateRecovery({ hideGlobalError: true }),
         getRecoveryAuditLogs(20, { hideGlobalError: true }),
       ])
-
-      if (statusRes.status === 'fulfilled' && statusRes.value.data?.data) {
-        setUpdateStatus(statusRes.value.data.data)
-        if (statusRes.value.data.data.channel) {
-          setCurrentChannel(statusRes.value.data.data.channel)
-        }
-      }
-      if (histRes.status === 'fulfilled' && Array.isArray(histRes.value.data?.data)) {
-        setHistoryList(histRes.value.data.data)
-      }
-      if (snapRes.status === 'fulfilled' && Array.isArray(snapRes.value.data?.data)) {
-        setSnapshotsList(snapRes.value.data.data)
-      }
       if (diagRes.status === 'fulfilled' && diagRes.value.data?.data) {
         setRecoveryDiag(diagRes.value.data.data)
       }
       if (auditRes.status === 'fulfilled' && Array.isArray(auditRes.value.data?.data?.logs)) {
         setRecoveryLogs(auditRes.value.data.data.logs)
       }
-    } catch {
-      // Background poll failure is non-blocking
-    }
+    } catch { /* Non-blocking */ }
   }, [])
+
+  const loadAll = useCallback(async (force = false) => {
+    await loadStatusOnly(force)
+  }, [loadStatusOnly])
+
+  const loadStatusAndHistory = loadStatusOnly
 
   const handleHealthCheck = async () => {
     setRunningHealthCheck(true)
@@ -138,7 +265,8 @@ export default function UpdateSection() {
       } else {
         toast.error('⚠️ تم رصد مشاكل في سلامة النظام: ' + (res.data?.data?.errors?.join(', ') || 'خطأ غير محدد'))
       }
-      await loadStatusAndHistory()
+      await loadAll()
+      void loadRecoveryData()
     } catch {
       toast.error('فشل تنفيذ فحص سلامة النظام.')
     } finally {
@@ -164,7 +292,7 @@ export default function UpdateSection() {
       } else {
         toast.error(res.data?.data?.error || 'فشل إجراء الاستعادة.')
       }
-      await loadStatusAndHistory()
+      await loadAll()
     } catch {
       toast.error('تعذر إكمال طلب الاستعادة.')
     } finally {
@@ -176,59 +304,235 @@ export default function UpdateSection() {
     setSavingChannel(true)
     try {
       await setUpdateChannel(newChan)
+      setChannelState(newChan)
       setCurrentChannel(newChan)
       toast.success(`تم حفظ متابعة ${newChan.toUpperCase()}. النسخة المثبتة لم تتغير.`)
-      await loadStatusAndHistory()
     } catch {
       toast.error('فشل تغيير قناة التحديث')
     } finally {
       setSavingChannel(false)
     }
+    void loadAll()
   }
 
-
-
   useEffect(() => {
-    loadStatusAndHistory()
-  }, [loadStatusAndHistory])
+    void loadAll(false)
+  }, [loadAll])
 
-  // Polling update progress during apply
+  // Bootstrap updater API onStatus listener with cleanup disposal
   useEffect(() => {
-    if (!applyingUpdate || transitionBusy) return
+    if (!updaterApi) return
+    let cancelled = false
 
-    let polling = false
-    const interval = setInterval(async () => {
-      if (polling || isUpdateRestarting()) return
-      polling = true
+    const applyStatus = (status: { state: string; progress?: { transferred?: number; total?: number; percent?: number } | null; error?: string | null }) => {
+      if (cancelled || !isBootstrapActiveRef.current) return
+      if (status.state === 'downloading') {
+        setJobState('downloading')
+        if (status.progress) {
+          setJobProgress({
+            downloaded_bytes: status.progress.transferred ?? 0,
+            total_bytes: status.progress.total ?? 0,
+            download_attempt: 1,
+          })
+        }
+      } else if (status.state === 'ready_to_install' || status.state === 'restarting') {
+        setJobState('desktop_handoff_pending')
+        setJobProgress(null)
+      } else if (status.state === 'error') {
+        setJobState('error')
+        toast.error(status.error || 'فشل تحديث التطبيق.')
+      }
+    }
+
+    if (updaterApi.getStatus) {
+      void updaterApi.getStatus().then((initialStatus) => {
+        if (initialStatus) applyStatus(initialStatus)
+      }).catch(() => {})
+    }
+
+    const dispose = updaterApi.onStatus ? updaterApi.onStatus(applyStatus) : undefined
+    return () => {
+      cancelled = true
+      if (dispose) dispose()
+    }
+  }, [updaterApi])
+
+  // Single-flight awaited polling loop with bounded deadlines and safe status resume
+  useEffect(() => {
+    if (!applyingUpdate || transitionBusy || !activeJobId) return
+
+    let cancelled = false
+    let timerId: ReturnType<typeof setTimeout> | null = null
+    const loopStartTime = Date.now()
+    let consecutiveNetworkErrors = 0
+    let consecutiveInvalidResponses = 0
+    const MAX_PENDING_TIMEOUT_MS = 30_000 // 30s pending deadline
+    const MAX_PROCESSING_TIMEOUT_MS = 15 * 60 * 1000 // 15m processing deadline
+    const MAX_CONSECUTIVE_NETWORK_ERRORS = 10
+    const MAX_CONSECUTIVE_INVALID_RESPONSES = 5
+    const POLL_INTERVAL_MS = 2_000 // 2s polling interval (<= 30 req/min within rate limit)
+
+    const poll = async () => {
+      if (cancelled || isUpdateRestarting()) return
+
+      // Enforce absolute loop deadline on EACH iteration regardless mixed network success/failure
+      if (Date.now() - loopStartTime >= MAX_PROCESSING_TIMEOUT_MS) {
+        setJobState('processing_timeout')
+        toast.error('تجاوزت عملية التحديث الحد الأقصى للمهلة الزمنية (15 دقيقة). يمكنك استئناف متابعة الحالة يدوياً.')
+        return
+      }
+
       try {
-        const res = await getUpdateStatus(await hasDeltaHandoffCapability(), { hideGlobalError: true })
-        if (isUpdateRestarting()) return
-        if (res.data?.data) {
-          setUpdateStatus(res.data.data)
-          const state = res.data.data.update_state?.state
-          if (state === 'completed') {
-            setApplyingUpdate(false)
-            toast.success('🎉 تم استكمال التحديث بنجاح! جاري إعادة التحميل...')
-            setTimeout(() => window.location.reload(), 1500)
-          } else if (state === 'failed' || state === 'rolled_back') {
-            setApplyingUpdate(false)
-            toast.error(res.data.data.update_state?.error || 'فشل تطبيق التحديث وتم التراجع التلقائي.')
+        const res = await getUpdateJob(activeJobId, { timeout: 10_000, hideGlobalError: true })
+        if (cancelled || isUpdateRestarting()) return
+        consecutiveNetworkErrors = 0
+        const job = res.data?.data
+
+        // Validate id and status for ALL returned statuses, not just completed
+        if (job && typeof job === 'object' && job.id && job.id !== activeJobId) {
+          setJobState('needs_attention')
+          toast.error('معرّف المهمة المستلم من الخادم لا يطابق معرّف المهمة النشطة. تم تعليق المتابعة مع الاحتفاظ بالمهمة.')
+          return
+        }
+
+        if (!job || typeof job !== 'object' || !job.status) {
+          consecutiveInvalidResponses++
+          if (consecutiveInvalidResponses >= MAX_CONSECUTIVE_INVALID_RESPONSES) {
+            setJobState('needs_attention')
+            toast.error('استجابة غير صالحة من الخادم بعد عدة محاولات. تم تعليق المتابعة التلقائية مع الاحتفاظ بالمهمة.')
+            return
           }
+          if (!cancelled && !isUpdateRestarting()) {
+            timerId = setTimeout(poll, POLL_INTERVAL_MS)
+          }
+          return
+        }
+
+        consecutiveInvalidResponses = 0
+
+        if (job.status === 'pending') {
+          if (Date.now() - loopStartTime >= MAX_PENDING_TIMEOUT_MS) {
+            // Worker absent pending timeout: keep activeJobId retained, do NOT clear
+            setJobState('pending_timeout')
+            toast.error('لم يبدأ معالج التحديث في الخلفية بعد. تحقق من تشغيل CLI worker (process-jobs.php). تم تعليق المتابعة التلقائية مع الاحتفاظ بالمهمة.')
+            return
+          }
+        } else if (job.status === 'processing') {
+          if (job.progress) {
+            setJobProgress(job.progress)
+          }
+          if (job.update_state) {
+            setJobState(job.update_state)
+          }
+        } else if (job.status === 'needs_attention') {
+          setJobState('needs_attention')
+          // Keep activeJobId and applyingUpdate retained to prevent unlocking transitions/rollback
+          const errorMsg = job.last_error || 'المهمة بحاجة إلى مراجعة من قبل المسؤول. يرجى فحص حالة النظام.'
+          toast.error(errorMsg)
+          return
+        } else if (job.status === 'completed') {
+          // Require matching job_id and verified result
+          if (job.id !== activeJobId || !job.result || job.result.ok !== true) {
+            setJobState('needs_attention')
+            toast.error('اكتملت المهمة في قائمة الانتظار ولكن تعذر التحقق من نتيجة العملية المعتمدة. يرجى فحص حالة النظام.')
+            return
+          }
+
+          const result = job.result
+          if (result.logs && Array.isArray(result.logs)) {
+            setUpdateLogs(result.logs)
+          }
+
+          if (result.requires_desktop_handoff && result.handoff_version) {
+            const currentMarker = getHandoffMarker(activeJobId)
+            // Guard against skipped failed handoff or reattempting running handoff on status resume / remount
+            if (currentMarker === 'running' || currentMarker === 'failed') {
+              setJobState('needs_attention')
+              toast.error('فشلت محاولة تسليم التحديث لخدمة سطح المكتب سابقاً أو أن حالتها غير مؤكدة. يرجى إعادة فحص النظام.')
+              return
+            }
+
+            if (currentMarker !== 'done') {
+              setHandoffMarker(activeJobId, 'running')
+              handoffStatusRef.current = 'running'
+              // Set installing/restarting state and jobProgress = null before awaiting desktop handoff IPC
+              setJobState('desktop_handoff_pending')
+              setJobProgress(null)
+
+              const version = result.handoff_version
+              const restartNotice = 'pos-update-restarting'
+              toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
+              try {
+                const handoff = await withUpdateRestart(async () => {
+                  if (!window.posRuntime) throw new Error('خدمة تثبيت تحديث البرنامج غير متاحة.')
+                  return window.posRuntime.applyStagedDelta(version)
+                })
+                if (!handoff.ok) {
+                  throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+                }
+                setHandoffMarker(activeJobId, 'done')
+                handoffStatusRef.current = 'done'
+              } catch (handoffErr) {
+                setHandoffMarker(activeJobId, 'failed')
+                handoffStatusRef.current = 'failed'
+                setJobState('needs_attention')
+                toast.error(handoffErr instanceof Error ? handoffErr.message : 'فشل تسليم التحديث لخدمة سطح المكتب.')
+                return
+              } finally {
+                toast.dismiss(restartNotice)
+              }
+            }
+          }
+
+          // Definitive safe settlement: clear active persisted job safely before reload
+          setAdmissionUnknown(false)
+          setActiveJobId(null)
+          setApplyingUpdate(false)
+          if (cancelled) return
+          toast.success('🎉 تم تطبيق التحديث بنجاح! جاري تنشيط النظام...')
+          await loadAll(true)
+          setTimeout(() => window.location.reload(), 1500)
+          return
+        } else if (job.status === 'failed') {
+          // Definitive failure
+          setAdmissionUnknown(false)
+          setActiveJobId(null)
+          setApplyingUpdate(false)
+          const errorMsg = job.last_error || 'فشل تطبيق التحديث في الخلفية.'
+          setJobState('error')
+          toast.error(errorMsg)
+          if (job.result?.logs && Array.isArray(job.result.logs)) {
+            setUpdateLogs(job.result.logs)
+          }
+          await loadAll(true)
+          return
         }
       } catch {
-        // Continue polling
-      } finally {
-        polling = false
+        consecutiveNetworkErrors++
+        if (consecutiveNetworkErrors >= MAX_CONSECUTIVE_NETWORK_ERRORS) {
+          setJobState('network_timeout')
+          toast.error('انقطع الاتصال بخادم التحديثات أثناء المتابعة. المهمة ما زالت محفوظة في النظام ويمكنك استئناف متابعتها.')
+          return
+        }
       }
-    }, 2000)
 
-    return () => clearInterval(interval)
-  }, [applyingUpdate, transitionBusy])
+      if (!cancelled && !isUpdateRestarting()) {
+        timerId = setTimeout(poll, POLL_INTERVAL_MS)
+      }
+    }
+
+    void poll()
+
+    return () => {
+      cancelled = true
+      if (timerId) clearTimeout(timerId)
+    }
+  }, [applyingUpdate, transitionBusy, activeJobId, pollNonce, loadAll, setActiveJobId])
 
   const handleCheckUpdate = async () => {
     try {
       const data = await forceCheck()
-      await loadStatusAndHistory()
+      await loadAll(true)
 
       if (data?.updates_disabled) {
         toast.error(data.message || 'خادم التحديثات غير مهيأ.')
@@ -261,6 +565,7 @@ export default function UpdateSection() {
     const deltaCapable = await hasDeltaHandoffCapability()
     if (!deltaCapable && updaterApi) {
       setApplyingUpdate(true)
+      if (typeof isBootstrapActiveRef !== 'undefined') isBootstrapActiveRef.current = true
       setUpdateLogs(['🚀 جاري تحميل تحديث التطبيق المطلوب...'])
       try {
         const downloadStatus = await updaterApi.download()
@@ -270,6 +575,7 @@ export default function UpdateSection() {
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'فشل تحديث التطبيق.')
         setApplyingUpdate(false)
+        if (typeof isBootstrapActiveRef !== 'undefined') isBootstrapActiveRef.current = false
         return
       }
     }
@@ -285,60 +591,109 @@ export default function UpdateSection() {
     }
 
     setApplyingUpdate(true)
+    if (typeof handoffDoneRef !== 'undefined') handoffDoneRef.current = false
+    if (typeof handoffStatusRef !== 'undefined') handoffStatusRef.current = 'idle'
+    if (typeof setJobProgress !== 'undefined') setJobProgress(null)
+    if (typeof setJobState !== 'undefined') setJobState(null)
     setUpdateLogs(['🚀 بدء عملية التحديث...', '⏳ جاري الاتصال بخادم التحديثات وتجهيز الملفات...'])
 
     try {
-      const res = await applyUpdate(force, deltaCapable)
+      const res = await applyUpdate(force, deltaCapable, true)
       const data = res.data?.data
-      if (data?.logs && Array.isArray(data.logs)) {
-        setUpdateLogs(data.logs)
+      const admittedJobId = (data && typeof data === 'object' && 'job_id' in data) ? Number(data.job_id) : null
+
+      if (admittedJobId && Number.isInteger(admittedJobId) && admittedJobId > 0) {
+        if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
+        if (typeof setActiveJobId !== 'undefined') setActiveJobId(admittedJobId)
+        if (typeof setPollNonce !== 'undefined') setPollNonce((n) => n + 1)
+        setUpdateLogs((prev) => [...prev, `📋 تم إرسال مهمة التحديث إلى طابور المعالجة (Job #${admittedJobId})`])
+        return
       }
 
-      if (data?.requires_desktop_handoff && data.handoff_version) {
-        const version = data.handoff_version
-        const restartNotice = 'pos-update-restarting'
-        toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
-        try {
-          const handoff = await withUpdateRestart(async () => {
-            if (!window.posRuntime) throw new Error('خدمة تثبيت تحديث البرنامج غير متاحة.')
-            return window.posRuntime.applyStagedDelta(version)
-          })
-          if (!handoff.ok) throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
-        } finally {
-          toast.dismiss(restartNotice)
+      // Synchronous non-background path (if server returned verified completed result)
+      if (data && typeof data === 'object' && data.ok === true && (data.verified === true || data.status === 'completed')) {
+        if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
+        if (data.logs && Array.isArray(data.logs)) {
+          setUpdateLogs(data.logs)
         }
+
+        if (data.requires_desktop_handoff && data.handoff_version) {
+          const version = data.handoff_version
+          const restartNotice = 'pos-update-restarting'
+          toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
+          try {
+            const handoff = await withUpdateRestart(async () => {
+              if (!window.posRuntime) throw new Error('خدمة تثبيت تحديث البرنامج غير متاحة.')
+              return window.posRuntime.applyStagedDelta(version)
+            })
+            if (!handoff.ok) throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+          } finally {
+            toast.dismiss(restartNotice)
+          }
+        }
+
+        toast.success('🎉 تم تطبيق التحديث بنجاح! جاري تنشيط النظام...')
+        await loadAll(true)
+        setTimeout(() => window.location.reload(), 1500)
+        return
       }
 
-      toast.success('🎉 تم تطبيق التحديث بنجاح! جاري تنشيط النظام...')
-      await loadStatusAndHistory()
-      setTimeout(() => window.location.reload(), 1500)
+      // Malformed 200 response missing positive job_id or verified result!
+      // Fail closed: do NOT toast success, do NOT reload!
+      if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(true)
+      if (typeof setJobState !== 'undefined') setJobState('needs_attention')
+      toast.error('استجابة غير صالحة من خادم التحديثات بعد إرسال الطلب (لم يتم استلام معرّف مهمة صالح). تم قفل التحديثات لمنع التكرار.')
+      return
     } catch (error: unknown) {
-      setApplyingUpdate(false)
+      if (typeof isBootstrapActiveRef !== 'undefined') isBootstrapActiveRef.current = false
       const errData = isAxiosError(error)
-        ? (error.response?.data as { message?: string; errors?: { logs?: string[]; reason_code?: string }; data?: { logs?: string[] } })
+        ? (error.response?.data as { message?: string; error?: string; errors?: { logs?: string[]; reason_code?: string }; data?: { logs?: string[]; local_changes?: unknown }; reason_code?: string })
         : undefined
       const msg = errData?.message || (error instanceof Error ? error.message : 'فشل تطبيق التحديث.')
       const logs = errData?.errors?.logs || errData?.data?.logs || [error instanceof Error ? error.message : 'Update failed']
       setUpdateLogs(logs)
-      // The failure notice must not wait for an unavailable PHP server.
       void loadStatusAndHistory()
 
-      if (errData?.errors?.reason_code === 'update_in_progress') {
+      // Definitive HTTP 400 / 403 validation rejection can safely unlock
+      if (isAxiosError(error) && (error.response?.status === 400 || error.response?.status === 403)) {
+        if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
+        setApplyingUpdate(false)
+        if (typeof setActiveJobId !== 'undefined') setActiveJobId(null)
         toast.error(msg)
         return
       }
 
-      if (isAxiosError(error) && error.response?.status === 409 && !force) {
-        const forceConfirm = await confirm(
-          'توجد تعديلات محلية في بعض ملفات النظام. سيتم استبدالها بالنسخة الأصلية المعتمدة من التحديث. هل تريد المتابعة؟'
-        )
-        if (forceConfirm) {
-          handleApplyUpdate(true)
+      // HTTP 409 conflict
+      if (isAxiosError(error) && error.response?.status === 409) {
+        const reasonCode = errData?.errors?.reason_code || errData?.reason_code
+        const isLocalModifications = reasonCode === 'local_modifications' || Boolean(errData?.data?.local_changes) || String(errData?.error || '').includes('تعديلات محلية')
+        if (isLocalModifications && !force) {
+          if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
+          setApplyingUpdate(false)
+          if (typeof setActiveJobId !== 'undefined') setActiveJobId(null)
+          const forceConfirm = await confirm(
+            'توجد تعديلات محلية في بعض ملفات النظام. سيتم استبدالها بالنسخة الأصلية المعتمدة من التحديث. هل تريد المتابعة؟'
+          )
+          if (forceConfirm) {
+            handleApplyUpdate(true)
+          }
+          return
         }
+        // Background queue busy: must NOT offer replace local modifications prompt!
+        if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
+        setApplyingUpdate(false)
+        if (typeof setActiveJobId !== 'undefined') setActiveJobId(null)
+        toast.error(msg || 'عملية تحديث أخرى قيد التنفيذ حالياً.')
         return
       }
 
-      toast.error(msg)
+      // Unknown submission (network timeout, lost connection, 5xx):
+      // Server may have dispatched job before response lost.
+      // Retain busy, persist admission_unknown sentinel, do NOT clear or call POST as recovery!
+      if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(true)
+      setApplyingUpdate(true)
+      if (typeof setJobState !== 'undefined') setJobState('needs_attention')
+      toast.error(msg || 'انقطع الاتصال بخادم التحديثات أثناء معالجة الطلب. قد تكون المهمة بدأت في الخادم. تم تعليق العمليات لمنع التكرار حتى يتم التحقق.')
     }
   }
 
@@ -371,7 +726,7 @@ export default function UpdateSection() {
       const logs = res.data?.data?.logs || []
       setUpdateLogs(logs)
       toast.success('✅ تم التراجع عن التحديث بنجاح!')
-      await loadStatusAndHistory()
+      await loadAll()
       setTimeout(() => window.location.reload(), 1200)
     } catch (error: unknown) {
       const msg = isAxiosError(error) ? error.response?.data?.message : (error instanceof Error ? error.message : 'فشل التراجع.')
@@ -382,7 +737,15 @@ export default function UpdateSection() {
     }
   }
 
-  const activeState = updateStatus?.update_state?.state || 'idle'
+  const activeState = transitionBusy
+    ? (transitionPhase === 'installing' ? 'applying' : (transitionPhase === 'verifying' ? 'verifying' : 'preparing'))
+    : (jobState || updateStatus?.update_state?.state || 'idle')
+  const downloadedBytes = jobProgress?.downloaded_bytes ?? updateStatus?.update_state?.download_bytes ?? 0
+  const totalBytes = jobProgress?.total_bytes ?? updateStatus?.update_state?.total_bytes ?? 0
+  const hasDownloadByteCounts = activeState === 'downloading' && totalBytes > 0
+  const downloadPercent = hasDownloadByteCounts
+    ? Math.min(100, Math.max(0, Math.round((downloadedBytes / totalBytes) * 100)))
+    : null
 
   return (
     <section className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -399,23 +762,27 @@ export default function UpdateSection() {
           {/* Channel Selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'var(--card-bg, #2a2a3e)', border: '1px solid var(--border)', borderRadius: '8px', padding: '0.2rem 0.5rem' }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>قناة المتابعة:</span>
-            <select
-              value={currentChannel}
-              onChange={(e) => handleChannelChange(e.target.value as 'stable' | 'beta')}
-              disabled={savingChannel || isChecking || applyingUpdate}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: currentChannel === 'beta' ? '#f59e0b' : '#4ade80',
-                fontWeight: 700,
-                fontSize: '0.8rem',
-                cursor: 'pointer',
-                outline: 'none',
-              }}
-            >
-              <option value="stable" style={{ background: '#1e1e2e', color: '#fff' }}>Stable (مستقر)</option>
-              <option value="beta" style={{ background: '#1e1e2e', color: '#fff' }}>Beta (تجريبي)</option>
-            </select>
+            {currentChannel === null ? (
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0.1rem 0.4rem' }}>جاري التحميل...</span>
+            ) : (
+              <select
+                value={currentChannel}
+                onChange={(e) => handleChannelChange(e.target.value as 'stable' | 'beta')}
+                disabled={savingChannel || isChecking || applyingUpdate}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: currentChannel === 'beta' ? '#f59e0b' : '#4ade80',
+                  fontWeight: 700,
+                  fontSize: '0.8rem',
+                  cursor: 'pointer',
+                  outline: 'none',
+                }}
+              >
+                <option value="stable" style={{ background: '#1e1e2e', color: '#fff' }}>Stable (مستقر)</option>
+                <option value="beta" style={{ background: '#1e1e2e', color: '#fff' }}>Beta (تجريبي)</option>
+              </select>
+            )}
           </div>
           {updateStatus?.channel_migrated_from && (
             <p role="status" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>تم إيقاف القناة السابقة واختيار متابعة stable. الإصدار المثبّت لم يتغير.</p>
@@ -438,7 +805,15 @@ export default function UpdateSection() {
       </div>
 
 
-      <ChannelTransitionPanel channel={currentChannel} installedVersion={updateStatus?.current_version || currentVersion || '—'} installedChannel={updateStatus?.installed_channel || 'retired'} disabled={savingChannel || normalApplyingUpdate || rollingBack} onBusy={setTransitionBusy} />
+      {currentChannel !== null && updateStatus?.installed_channel && (
+        <ChannelTransitionPanel
+          channel={currentChannel}
+          installedVersion={updateStatus?.current_version || currentVersion || '—'}
+          installedChannel={updateStatus?.installed_channel}
+          disabled={savingChannel || normalApplyingUpdate || rollingBack}
+          onBusy={handleTransitionBusy}
+        />
+      )}
 
       {/* Interrupted Update Recovery Banner */}
       {updateStatus?.interrupted_update?.interrupted && (
@@ -486,6 +861,76 @@ export default function UpdateSection() {
         </div>
       )}
 
+      {/* Admission Unknown Banner */}
+      {isAdmissionUnknown() && (
+        <div style={{
+          padding: '1rem',
+          borderRadius: '8px',
+          background: 'rgba(239, 68, 68, 0.1)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: '1rem',
+          flexWrap: 'wrap'
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, color: '#ef4444', marginBottom: '0.2rem' }}>
+              حالة إرسال التحديث غير مؤكدة
+            </div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              انقطع الاتصال أو وردت استجابة غير صالحة أثناء إرسال طلب التحديث. قد تكون المهمة قيد المعالجة في الخادم. تم قفل التحديثات لمنع الإرسال المكرر.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setAdmissionUnknown(false)
+              setApplyingUpdate(false)
+              setJobState(null)
+            }}
+            className="btn btn-secondary btn-sm"
+          >
+            إلغاء القفل بعد التحقق
+          </button>
+        </div>
+      )}
+
+      {/* Pending / Attention Resume Banner */}
+      {(jobState === 'pending_timeout' || jobState === 'processing_timeout' || jobState === 'needs_attention' || jobState === 'network_timeout') && activeJobId && (
+        <div style={{
+          padding: '1rem',
+          borderRadius: '8px',
+          background: 'rgba(234, 179, 8, 0.1)',
+          border: '1px solid rgba(234, 179, 8, 0.3)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: '1rem',
+          flexWrap: 'wrap'
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, color: '#eab308', marginBottom: '0.2rem' }}>
+              {jobState === 'needs_attention' ? 'المهمة بحاجة لمراجعة الحالة' : 'المهمة قيد الانتظار أو المعالجة في الخلفية'}
+            </div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              رقم المهمة: #{activeJobId}. {jobState === 'needs_attention' ? 'تعذر التحقق التلقائي من نتيجة المهمة.' : 'تأخرت استجابة معالج الخلفية؛ المهمة محفوظة دون فقدان الحالة.'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setApplyingUpdate(true)
+              setJobState('processing')
+              setPollNonce((n) => n + 1)
+            }}
+            className="btn btn-warning btn-sm"
+          >
+            <RefreshCw size={14} /> استئناف متابعة الحالة
+          </button>
+        </div>
+      )}
+
       {/* Main Status Banner */}
       {updatesDisabled ? (
 
@@ -520,17 +965,17 @@ export default function UpdateSection() {
           <div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>الإصدار الحالي المثبت</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text)' }}>
-              v{currentVersion || '0.0.0'}
+              {currentVersion ? `v${currentVersion}` : 'غير معروف'}
             </div>
             <div style={{ fontSize: '0.72rem', color: '#10b981', fontWeight: 600, marginTop: '0.2rem' }}>
-              Delta v1.1.48
+              نظام التحديث المدمج
             </div>
           </div>
 
           <div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>أحدث إصدار متاح</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 700, color: hasUpdate ? '#22c55e' : 'var(--text)' }}>
-              {latestVersion ? `v${latestVersion}` : 'v' + (currentVersion || '0.0.0')}
+              {latestVersion ? `v${latestVersion}` : (currentVersion ? `v${currentVersion}` : 'غير معروف')}
             </div>
           </div>
 
@@ -597,15 +1042,21 @@ export default function UpdateSection() {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
             <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#38bdf8' }}>
               مرحلة التحديث الحالية: {getStageLabel(activeState)}
+              {hasDownloadByteCounts && downloadPercent !== null && (
+                <span style={{ marginRight: '0.5rem', color: '#94a3b8', fontSize: '0.8rem' }}>
+                  ({formatBytes(downloadedBytes)} / {formatBytes(totalBytes)} - {downloadPercent}%)
+                </span>
+              )}
             </span>
             <span className="spinner" style={{ width: '14px', height: '14px' }} />
           </div>
           <div style={{ height: '6px', width: '100%', background: 'rgba(255,255,255,0.1)', borderRadius: '999px', overflow: 'hidden' }}>
             <div style={{
               height: '100%',
-              width: `${getStagePercent(activeState)}%`,
+              width: activeState === 'completed' ? '100%' : (downloadPercent !== null ? `${downloadPercent}%` : '100%'),
               background: 'linear-gradient(90deg, #3b82f6, #10b981)',
-              transition: 'width 0.4s ease'
+              transition: downloadPercent !== null ? 'width 0.4s ease' : undefined,
+              animation: downloadPercent === null && activeState !== 'completed' ? 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' : undefined,
             }} />
           </div>
         </div>
@@ -642,16 +1093,16 @@ export default function UpdateSection() {
       <div style={{
         padding: '1rem 1.25rem',
         borderRadius: '8px',
-        background: recoveryDiag?.problem_detected ? 'rgba(239, 68, 68, 0.08)' : 'rgba(34, 197, 94, 0.05)',
-        border: `1px solid ${recoveryDiag?.problem_detected ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.2)'}`,
+        background: recoveryDiag ? (recoveryDiag.problem_detected ? 'rgba(239, 68, 68, 0.08)' : 'rgba(34, 197, 94, 0.05)') : 'rgba(255, 255, 255, 0.02)',
+        border: `1px solid ${recoveryDiag ? (recoveryDiag.problem_detected ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.2)') : 'var(--border)'}`,
         display: 'flex',
         flexDirection: 'column',
         gap: '0.75rem',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <HeartPulse size={18} style={{ color: recoveryDiag?.problem_detected ? '#f87171' : '#4ade80' }} />
-            <h4 style={{ margin: 0, fontSize: '0.95rem', color: recoveryDiag?.problem_detected ? '#f87171' : '#4ade80' }}>
+            <HeartPulse size={18} style={{ color: recoveryDiag ? (recoveryDiag.problem_detected ? '#f87171' : '#4ade80') : 'var(--text-muted)' }} />
+            <h4 style={{ margin: 0, fontSize: '0.95rem', color: recoveryDiag ? (recoveryDiag.problem_detected ? '#f87171' : '#4ade80') : 'var(--text)' }}>
               نظام المعالجة الذاتية (Self-Healing & Fault Recovery)
             </h4>
           </div>
@@ -666,7 +1117,10 @@ export default function UpdateSection() {
             </button>
             <button
               type="button"
-              onClick={() => setShowRecoveryModal(true)}
+              onClick={() => {
+                setShowRecoveryModal(true)
+                void loadRecoveryData()
+              }}
               className="btn btn-secondary btn-sm"
             >
               <History size={14} /> سجل الاستعادة ({recoveryLogs.length})
@@ -675,7 +1129,7 @@ export default function UpdateSection() {
         </div>
 
         <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-          {recoveryDiag?.message || 'النظام يعمل بشكل سليم ومستقر بدون أي عمليات تحديث معلقة.'}
+          {recoveryDiag?.message || 'لم يتم تشغيل فحص التشخيص بعد. انقر على فحص السلامة للتشخيص.'}
         </div>
 
         {recoveryDiag?.problem_detected && (
@@ -753,22 +1207,30 @@ export default function UpdateSection() {
 
         <button
           type="button"
-          onClick={() => setShowHistory(!showHistory)}
+          onClick={() => {
+            const next = !showHistory
+            setShowHistory(next)
+            if (next) void loadHistory()
+          }}
           className="btn btn-ghost"
         >
           <History size={16} />
           {showHistory ? 'إخفاء السجل' : 'سجل التحديثات'}
         </button>
 
-          <button
-            type="button"
-            onClick={() => setShowSnapshots(!showSnapshots)}
-            className="btn btn-ghost"
-            style={{ color: '#f59e0b' }}
-          >
-            <RotateCcw size={16} />
-            {showSnapshots ? 'إخفاء نقاط الاسترجاع' : `نقاط الاسترجاع (${snapshotsList.length})`}
-          </button>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !showSnapshots
+            setShowSnapshots(next)
+            if (next) void loadSnapshots()
+          }}
+          className="btn btn-ghost"
+          style={{ color: '#f59e0b' }}
+        >
+          <RotateCcw size={16} />
+          {showSnapshots ? 'إخفاء نقاط الاسترجاع' : `نقاط الاسترجاع (${snapshotsList.length})`}
+        </button>
       </div>
 
       {/* Changelog Dropdown */}
@@ -971,13 +1433,13 @@ function renderChangelogEntry(entry: unknown, index: number) {
 }
 
 function getStageLabel(state: string): string {
-
   switch (state) {
     case 'downloading': return 'تحميل حزمة التحديث من GitHub Releases...'
     case 'verifying': return 'فحص التوقيع الرقمي RSA وشهادات الأمان...'
     case 'backing_up': return 'إنشاء لقطة النسخ الاحتياطي الذرية...'
     case 'applying': return 'استبدال ملفات النظام بالنسخ الجديدة...'
     case 'migrating': return 'تطبيق تحديثات وهيكلة قاعدة البيانات...'
+    case 'desktop_handoff_pending': return 'تسليم التحديث لخدمة سطح المكتب وإعادة التشغيل...'
     case 'completed': return 'اكتمل التحديث بنجاح.'
     case 'rolled_back': return 'تم التراجع التلقائي بنجاح.'
     case 'failed': return 'حدث خطأ أثناء التحديث.'
@@ -985,16 +1447,10 @@ function getStageLabel(state: string): string {
   }
 }
 
-function getStagePercent(state: string): number {
-  switch (state) {
-    case 'downloading': return 25
-    case 'verifying': return 45
-    case 'backing_up': return 65
-    case 'applying': return 80
-    case 'migrating': return 92
-    case 'completed': return 100
-    default: return 15
-  }
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '0 ميجابايت'
+  const mb = bytes / (1024 * 1024)
+  return mb >= 1 ? `${mb.toFixed(1)} ميجابايت` : `${Math.round(bytes / 1024)} كيلوبايت`
 }
 
 function formatUpdateError(value: unknown): string {

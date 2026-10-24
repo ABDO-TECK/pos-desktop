@@ -76,6 +76,7 @@ class JobQueue
         $db->beginTransaction();
 
         try {
+            $forUpdate = $db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? '' : 'FOR UPDATE';
             $existing = $db->prepare(
                 "SELECT id
                  FROM job_queue
@@ -83,7 +84,7 @@ class JobQueue
                    AND status IN ('pending', 'processing')
                  ORDER BY id ASC
                  LIMIT 1
-                 FOR UPDATE"
+                 {$forUpdate}"
             );
             $existing->execute([$job]);
             $existingId = $existing->fetchColumn();
@@ -120,7 +121,7 @@ class JobQueue
     public static function find(int $id): ?array
     {
         $stmt = \App\Config\Database::getInstance()->prepare(
-            'SELECT id, job_name, status, attempts, max_attempts,
+            'SELECT id, job_name, payload, status, attempts, max_attempts,
                     last_error, failure_code, created_at, completed_at
              FROM job_queue
              WHERE id = ?
@@ -156,12 +157,13 @@ class JobQueue
             // with XAMPP. The optional non-blocking row-lock clause is not
             // available on older releases; this short FOR UPDATE transaction
             // still prevents two workers from claiming the same pending job.
+            $forUpdate = $db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? '' : 'FOR UPDATE';
             $stmt = $db->prepare(
-                'SELECT * FROM job_queue
-                 WHERE status = "pending" AND attempts < max_attempts
+                "SELECT * FROM job_queue
+                 WHERE status = 'pending' AND attempts < max_attempts
                  ORDER BY priority DESC, id ASC
                  LIMIT 1
-                 FOR UPDATE'
+                 {$forUpdate}"
             );
             $stmt->execute();
             $job = $stmt->fetch(\PDO::FETCH_ASSOC);
@@ -179,7 +181,7 @@ class JobQueue
             // تنفيذ
             try {
                 $handler = self::resolveHandler($job['job_name']);
-                $handler(json_decode($job['payload'], true) ?? []);
+                $handler(json_decode($job['payload'], true) ?? [], (int) $job['id']);
                 $db->prepare('UPDATE job_queue SET status = "completed", last_error = NULL, failure_code = NULL, completed_at = NOW() WHERE id = ?')
                    ->execute([$job['id']]);
             } catch (\Throwable $e) {
@@ -286,18 +288,11 @@ class JobQueue
                     ]);
                 }
             },
-            'apply_update' => static function (array $p): void {
+            'apply_update' => static function (array $p, ?int $jobId = null): void {
                 $container = new \App\Core\Container();
-                /** @var \App\Services\UpdateService $service */
-                $service = $container->get(\App\Services\UpdateService::class);
-                $result = $service->applyUpdate((bool) ($p['force'] ?? false));
-
-                if (!($result['ok'] ?? false)) {
-                    throw new JobFailure(
-                        (string) ($result['error'] ?? 'Update failed'),
-                        (int) ($result['code'] ?? 500)
-                    );
-                }
+                /** @var \App\Services\BackgroundUpdateApplyService $applyService */
+                $applyService = $container->get(\App\Services\BackgroundUpdateApplyService::class);
+                $applyService->processWorkerJob($p, $jobId);
             },
             'check_for_updates' => static function (array $p): void {
                 $container = new \App\Core\Container();

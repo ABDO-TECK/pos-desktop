@@ -16,6 +16,8 @@ class UpdateAssetDownloader
         private int $retryDelayMilliseconds = 1000
     ) {}
 
+    protected int $currentAttempt = 1;
+
     public function download(string $url, string $destination, ?Closure $progress = null): array
     {
         if (!$this->caBundle || !is_file($this->caBundle) || str_starts_with($this->caBundle, 'phar://')) {
@@ -24,9 +26,11 @@ class UpdateAssetDownloader
         if (strtolower((string)parse_url($url, PHP_URL_SCHEME)) !== 'https') {
             return ['ok'=>false, 'error'=>'Asset download requires HTTPS'];
         }
+        $paramCount = $progress ? (new \ReflectionFunction($progress))->getNumberOfParameters() : 0;
         $deadline = microtime(true) + max(1, $this->budgetSeconds);
         $error = 'Asset download time budget exhausted';
         for ($attempt = 1; $attempt <= max(1, $this->maxAttempts); $attempt++) {
+            $this->currentAttempt = $attempt;
             $remaining = (int)floor($deadline - microtime(true));
             if ($remaining < 1) break;
             $file = @fopen($destination, 'w+b');
@@ -53,7 +57,18 @@ class UpdateAssetDownloader
             $retryable = in_array($result['errno'], [5,6,7,18,28,35,52,55,56,92], true)
                 || ($result['errno'] === 0 && in_array($result['http_code'], [408,429,500,502,503,504], true));
             if (!$retryable || $attempt === $this->maxAttempts) break;
-            if ($progress) $progress();
+            if ($progress) {
+                // Reset progress counters on retry so UI does not retain stale 100%
+                if ($paramCount >= 3) {
+                    $progress(0, 0, $attempt + 1);
+                } elseif ($paramCount === 2) {
+                    $progress(0, 0);
+                } elseif ($paramCount === 1) {
+                    $progress(0);
+                } else {
+                    $progress();
+                }
+            }
             usleep(max(0, min($this->retryDelayMilliseconds, (int)max(0, ($deadline - microtime(true))*1000))) * 1000);
         }
         return ['ok'=>false, 'error'=>$error];
@@ -63,6 +78,23 @@ class UpdateAssetDownloader
     {
         $handle = curl_init($url);
         $lastHeartbeat = 0.0;
+        $terminalReported = false;
+        $paramCount = $progress ? (new \ReflectionFunction($progress))->getNumberOfParameters() : 0;
+        $attempt = $this->currentAttempt;
+
+        $invokeProgress = static function (int $dlnow, int $dltotal) use ($progress, $attempt, $paramCount): void {
+            if (!$progress) return;
+            if ($paramCount >= 3) {
+                $progress($dlnow, $dltotal, $attempt);
+            } elseif ($paramCount === 2) {
+                $progress($dlnow, $dltotal);
+            } elseif ($paramCount === 1) {
+                $progress($dlnow);
+            } else {
+                $progress();
+            }
+        };
+
         curl_setopt_array($handle, [
             CURLOPT_FILE=>$file,
             CURLOPT_TIMEOUT=>$remainingSeconds,
@@ -78,10 +110,18 @@ class UpdateAssetDownloader
             CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
             CURLOPT_REDIR_PROTOCOLS=>CURLPROTO_HTTPS,
             CURLOPT_NOPROGRESS=>false,
-            CURLOPT_XFERINFOFUNCTION=>static function () use ($progress, &$lastHeartbeat): int {
-                if ($progress && microtime(true) - $lastHeartbeat >= 10) {
-                    $progress();
-                    $lastHeartbeat = microtime(true);
+            CURLOPT_XFERINFOFUNCTION=>static function ($ch, int $dltotal, int $dlnow, int $ultotal, int $ulnow) use ($invokeProgress, &$lastHeartbeat, &$terminalReported): int {
+                $now = microtime(true);
+                $isTerminal = ($dltotal > 0 && $dlnow >= $dltotal);
+                if ($isTerminal) {
+                    if (!$terminalReported) {
+                        $terminalReported = true;
+                        $lastHeartbeat = $now;
+                        $invokeProgress($dlnow, $dltotal);
+                    }
+                } elseif ($lastHeartbeat <= 0.0 || ($now - $lastHeartbeat >= 1.0)) {
+                    $lastHeartbeat = $now;
+                    $invokeProgress($dlnow, $dltotal);
                 }
                 return 0;
             },

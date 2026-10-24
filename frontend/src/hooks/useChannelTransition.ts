@@ -34,10 +34,17 @@ export function transitionReason(reason: string | null): string {
   return messages[reason ?? ''] ?? 'لا تتوفر حاليًا حزمة انتقال يمكن التحقق من سلامتها وتوافقها مع بياناتك.'
 }
 
-export default function useChannelTransition(channel: ActiveUpdateChannel) {
+export type TransitionPhase = 'idle' | 'preparing' | 'installing' | 'verifying'
+
+export default function useChannelTransition(
+  channel: ActiveUpdateChannel,
+  options?: { autoPreview?: boolean }
+) {
+  const autoPreview = options?.autoPreview ?? true
   const [preview, setPreview] = useState<ChannelTransitionPreview | null>(null)
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [phase, setPhase] = useState<TransitionPhase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [waiting, setWaiting] = useState(false)
   const generation = useRef(0)
@@ -63,9 +70,17 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
   }, [channel])
 
   useEffect(() => {
-    void check()
+    if (autoPreview) {
+      void check()
+    } else {
+      generation.current += 1
+      setPreview(null)
+      setError(null)
+      setWaiting(false)
+      setChecking(false)
+    }
     return () => { generation.current += 1 }
-  }, [check])
+  }, [check, autoPreview])
 
   const wait = () => {
     if (!preview?.target) return
@@ -88,6 +103,7 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
     const accepted = await confirm(`تثبيت ${target.channel.toUpperCase()} v${target.version} بدلًا من v${snapshot.installed.version}؟\n\nسيتم استبدال ملفات البرنامج مع الحفاظ على بيانات العمل. عند الرجوع إلى إصدار أقدم تعود واجهته وسلوكه القديمان. لن تُسترجع قاعدة بيانات قديمة فوق مبيعاتك الحالية.`)
     if (!accepted || request !== generation.current) return
     setBusy(true)
+    setPhase('preparing')
     setWaiting(false)
     try { sessionStorage.removeItem(waitingPreferenceKey) } catch { /* Optional UI preference. */ }
     setError(null)
@@ -95,10 +111,12 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
       const capability = Boolean((await window.posRuntime?.getDeltaCapability?.())?.capable)
       const result = (await applyChannelTransition(previewId, capability)).data.data
       if (!result?.ok || !result.requires_desktop_handoff) throw new Error('تعذر تجهيز الانتقال الآمن.')
+      setPhase('installing')
       await withUpdateRestart(async () => {
         if (!window.posRuntime) throw new Error('خدمة تثبيت تحديث البرنامج غير متاحة.')
         const handoff = await window.posRuntime.applyStagedDelta(result.handoff_version)
         if (!handoff.ok) throw new Error(handoff.error || 'فشل استبدال ملفات الانتقال.')
+        setPhase('verifying')
         const deadline = Date.now() + 100_000
         while (Date.now() < deadline) {
           const state = (await getUpdateStatus(true, { hideGlobalError: true })).data.data?.update_state
@@ -118,8 +136,9 @@ export default function useChannelTransition(channel: ActiveUpdateChannel) {
       toast.error(message)
     } finally {
       setBusy(false)
+      setPhase('idle')
     }
   }
 
-  return { preview, checking, busy, error, waiting, check, apply, cancel: wait }
+  return { preview, checking, busy, phase, error, waiting, check, apply, cancel: wait }
 }

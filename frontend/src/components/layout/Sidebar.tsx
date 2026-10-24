@@ -34,13 +34,14 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const navigate         = useNavigate()
   
   // Updates
-  const { hasUpdate, currentVersion, silentCheck } = useUpdateStore()
+  const { hasUpdate, currentVersion, silentCheck, hydrateLocalStatus } = useUpdateStore()
 
   useEffect(() => {
     if (user?.role === 'admin') {
-      silentCheck()
+      void hydrateLocalStatus()
+      void silentCheck()
     }
-  }, [user?.role, silentCheck])
+  }, [user?.role, silentCheck, hydrateLocalStatus])
 
   const handleLogout = async () => {
     await logout()

@@ -9,6 +9,7 @@ use App\Helpers\JobQueue;
 use App\Helpers\Logger;
 use App\Helpers\Response;
 use App\Services\AuthService;
+use App\Services\BackgroundUpdateApplyService;
 use App\Services\BackgroundUpdateCheckService;
 use App\Services\ReleaseVersionPolicy;
 use App\Services\UpdateService;
@@ -19,15 +20,18 @@ class UpdateController extends Controller
     private AuthService $authService;
     private UpdateService $updateService;
     private ?BackgroundUpdateCheckService $backgroundUpdateService;
+    private ?BackgroundUpdateApplyService $backgroundUpdateApplyService;
 
     public function __construct(
         AuthService $authService,
         UpdateService $updateService,
-        ?BackgroundUpdateCheckService $backgroundUpdateService = null
+        ?BackgroundUpdateCheckService $backgroundUpdateService = null,
+        ?BackgroundUpdateApplyService $backgroundUpdateApplyService = null
     ) {
-        $this->authService             = $authService;
-        $this->updateService           = $updateService;
-        $this->backgroundUpdateService = $backgroundUpdateService;
+        $this->authService                 = $authService;
+        $this->updateService               = $updateService;
+        $this->backgroundUpdateService     = $backgroundUpdateService;
+        $this->backgroundUpdateApplyService = $backgroundUpdateApplyService;
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -38,8 +42,10 @@ class UpdateController extends Controller
     {
         // If an ID is passed, check background job status for backward compatibility
         if ($id !== null && $id !== '') {
-            $job = JobQueue::find($this->resolveId($id));
-            if (!$job || $job['job_name'] !== 'apply_update') {
+            $applyService = $this->backgroundUpdateApplyService
+                ?? new \App\Services\BackgroundUpdateApplyService($this->updateService);
+            $job = $applyService->getJobStatus((int) $this->resolveId($id));
+            if (!$job) {
                 return Response::notFound('Update job not found');
             }
             return Response::success($job);
@@ -236,6 +242,27 @@ class UpdateController extends Controller
         $user = $this->authService->user();
         $body  = $this->getBody();
         $force = isset($body['force']) && filter_var($body['force'], FILTER_VALIDATE_BOOLEAN);
+
+        $rawBackground = $body['background'] ?? ($_GET['background'] ?? null);
+        $isBackground = false;
+        if ($rawBackground !== null) {
+            $parsed = filter_var($rawBackground, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($parsed === null) {
+                return Response::error('قيمة معامل background غير صالحة.', 400);
+            }
+            $isBackground = $parsed;
+        }
+
+        if ($isBackground) {
+            $applyService = $this->backgroundUpdateApplyService
+                ?? new \App\Services\BackgroundUpdateApplyService($this->updateService);
+            $schedResult = $applyService->scheduleApply($force, $this->hasDesktopHandoffCapability($body), $user['id'] ?? null);
+            if (!$schedResult['ok']) {
+                $code = $schedResult['code'] ?? 500;
+                return Response::error($schedResult['error'] ?? 'فشل جدولة التحديث.', $code, $schedResult);
+            }
+            return Response::success($schedResult, $schedResult['message'] ?? 'تمت جدولة تطبيق التحديث في الخلفية');
+        }
 
         $startTime = microtime(true);
         Logger::info('Admin update apply initiated', [

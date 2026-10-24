@@ -1,17 +1,26 @@
 import { useEffect } from 'react'
-import useChannelTransition, { transitionReason } from '../../hooks/useChannelTransition'
+import useChannelTransition, { transitionReason, type TransitionPhase } from '../../hooks/useChannelTransition'
 
 interface Props {
   channel: ActiveUpdateChannel
   installedVersion: string
   installedChannel: ActiveUpdateChannel | 'retired'
   disabled: boolean
-  onBusy: (busy: boolean) => void
+  onBusy: (busy: boolean, phase?: TransitionPhase) => void
+  autoPreview?: boolean
 }
 
-export default function ChannelTransitionPanel({ channel, installedVersion, installedChannel, disabled, onBusy }: Props) {
-  const transition = useChannelTransition(channel)
-  useEffect(() => { onBusy(transition.busy) }, [onBusy, transition.busy])
+export default function ChannelTransitionPanel({
+  channel,
+  installedVersion,
+  installedChannel,
+  disabled,
+  onBusy,
+  autoPreview,
+}: Props) {
+  const shouldAutoPreview = autoPreview ?? (channel !== installedChannel)
+  const transition = useChannelTransition(channel, { autoPreview: shouldAutoPreview })
+  useEffect(() => { onBusy(transition.busy, transition.phase) }, [onBusy, transition.busy, transition.phase])
   const preview = transition.preview
   return (
     <div data-testid="channel-transition" style={{ border: '1px solid var(--border)', borderRadius: 12, padding: '1rem', display: 'grid', gap: '.75rem' }} aria-busy={transition.busy || transition.checking}>

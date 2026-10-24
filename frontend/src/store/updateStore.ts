@@ -1,20 +1,11 @@
 import { create } from 'zustand'
-import { checkUpdate } from '../api/endpoints'
+import { checkUpdate, getUpdateStatus } from '../api/endpoints'
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
   try {
     return Boolean((await window.posRuntime?.getDeltaCapability?.())?.capable)
   } catch {
     return false
-  }
-}
-
-async function getInstalledElectronVersion(): Promise<string | null> {
-  try {
-    if (!window.electronAPI?.getVersion) return null
-    return (await window.electronAPI.getVersion()) || null
-  } catch {
-    return null
   }
 }
 
@@ -41,6 +32,8 @@ interface UpdateState {
   hasUpdate: boolean;
   latestVersion: string | null;
   currentVersion: string | null;
+  channel: 'stable' | 'beta' | null;
+  installedChannel: 'stable' | 'beta' | 'retired' | null;
   changelog: UpdateCheckResult['changelog'];
   lastChecked: number | null;
   isChecking: boolean;
@@ -51,13 +44,19 @@ interface UpdateState {
   updateErrorMessage: string;
   silentCheck: () => Promise<void>;
   forceCheck: () => Promise<UpdateCheckResult | undefined>;
+  hydrateLocalStatus: (force?: boolean) => Promise<UpdateStatusData | null>;
+  setChannelState: (channel: 'stable' | 'beta') => void;
+  invalidate: () => void;
 }
 
 let activeSilentPromise: Promise<void> | null = null
 let activeManualPromise: Promise<UpdateCheckResult | undefined> | null = null
+let activeHydratePromise: Promise<UpdateStatusData | null> | null = null
 
-let globalGeneration = 0
-let latestManualGeneration = 0
+let channelGeneration = 0
+let manualGeneration = 0
+let hydrateGeneration = 0
+let authoritativeGeneration = 0
 
 let lastSuccessCheckTime = 0
 let lastFailureOrPendingTime = 0
@@ -71,6 +70,8 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
   hasUpdate: false,
   latestVersion: null,
   currentVersion: null,
+  channel: null,
+  installedChannel: null,
   changelog: [],
   lastChecked: null,
   isChecking: false,
@@ -79,6 +80,94 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
   updatesDisabledMessage: '',
   updatesUnreachable: false,
   updateErrorMessage: '',
+
+  setChannelState: (channel: 'stable' | 'beta') => {
+    channelGeneration++
+    activeSilentPromise = null
+    activeManualPromise = null
+    activeHydratePromise = null
+    lastSuccessCheckTime = 0
+    lastFailureOrPendingTime = 0
+    set({
+      channel,
+      hasUpdate: false,
+      latestVersion: null,
+      changelog: [],
+      updatesUnreachable: false,
+      updateErrorMessage: '',
+      isChecking: false,
+      isPending: false,
+      lastChecked: null,
+    })
+  },
+
+  invalidate: () => {
+    channelGeneration++
+    activeSilentPromise = null
+    activeManualPromise = null
+    activeHydratePromise = null
+    lastSuccessCheckTime = 0
+    lastFailureOrPendingTime = 0
+    set({
+      hasUpdate: false,
+      latestVersion: null,
+      changelog: [],
+      updatesUnreachable: false,
+      updateErrorMessage: '',
+      isChecking: false,
+      isPending: false,
+      lastChecked: null,
+    })
+  },
+
+  hydrateLocalStatus: (force = false): Promise<UpdateStatusData | null> => {
+    if (activeHydratePromise && !force) {
+      return activeHydratePromise
+    }
+
+    const currentChannelGen = channelGeneration
+    const currentHydrateGen = ++hydrateGeneration
+    const startAuthGen = authoritativeGeneration
+    const isCurrent = () => currentChannelGen === channelGeneration && currentHydrateGen === hydrateGeneration
+
+    const runHydrate = async (): Promise<UpdateStatusData | null> => {
+      try {
+        const deltaCapable = await hasDeltaHandoffCapability()
+        if (!isCurrent()) return null
+
+        const res = await getUpdateStatus(deltaCapable, { hideGlobalError: true })
+        if (!isCurrent()) return null
+
+        const data = res.data?.data
+        if (data && typeof data === 'object') {
+          const rawVersion = typeof data.current_version === 'string' ? data.current_version.trim() : null
+          const validVersion = rawVersion || null
+          const validChannel = (data.channel === 'stable' || data.channel === 'beta') ? data.channel : null
+          const validInstalledChannel = (data.installed_channel === 'stable' || data.installed_channel === 'beta' || data.installed_channel === 'retired')
+            ? data.installed_channel
+            : null
+
+          set((state) => ({
+            currentVersion: (authoritativeGeneration > startAuthGen) ? state.currentVersion : (validVersion || state.currentVersion),
+            channel: validChannel || state.channel,
+            installedChannel: validInstalledChannel || state.installedChannel,
+          }))
+          return data
+        }
+        return null
+      } catch {
+        return null
+      } finally {
+        if (activeHydratePromise === currentPromise) {
+          activeHydratePromise = null
+        }
+      }
+    }
+
+    const currentPromise = runHydrate()
+    activeHydratePromise = currentPromise
+    return currentPromise
+  },
 
   silentCheck: async () => {
     // If a manual check is currently in flight, quietly join it; never compete or queue against it
@@ -104,23 +193,35 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
       return activeSilentPromise
     }
 
-    const generation = ++globalGeneration
+    const currentChannelGen = channelGeneration
+    const currentManualGen = manualGeneration
+    const isCurrent = () => currentChannelGen === channelGeneration && currentManualGen === manualGeneration
 
     const runSilent = async () => {
+      if (!isCurrent()) return
       set({ isChecking: true, updatesUnreachable: false, updateErrorMessage: '' })
+
       try {
         const deltaCapable = await hasDeltaHandoffCapability()
-        if (latestManualGeneration > generation) return
+        if (!isCurrent()) return
 
         const res = await checkUpdate(deltaCapable, { hideGlobalError: true, params: { background: true } })
+        if (!isCurrent()) return
         let data = res.data?.data
 
-        if (latestManualGeneration > generation) return
+        // Consume valid local current_version immediately without waiting 30s
+        if (typeof data?.current_version === 'string' && data.current_version.trim()) {
+          const ver = data.current_version.trim()
+          set((state) => ({
+            currentVersion: ver || state.currentVersion,
+          }))
+        }
 
         if (data?.updates_disabled) {
-          if (latestManualGeneration > generation) return
+          if (!isCurrent()) return
           const nowDisabled = Date.now()
           lastSuccessCheckTime = nowDisabled
+          authoritativeGeneration++
           set({
             updatesDisabled: true,
             updatesDisabledMessage: data?.message || 'خادم التحديثات غير مهيأ.',
@@ -132,17 +233,23 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
         // Bounded polling if background check is pending
         if (data?.pending || data?.status === 'check_pending') {
+          if (!isCurrent()) return
           set({ isPending: true })
           const startTime = Date.now()
 
           while ((Date.now() - startTime) < MAX_POLL_DURATION_MS) {
             await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
-            if (latestManualGeneration > generation) return
+            if (!isCurrent()) return
 
             try {
               const pollRes = await checkUpdate(deltaCapable, { hideGlobalError: true, params: { background: true } })
+              if (!isCurrent()) return
               const pollData = pollRes.data?.data
-              if (latestManualGeneration > generation) return
+
+              if (typeof pollData?.current_version === 'string' && pollData.current_version.trim()) {
+                const ver = pollData.current_version.trim()
+                set((state) => ({ currentVersion: ver || state.currentVersion }))
+              }
 
               if (pollData && !pollData.pending && pollData.status !== 'check_pending') {
                 data = pollData
@@ -154,12 +261,14 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
           }
         }
 
-        if (latestManualGeneration > generation) return
+        if (!isCurrent()) return
 
         // If still pending after bounded polling (worker not running or still busy)
         if (data?.pending || data?.status === 'check_pending') {
-          const localVersion = (await getInstalledElectronVersion()) || get().currentVersion
-          if (latestManualGeneration > generation) return
+          const localVersion = (typeof data?.current_version === 'string' && data.current_version.trim())
+            ? data.current_version.trim()
+            : (get().currentVersion || null)
+          if (!isCurrent()) return
           lastFailureOrPendingTime = Date.now()
 
           set({
@@ -171,8 +280,10 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
         // If unreachable or explicit failure reported
         if (data?.updates_unreachable) {
-          const localVersion = (await getInstalledElectronVersion()) || get().currentVersion
-          if (latestManualGeneration > generation) return
+          const localVersion = (typeof data?.current_version === 'string' && data.current_version.trim())
+            ? data.current_version.trim()
+            : (get().currentVersion || null)
+          if (!isCurrent()) return
           lastFailureOrPendingTime = Date.now()
 
           set({
@@ -186,8 +297,11 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
         // Runtime guard: validate complete settled result structure
         if (!isValidSettledResult(data)) {
-          const localVersion = (await getInstalledElectronVersion()) || get().currentVersion
-          if (latestManualGeneration > generation) return
+          const rawVersion = typeof (data as Record<string, unknown> | null | undefined)?.current_version === 'string'
+            ? ((data as Record<string, unknown>).current_version as string).trim()
+            : null
+          const localVersion = rawVersion || get().currentVersion || null
+          if (!isCurrent()) return
           lastFailureOrPendingTime = Date.now()
 
           set({
@@ -199,11 +313,14 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
           return
         }
 
-        // Settled success: gather fallback version before timestamp and state update
-        const localVersion = data.current_version || (await getInstalledElectronVersion()) || get().currentVersion
-        if (latestManualGeneration > generation) return
+        // Settled success
+        const localVersion = (typeof data.current_version === 'string' && data.current_version.trim())
+          ? data.current_version.trim()
+          : (get().currentVersion || null)
+        if (!isCurrent()) return
         const nowSuccess = Date.now()
         lastSuccessCheckTime = nowSuccess
+        authoritativeGeneration++
 
         set({
           hasUpdate: Boolean(data.has_update),
@@ -218,28 +335,33 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
           updateErrorMessage: '',
         })
       } catch {
-        const localVersion = (await getInstalledElectronVersion()) || get().currentVersion
-        if (latestManualGeneration <= generation) {
-          lastFailureOrPendingTime = Date.now()
-          set({
-            currentVersion: localVersion,
-            isPending: false,
-            updatesUnreachable: true,
-            updateErrorMessage: 'تعذر الاتصال بخادم التحديثات. تحقق من الاتصال أو إعدادات الخادم.'
-          })
-        }
+        if (!isCurrent()) return
+        const localVersion = get().currentVersion || null
+        lastFailureOrPendingTime = Date.now()
+        set({
+          currentVersion: localVersion,
+          isPending: false,
+          updatesUnreachable: true,
+          updateErrorMessage: 'تعذر الاتصال بخادم التحديثات. تحقق من الاتصال أو إعدادات الخادم.'
+        })
       } finally {
-        if (latestManualGeneration <= generation) {
+        if (isCurrent()) {
           set({ isChecking: false })
+        }
+        if (activeSilentPromise === currentPromise) {
+          activeSilentPromise = null
         }
       }
     }
 
-    activeSilentPromise = runSilent()
+    const currentPromise = runSilent()
+    activeSilentPromise = currentPromise
     try {
       await activeSilentPromise
     } finally {
-      activeSilentPromise = null
+      if (activeSilentPromise === currentPromise) {
+        activeSilentPromise = null
+      }
     }
   },
 
@@ -248,23 +370,34 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
       return activeManualPromise
     }
 
-    const generation = ++globalGeneration
-    latestManualGeneration = generation
+    const currentChannelGen = channelGeneration
+    const currentManualGen = ++manualGeneration
 
     const runManual = async () => {
+      const isCurrent = () => currentChannelGen === channelGeneration && currentManualGen === manualGeneration
+      if (!isCurrent()) return undefined
+
       set({ isChecking: true, updatesUnreachable: false, updateErrorMessage: '' })
       try {
         const deltaCapable = await hasDeltaHandoffCapability()
+        if (!isCurrent()) return undefined
+
         const res = await checkUpdate(deltaCapable, { hideGlobalError: true })
+        if (!isCurrent()) return undefined
         const data = res.data?.data
 
-        const localVersion = data?.current_version || (await getInstalledElectronVersion()) || null
+        const localVersion = (typeof data?.current_version === 'string' && data.current_version.trim())
+          ? data.current_version.trim()
+          : (get().currentVersion || null)
         const isValid = isValidSettledResult(data)
         const isUnreachable = Boolean(data?.updates_unreachable) || !isValid
         const nowAttempt = Date.now()
 
+        if (!isCurrent()) return undefined
+
         if (!isUnreachable && isValid) {
           lastSuccessCheckTime = nowAttempt
+          authoritativeGeneration++
         } else {
           lastFailureOrPendingTime = nowAttempt
         }
@@ -284,25 +417,33 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
         set(stateUpdate)
         return { ...data, current_version: localVersion }
       } catch (err) {
-        const localVersion = (await getInstalledElectronVersion()) || get().currentVersion
+        if (!isCurrent()) return undefined
         lastFailureOrPendingTime = Date.now()
         set({
-          currentVersion: localVersion,
+          currentVersion: get().currentVersion || null,
           isPending: false,
           updatesUnreachable: true,
           updateErrorMessage: 'تعذر الاتصال بخادم التحديثات. تحقق من الاتصال أو إعدادات الخادم.'
         })
         throw err
       } finally {
-        set({ isChecking: false })
+        if (isCurrent()) {
+          set({ isChecking: false })
+        }
+        if (activeManualPromise === currentPromise) {
+          activeManualPromise = null
+        }
       }
     }
 
-    activeManualPromise = runManual()
+    const currentPromise = runManual()
+    activeManualPromise = currentPromise
     try {
-      return await activeManualPromise
+      return await currentPromise
     } finally {
-      activeManualPromise = null
+      if (activeManualPromise === currentPromise) {
+        activeManualPromise = null
+      }
     }
   }
 }))

@@ -943,7 +943,7 @@ class UpdateService
      *
      * @return array ['ok' => bool, 'data' => array|null, 'error' => string|null, 'code' => int]
      */
-    public function applyUpdate(bool $force, bool $deltaCapable = true): array
+    public function applyUpdate(bool $force, bool $deltaCapable = true, ?string $operationId = null): array
     {
         $lock = new UpdateOperationLock($this->deltaUpdateService->getStorageDir());
         $state = $this->deltaUpdateService->getUpdateState();
@@ -969,10 +969,18 @@ class UpdateService
                 set_time_limit(1200);
             }
             $lock->heartbeat('starting');
-            $this->deltaUpdateService->setUpdateState('applying', [
+
+            $stateContext = [
                 'operation' => 'backend_delta_apply',
                 'owner_id' => $lease['owner_id'],
-            ]);
+            ];
+            if ($operationId !== null && $operationId !== '') {
+                $stateContext['operation_id'] = $operationId;
+            } else {
+                // Clear for synchronous / non-background operations
+                $stateContext['operation_id'] = null;
+            }
+            $this->deltaUpdateService->setUpdateState('applying', $stateContext);
 
             $result = $this->applyUpdateUnlocked($force, $deltaCapable);
             if (!$result['ok']) {
@@ -983,11 +991,15 @@ class UpdateService
                     'database_recovery_failed',
                     'backup_failed',
                 ], true)) {
-                    $this->deltaUpdateService->setUpdateState('failed', [
+                    $failureContext = [
                         'error' => $result['error'] ?? 'Update operation failed.',
                         'operation' => 'backend_delta_apply',
                         'owner_id' => $lease['owner_id'],
-                    ]);
+                    ];
+                    if ($operationId !== null && $operationId !== '') {
+                        $failureContext['operation_id'] = $operationId;
+                    }
+                    $this->deltaUpdateService->setUpdateState('failed', $failureContext);
                 }
             }
             return $result;
