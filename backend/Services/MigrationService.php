@@ -73,7 +73,13 @@ class MigrationService {
 
         // ── Smart skip: لا حاجة للتنفيذ إذا لم تتغير الملفات ──
         if (!$force && $this->isUpToDate()) {
-            $this->reconcileLegacyArtifacts();
+            $reconciliationErrors = $this->reconcileLegacyArtifacts();
+            if (!empty($reconciliationErrors)) {
+                if (is_file($this->flagFile)) {
+                    @unlink($this->flagFile);
+                }
+                return ['executed' => 0, 'errors' => $reconciliationErrors, 'skipped' => true];
+            }
             return ['executed' => 0, 'errors' => [], 'skipped' => true];
         }
 
@@ -542,6 +548,19 @@ class MigrationService {
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     ");
 
+                    $currentUser = null;
+                    try {
+                        $userVal = $this->db->query("SELECT CURRENT_USER()")->fetchColumn();
+                        if ($userVal !== false && is_string($userVal) && trim($userVal) !== '') {
+                            $currentUser = trim($userVal);
+                        }
+                    } catch (\Throwable) {}
+
+                    if ($currentUser === null || $currentUser === '') {
+                        $errors[] = "Failed to reconcile legacy triggers: unable to determine current privileged database user.";
+                        return $errors;
+                    }
+
                     $stmt = $this->db->query("
                         SELECT TRIGGER_NAME, DEFINER
                         FROM information_schema.TRIGGERS
@@ -577,11 +596,6 @@ class MigrationService {
                         ",
                     ];
 
-                    $currentUser = '';
-                    try {
-                        $currentUser = (string)$this->db->query("SELECT CURRENT_USER()")->fetchColumn();
-                    } catch (\Throwable) {}
-
                     $triggersToRebuild = [];
                     foreach (array_keys($requiredTriggers) as $triggerName) {
                         if ($forceRebuild || !isset($existingTriggers[$triggerName])) {
@@ -591,12 +605,9 @@ class MigrationService {
 
                         $definer = $existingTriggers[$triggerName];
 
-                        // Rebuild if definer points to localhost (breaks in MariaDB under --skip-name-resolve)
-                        // or if definer is orphaned/not aligned with valid runtime/migration accounts.
-                        if (
-                            str_contains($definer, 'localhost')
-                            || ($currentUser !== '' && !str_starts_with($definer, 'pos_migration@') && !str_starts_with($definer, 'pos_app@') && $definer !== $currentUser)
-                        ) {
+                        // Align owned trigger definer to EXACT CURRENT_USER() of privileged migration connection.
+                        // Do not use prefix allowlisting or blanket localhost heuristics.
+                        if ($definer !== $currentUser) {
                             $triggersToRebuild[] = $triggerName;
                         }
                     }
@@ -604,7 +615,29 @@ class MigrationService {
                     foreach ($triggersToRebuild as $triggerName) {
                         $this->db->exec("DROP TRIGGER IF EXISTS `{$triggerName}`");
                         $this->db->exec(trim($requiredTriggers[$triggerName]));
-                        Logger::info("Reconciled catalog trigger: {$triggerName} (recreated with valid definer)");
+                        Logger::info("Reconciled catalog trigger: {$triggerName} (recreated with definer {$currentUser})");
+                    }
+
+                    if (!empty($triggersToRebuild)) {
+                        $verifyStmt = $this->db->query("
+                            SELECT TRIGGER_NAME, DEFINER
+                            FROM information_schema.TRIGGERS
+                            WHERE TRIGGER_SCHEMA = DATABASE()
+                              AND EVENT_OBJECT_TABLE = 'products'
+                              AND TRIGGER_NAME IN ('trg_products_catalog_insert', 'trg_products_catalog_update', 'trg_products_catalog_delete')
+                        ");
+                        $verifiedTriggers = [];
+                        while ($vRow = $verifyStmt->fetch(PDO::FETCH_ASSOC)) {
+                            $verifiedTriggers[$vRow['TRIGGER_NAME']] = (string)($vRow['DEFINER'] ?? '');
+                        }
+
+                        foreach ($triggersToRebuild as $triggerName) {
+                            if (!isset($verifiedTriggers[$triggerName])) {
+                                $errors[] = "Failed to verify catalog trigger {$triggerName}: trigger was not created.";
+                            } elseif ($verifiedTriggers[$triggerName] !== $currentUser) {
+                                $errors[] = "Failed to verify catalog trigger {$triggerName}: definer mismatch after rebuild (expected {$currentUser}, got {$verifiedTriggers[$triggerName]}).";
+                            }
+                        }
                     }
                 }
             } catch (\Throwable $e) {

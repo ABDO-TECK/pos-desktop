@@ -57,12 +57,11 @@ class ProductService implements ProductServiceInterface
             $extrasToCheck[] = $data['box_barcode'];
         }
 
-        $bypassedTriggers = false;
         try {
             $id = $this->persistProductCreation($data, $main, $isAutoBarcode, $extras, $extrasToCheck);
         } catch (Throwable $e) {
             if ($this->isTriggerDefinerOrPrivilegeError($e)) {
-                Logger::warning('[ProductService] Trigger error on createProduct, attempting self-healing...', [
+                Logger::warning('[ProductService] Trigger definer or privilege error on createProduct, attempting repair if privileged CLI context is available...', [
                     'message' => $e->getMessage(),
                 ]);
 
@@ -70,23 +69,7 @@ class ProductService implements ProductServiceInterface
                     try {
                         $id = $this->persistProductCreation($data, $main, $isAutoBarcode, $extras, $extrasToCheck);
                     } catch (Throwable $retryErr) {
-                        if ($this->isTriggerDefinerOrPrivilegeError($retryErr) && $this->emergencyBypassCatalogTriggers()) {
-                            $bypassedTriggers = true;
-                            try {
-                                $id = $this->persistProductCreation($data, $main, $isAutoBarcode, $extras, $extrasToCheck);
-                            } catch (Throwable $fallbackErr) {
-                                $e = $fallbackErr;
-                            }
-                        } else {
-                            $e = $retryErr;
-                        }
-                    }
-                } elseif ($this->emergencyBypassCatalogTriggers()) {
-                    $bypassedTriggers = true;
-                    try {
-                        $id = $this->persistProductCreation($data, $main, $isAutoBarcode, $extras, $extrasToCheck);
-                    } catch (Throwable $fallbackErr) {
-                        $e = $fallbackErr;
+                        $e = $retryErr;
                     }
                 }
             }
@@ -101,6 +84,15 @@ class ProductService implements ProductServiceInterface
                     'units_per_box' => $data['units_per_box'] ?? null,
                 ];
                 Logger::error('فشل إضافة المنتج', Logger::exceptionContext($e, $sanitizedPayload));
+
+                if ($this->isTriggerDefinerOrPrivilegeError($e)) {
+                    return [
+                        'ok' => false,
+                        'error' => 'قاعدة البيانات بحاجة إلى صيانة مشغلات الفهرس عبر بدء التشغيل بصلاحيات الهجرة. يرجى إعادة تشغيل التطبيق لإعادة بناء المشغلات.',
+                        'code' => 503,
+                        'reason_code' => 'catalog_trigger_repair_required',
+                    ];
+                }
 
                 // 2. Intelligent error categorization
                 $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
@@ -130,11 +122,6 @@ class ProductService implements ProductServiceInterface
                     return ['ok' => false, 'error' => 'جدول مفقود في قاعدة البيانات. يرجى تشغيل التحديثات.', 'code' => 503];
                 }
 
-                // Trigger DEFINER error (MySQL 1449 / 1142)
-                if ($driverCode === 1449 || $driverCode === 1142 || str_contains($msg, 'definer')) {
-                    return ['ok' => false, 'error' => 'خطأ في صلاحيات مشغلات قاعدة البيانات (Trigger Definer). يرجى تحديث النظام لإعادة بناء المشغلات.', 'code' => 500];
-                }
-
                 // Invalid numeric / decimal format (MySQL 1366 / 1265 / SQLSTATE 22007)
                 if ($driverCode === 1366 || $driverCode === 1265 || $sqlState === '22007') {
                     return ['ok' => false, 'error' => 'قيمة عددية غير صالحة تم إدخالها في حقول المنتج (الكمية أو التكلفة أو السعر).', 'code' => 422];
@@ -147,10 +134,6 @@ class ProductService implements ProductServiceInterface
 
                 return ['ok' => false, 'error' => 'تعذر إنشاء المنتج في قاعدة البيانات. يرجى مراجعة سجلات الخادم.', 'code' => 500];
             }
-        }
-
-        if ($bypassedTriggers && isset($id)) {
-            $this->recordCatalogChangeDirectly((int)($data['branch_id'] ?? \App\Services\AuthService::getGlobalBranchId()), $id);
         }
 
         return ['ok' => true, 'product' => $this->productRepo->findById($id)];
@@ -252,13 +235,12 @@ class ProductService implements ProductServiceInterface
         if (!empty($data['box_barcode'])) {
             $extrasToCheck[] = $data['box_barcode'];
         }
-        $bypassedTriggers = false;
         try {
             $this->persistProductUpdate($id, $data, $main, $extras, $extrasToCheck, $actorId, $product);
             $updateOk = true;
         } catch (Throwable $e) {
             if ($this->isTriggerDefinerOrPrivilegeError($e)) {
-                Logger::warning('[ProductService] Trigger error on updateProduct, attempting self-healing...', [
+                Logger::warning('[ProductService] Trigger definer or privilege error on updateProduct, attempting repair if privileged CLI context is available...', [
                     'message' => $e->getMessage(),
                 ]);
 
@@ -267,25 +249,7 @@ class ProductService implements ProductServiceInterface
                         $this->persistProductUpdate($id, $data, $main, $extras, $extrasToCheck, $actorId, $product);
                         $updateOk = true;
                     } catch (Throwable $retryErr) {
-                        if ($this->isTriggerDefinerOrPrivilegeError($retryErr) && $this->emergencyBypassCatalogTriggers()) {
-                            $bypassedTriggers = true;
-                            try {
-                                $this->persistProductUpdate($id, $data, $main, $extras, $extrasToCheck, $actorId, $product);
-                                $updateOk = true;
-                            } catch (Throwable $fallbackErr) {
-                                $e = $fallbackErr;
-                            }
-                        } else {
-                            $e = $retryErr;
-                        }
-                    }
-                } elseif ($this->emergencyBypassCatalogTriggers()) {
-                    $bypassedTriggers = true;
-                    try {
-                        $this->persistProductUpdate($id, $data, $main, $extras, $extrasToCheck, $actorId, $product);
-                        $updateOk = true;
-                    } catch (Throwable $fallbackErr) {
-                        $e = $fallbackErr;
+                        $e = $retryErr;
                     }
                 }
             }
@@ -299,6 +263,15 @@ class ProductService implements ProductServiceInterface
                     'unit_type'     => $data['unit_type'] ?? null,
                 ];
                 Logger::error('فشل تحديث المنتج', Logger::exceptionContext($e, $sanitizedPayload));
+
+                if ($this->isTriggerDefinerOrPrivilegeError($e)) {
+                    return [
+                        'ok' => false,
+                        'error' => 'قاعدة البيانات بحاجة إلى صيانة مشغلات الفهرس عبر بدء التشغيل بصلاحيات الهجرة. يرجى إعادة تشغيل التطبيق لإعادة بناء المشغلات.',
+                        'code' => 503,
+                        'reason_code' => 'catalog_trigger_repair_required',
+                    ];
+                }
 
                 $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
                 $sqlState   = ($e instanceof PDOException && isset($e->errorInfo[0])) ? (string)$e->errorInfo[0] : (string)$e->getCode();
@@ -316,9 +289,6 @@ class ProductService implements ProductServiceInterface
                 if ($driverCode === 1146 || $sqlState === '42S02') {
                     return ['ok' => false, 'error' => 'جدول مفقود في قاعدة البيانات. يرجى تشغيل التحديثات.', 'code' => 503];
                 }
-                if ($driverCode === 1449 || $driverCode === 1142 || str_contains($msg, 'definer')) {
-                    return ['ok' => false, 'error' => 'خطأ في صلاحيات مشغلات قاعدة البيانات (Trigger Definer). يرجى تحديث النظام لإعادة بناء المشغلات.', 'code' => 500];
-                }
                 if ($driverCode === 1366 || $driverCode === 1265 || $sqlState === '22007') {
                     return ['ok' => false, 'error' => 'قيمة عددية غير صالحة تم إدخالها في حقول المنتج (الكمية أو التكلفة أو السعر).', 'code' => 422];
                 }
@@ -327,10 +297,6 @@ class ProductService implements ProductServiceInterface
                 }
                 return ['ok' => false, 'error' => 'تعذر تحديث المنتج. حاول مرة أخرى.', 'code' => 500];
             }
-        }
-
-        if ($bypassedTriggers) {
-            $this->recordCatalogChangeDirectly((int)($product['branch_id'] ?? \App\Services\AuthService::getGlobalBranchId()), $id);
         }
 
         return ['ok' => true, 'product' => $this->productRepo->findById($id)];
@@ -533,13 +499,12 @@ class ProductService implements ProductServiceInterface
             ];
         }
 
-        $bypassedTriggers = false;
         try {
             $this->persistProductDeletion($id, $actorId, $product);
             $deleteOk = true;
         } catch (Throwable $e) {
             if ($this->isTriggerDefinerOrPrivilegeError($e)) {
-                Logger::warning('[ProductService] Trigger error on deleteProduct, attempting self-healing...', [
+                Logger::warning('[ProductService] Trigger definer or privilege error on deleteProduct, attempting repair if privileged CLI context is available...', [
                     'message' => $e->getMessage(),
                 ]);
 
@@ -548,40 +513,27 @@ class ProductService implements ProductServiceInterface
                         $this->persistProductDeletion($id, $actorId, $product);
                         $deleteOk = true;
                     } catch (Throwable $retryErr) {
-                        if ($this->isTriggerDefinerOrPrivilegeError($retryErr) && $this->emergencyBypassCatalogTriggers()) {
-                            $bypassedTriggers = true;
-                            try {
-                                $this->persistProductDeletion($id, $actorId, $product);
-                                $deleteOk = true;
-                            } catch (Throwable $fallbackErr) {
-                                $e = $fallbackErr;
-                            }
-                        } else {
-                            $e = $retryErr;
-                        }
-                    }
-                } elseif ($this->emergencyBypassCatalogTriggers()) {
-                    $bypassedTriggers = true;
-                    try {
-                        $this->persistProductDeletion($id, $actorId, $product);
-                        $deleteOk = true;
-                    } catch (Throwable $fallbackErr) {
-                        $e = $fallbackErr;
+                        $e = $retryErr;
                     }
                 }
             }
 
             if (!isset($deleteOk)) {
+                if ($this->isTriggerDefinerOrPrivilegeError($e)) {
+                    Logger::error('فشل حذف المنتج بسبب صلاحيات المشغلات', \App\Helpers\Logger::exceptionContext($e));
+                    return [
+                        'ok' => false,
+                        'error' => 'قاعدة البيانات بحاجة إلى صيانة مشغلات الفهرس عبر بدء التشغيل بصلاحيات الهجرة. يرجى إعادة تشغيل التطبيق لإعادة بناء المشغلات.',
+                        'code' => 503,
+                        'reason_code' => 'catalog_trigger_repair_required',
+                    ];
+                }
                 if ($e instanceof PDOException && ($e->getCode() === '23000' || str_contains($e->getMessage(), '1451'))) {
                     return ['ok' => false, 'error' => 'لا يمكن حذف المنتج لأنه مرتبط بسجلات أخرى في النظام.', 'code' => 409];
                 }
                 Logger::error('فشل حذف المنتج', \App\Helpers\Logger::exceptionContext($e));
                 return ['ok' => false, 'error' => 'فشل حذف المنتج', 'code' => 500];
             }
-        }
-
-        if ($bypassedTriggers) {
-            $this->recordCatalogChangeDirectly((int)($product['branch_id'] ?? \App\Services\AuthService::getGlobalBranchId()), $id);
         }
 
         return ['ok' => true];
@@ -774,78 +726,57 @@ class ProductService implements ProductServiceInterface
         $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
         $msg        = strtolower($e->getMessage());
 
-        return $driverCode === 1449
-            || $driverCode === 1142
-            || str_contains($msg, 'definer')
-            || str_contains($msg, 'trigger command denied')
+        if ($driverCode === 1449 || str_contains($msg, 'definer')) {
+            return true;
+        }
+
+        if ($driverCode === 1142) {
+            return str_contains($msg, 'trigger command denied')
+                || str_contains($msg, 'does not have the trigger privilege')
+                || (str_contains($msg, 'trigger') && (str_contains($msg, 'denied') || str_contains($msg, 'not exist')));
+        }
+
+        return str_contains($msg, 'trigger command denied')
             || str_contains($msg, 'does not have the trigger privilege')
             || (str_contains($msg, 'trigger') && (str_contains($msg, 'denied') || str_contains($msg, 'not exist')));
     }
 
     private function repairCatalogTriggers(): bool
     {
-        try {
-            $repairDb = null;
-            try {
-                $migUser = defined('DB_MIGRATION_USER') ? (string) DB_MIGRATION_USER : (string) (getenv('DB_MIGRATION_USER') ?: '');
-                if ($migUser !== '') {
-                    $repairDb = \App\Config\Database::getMigrationConnection();
-                } else {
-                    $repairDb = $this->db;
-                }
-            } catch (\Throwable) {
-                $repairDb = $this->db;
-            }
+        // Strictly CLI-only and explicitly configured privileged context.
+        // No HTTP DDL, no creating migration connections during HTTP.
+        if (php_sapi_name() !== 'cli') {
+            return false;
+        }
 
+        $migUser = defined('DB_MIGRATION_USER') ? trim((string) DB_MIGRATION_USER) : trim((string) (getenv('DB_MIGRATION_USER') ?: ''));
+        if ($migUser === '') {
+            return false;
+        }
+
+        try {
+            $driver = (string)$this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($driver !== 'mysql') {
+                return false;
+            }
+        } catch (\Throwable) {
+            return false;
+        }
+
+        try {
+            $repairDb = \App\Config\Database::getMigrationConnection();
             $migrationService = new MigrationService($repairDb);
             $errors = $migrationService->reconcileCatalogTriggers(true);
             if (empty($errors)) {
-                Logger::info('[ProductService] Successfully self-healed and rebuilt catalog triggers.');
+                Logger::info('[ProductService] Successfully self-healed and rebuilt catalog triggers in privileged CLI context.');
                 return true;
             }
+            Logger::warning('[ProductService] Privileged catalog trigger repair failed: ' . implode('; ', $errors));
         } catch (\Throwable $e) {
             Logger::warning('[ProductService] Catalog trigger self-healing failed: ' . $e->getMessage());
         }
 
         return false;
-    }
-
-    private function emergencyBypassCatalogTriggers(): bool
-    {
-        try {
-            $repairDb = null;
-            try {
-                $migUser = defined('DB_MIGRATION_USER') ? (string) DB_MIGRATION_USER : (string) (getenv('DB_MIGRATION_USER') ?: '');
-                if ($migUser !== '') {
-                    $repairDb = \App\Config\Database::getMigrationConnection();
-                } else {
-                    $repairDb = $this->db;
-                }
-            } catch (\Throwable) {
-                $repairDb = $this->db;
-            }
-
-            $repairDb->exec("DROP TRIGGER IF EXISTS trg_products_catalog_insert");
-            $repairDb->exec("DROP TRIGGER IF EXISTS trg_products_catalog_update");
-            $repairDb->exec("DROP TRIGGER IF EXISTS trg_products_catalog_delete");
-            Logger::warning('[ProductService] Emergency bypassed catalog triggers by dropping them to unblock product operations.');
-            return true;
-        } catch (\Throwable $e) {
-            Logger::error('[ProductService] Emergency trigger bypass failed: ' . $e->getMessage());
-            return false;
-        }
-    }
-
-    private function recordCatalogChangeDirectly(int $branchId, int $productId): void
-    {
-        try {
-            $stmt = $this->db->prepare(
-                'INSERT INTO product_catalog_changes (branch_id, product_id) VALUES (?, ?)'
-            );
-            $stmt->execute([$branchId, $productId]);
-        } catch (\Throwable $e) {
-            Logger::warning('[ProductService] Direct catalog change recording failed: ' . $e->getMessage());
-        }
     }
 
     public function getProductModel(): Product
