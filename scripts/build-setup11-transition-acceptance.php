@@ -349,6 +349,8 @@ final class Setup11TransitionAcceptanceHelper
 
         $deltaZipPath = $assetsDir . '/delta-0.0.11-to-0.0.12.zip';
         $genericDeltaZipPath = $assetsDir . '/delta.zip';
+        $versionedManifestPath = $assetsDir . '/manifest-0.0.11.json';
+        $versionedSigPath = $assetsDir . '/manifest-0.0.11.sig';
 
         // Refuse overwrites; do not unlink existing outputs
         if (file_exists($deltaZipPath)) {
@@ -359,6 +361,15 @@ final class Setup11TransitionAcceptanceHelper
         }
         if (file_exists($assetsDir . '/manifest.json')) {
             throw new RuntimeException("Manifest already exists in {$assetsDir}. Overwrites are refused.");
+        }
+        if (file_exists($versionedManifestPath)) {
+            throw new RuntimeException("Versioned manifest already exists in {$assetsDir}. Overwrites are refused.");
+        }
+        if (file_exists($assetsDir . '/manifest.sig')) {
+            throw new RuntimeException("Signature already exists in {$assetsDir}. Overwrites are refused.");
+        }
+        if (file_exists($versionedSigPath)) {
+            throw new RuntimeException("Versioned signature already exists in {$assetsDir}. Overwrites are refused.");
         }
 
         $zip = new ZipArchive();
@@ -409,14 +420,21 @@ final class Setup11TransitionAcceptanceHelper
 
         $manifestJson = json_encode($manifestData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
         file_put_contents($assetsDir . '/manifest.json', $manifestJson);
+        file_put_contents($versionedManifestPath, $manifestJson);
 
         $sigService = new ManifestSignatureService();
         $signature = $sigService->signData($manifestJson, $privateKey);
         file_put_contents($assetsDir . '/manifest.sig', $signature);
+        file_put_contents($versionedSigPath, $signature);
 
         $pubKeyPath = dirname(__DIR__) . '/backend/certs/update_public_key.pem';
         if (!$sigService->verifySignature($manifestJson, $signature, $pubKeyPath)) {
             throw new RuntimeException('Generated bootstrap manifest signature failed verification!');
+        }
+        $versionedManifestContent = (string)file_get_contents($versionedManifestPath);
+        $versionedSigContent = (string)file_get_contents($versionedSigPath);
+        if (!$sigService->verifySignature($versionedManifestContent, $versionedSigContent, $pubKeyPath)) {
+            throw new RuntimeException('Generated versioned bootstrap manifest signature failed verification!');
         }
 
         copy($candidateInventoryPath, $assetsDir . '/deployment-inventory.json');

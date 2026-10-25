@@ -11,7 +11,7 @@ class GitHubReleaseProvider extends IsolatedChannelProviderBase
     protected function executeCurlGet(string $url,array $headers=[],bool $followRedirects=false):array
     {
         $fixture=$this->fixture();$response=$fixture['responses'][$url]??null;
-        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['metadata_url'=>$url,'transport'=>'frozen_metadata'])."\n",FILE_APPEND|LOCK_EX);
+        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['metadata_url'=>$url,'transport'=>'frozen_metadata','pid'=>getmypid()])."\n",FILE_APPEND|LOCK_EX);
         if (!is_array($response)) throw new RuntimeException('Unexpected isolated discovery URL.');
         if (isset($response['http_code']) && (int)$response['http_code'] !== 200) {
             $code = (int)$response['http_code'];
@@ -30,15 +30,17 @@ class GitHubReleaseProvider extends IsolatedChannelProviderBase
     public function fetchAssetContent(string $url):array
     {
         $fixture=$this->fixture();$path=$fixture['assets'][$url]??null;
-        if (!is_string($path)||!is_file($path)) return ['ok'=>false,'error'=>'Isolated asset missing.'];
-        if (($fixture['mode']??'')==='corrupt_signature' && str_ends_with($path,'-delta.sig')) return ['ok'=>true,'content'=>'invalid fixture signature'];
-        return ['ok'=>true,'content'=>file_get_contents($path)];
+        if (!is_string($path)||!is_file($path)) return ['ok'=>false,'content'=>null,'error'=>'Isolated asset missing or forbidden URL.'];
+        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['asset'=>basename($url),'transport'=>'copied_signed_text','pid'=>getmypid()])."\n",FILE_APPEND|LOCK_EX);
+        if (($fixture['mode']??'')==='corrupt_signature' && str_ends_with($path,'-delta.sig')) return ['ok'=>true,'content'=>'invalid fixture signature','error'=>null];
+        return ['ok'=>true,'content'=>file_get_contents($path),'error'=>null];
     }
     public function downloadAssetFile(string $url,string $destPath):array
     {
         $fixture=$this->fixture();$source=$fixture['assets'][$url]??null;
-        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['asset'=>basename($url),'transport'=>'copied_signed_package'])."\n",FILE_APPEND|LOCK_EX);
-        if (!is_string($source)||!is_file($source)||!copy($source,$destPath)) return ['ok'=>false,'error'=>'Isolated package copy failed.'];
+        if (!is_string($source)||!is_file($source)) return ['ok'=>false,'error'=>'Isolated package missing or forbidden URL.'];
+        if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['asset'=>basename($url),'transport'=>'copied_signed_package','pid'=>getmypid()])."\n",FILE_APPEND|LOCK_EX);
+        if (!copy($source,$destPath)) return ['ok'=>false,'error'=>'Isolated package copy failed.'];
         return ['ok'=>true,'error'=>null];
     }
 }

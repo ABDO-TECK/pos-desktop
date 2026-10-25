@@ -593,7 +593,40 @@ async function waitForApplySlot(limiter='transition_apply'){
   history.push(Date.now());
 }
 
-const ui=createDesktopLab(application,evidence);
+// Setup ephemeral CI PHP ini scan directory for the Electron-owned background worker
+const canonicalTemp=fs.realpathSync(process.env.RUNNER_TEMP).toLowerCase()+path.sep;
+const canonicalLab=fs.realpathSync(lab).toLowerCase()+path.sep;
+assert.ok(canonicalLab.startsWith(canonicalTemp),'Lab must reside within RUNNER_TEMP boundary');
+assert.ok(!canonicalLab.startsWith(fs.realpathSync(application).toLowerCase()+path.sep),'Lab must not reside inside application root');
+assert.ok(!canonicalLab.startsWith(fs.realpathSync(evidence).toLowerCase()+path.sep),'Lab must not reside inside evidence directory');
+
+const phpIniDir=path.join(lab,'php-ini');
+fs.mkdirSync(phpIniDir,{recursive:true});
+const canonicalIniDir=fs.realpathSync(phpIniDir);
+assert.ok((canonicalIniDir.toLowerCase()+path.sep).startsWith(canonicalTemp),'php-ini dir must reside within RUNNER_TEMP boundary');
+
+// Canonical no-reparse guard: verify no symbolic link or reparse point exists in phpIniDir ancestors up to RUNNER_TEMP
+let iniCursor=canonicalIniDir;
+const tempRoot=fs.realpathSync(process.env.RUNNER_TEMP).toLowerCase();
+while(iniCursor&&iniCursor.toLowerCase()!==tempRoot&&iniCursor!==path.dirname(iniCursor)){
+  assert.equal(fs.lstatSync(iniCursor).isSymbolicLink(),false,'Reparse point / symlink rejected in php-ini path: '+iniCursor);
+  iniCursor=path.dirname(iniCursor);
+}
+
+const fixtureTransportPhp=path.resolve('scripts/fixtures/channel-transition-transport.php').replace(/\\/g,'/');
+assert.ok(fs.existsSync(fixtureTransportPhp),'Fixture transport script must exist: '+fixtureTransportPhp);
+fs.writeFileSync(path.join(phpIniDir,'fixture-transport.ini'),`auto_prepend_file = "${fixtureTransportPhp}"\n`,'utf8');
+
+const existingScan=process.env.PHP_INI_SCAN_DIR?`;${process.env.PHP_INI_SCAN_DIR}`:'';
+const phpIniScanDir=`${phpIniDir}${existingScan}`;
+
+const extraEnv={
+  PHP_INI_SCAN_DIR:phpIniScanDir,
+  POS_TRANSITION_FIXTURE:transportPath,
+  APP_DEPLOY_ROOT:root
+};
+
+const ui=createDesktopLab(application,evidence,extraEnv);
 let auth;
 let requestTransport;
 
