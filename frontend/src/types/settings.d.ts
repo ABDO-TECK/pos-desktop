@@ -127,6 +127,7 @@ declare global {
     status?: string;
     requires_desktop_handoff?: boolean;
     handoff_version?: string;
+    desktop_handoff_completed?: boolean;
   }
 
   interface UpdateHistoryRecord {

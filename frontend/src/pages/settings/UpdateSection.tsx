@@ -443,7 +443,10 @@ export default function UpdateSection() {
             setUpdateLogs(result.logs)
           }
 
-          if (result.requires_desktop_handoff && result.handoff_version) {
+          if (result.desktop_handoff_completed === true && result.requires_desktop_handoff === false) {
+            setHandoffMarker(activeJobId, 'done')
+            handoffStatusRef.current = 'done'
+          } else if (result.requires_desktop_handoff && result.handoff_version) {
             const currentMarker = getHandoffMarker(activeJobId)
             // Guard against skipped failed handoff or reattempting running handoff on status resume / remount
             if (currentMarker === 'running' || currentMarker === 'failed') {

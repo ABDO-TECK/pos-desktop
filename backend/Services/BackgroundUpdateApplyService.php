@@ -288,13 +288,65 @@ class BackgroundUpdateApplyService
                     $settlementError = !$isMatchingOperation ? 'unbound_operation' : (!$isMatchingJobId ? 'unbound_job_id' : 'missing_verified_result');
                 } else {
                     $payloadData = is_array($persistedResult['data'] ?? null) ? $persistedResult['data'] : [];
+                    // CRITICAL: Strip any nested desktop_handoff_completed claim before derivation
+                    unset($payloadData['desktop_handoff_completed']);
                     $payloadData['ok'] = true;
+
+                    // Bound native completion attestation
+                    $persistedRequiresHandoff = ($persistedResult['data']['requires_desktop_handoff'] ?? null) === true;
+                    $targetHandoffVersion = isset($payloadData['handoff_version']) && is_string($payloadData['handoff_version'])
+                        ? trim($payloadData['handoff_version'])
+                        : '';
+
+                    if ($persistedRequiresHandoff && $targetHandoffVersion !== '') {
+                        $stateErrorAbsent = !isset($state['error']) || $state['error'] === null || $state['error'] === '';
+                        $noRecoveryMarkers = empty($state['primary_error'])
+                            && empty($state['secondary_errors'])
+                            && empty($state['requires_recovery'])
+                            && empty($state['recovery_in_progress'])
+                            && empty($state['rollback'])
+                            && empty($state['rolled_back'])
+                            && empty($state['rollback_in_progress'])
+                            && empty($state['db_restore_error'])
+                            && empty($state['failed'])
+                            && (($state['reason_code'] ?? null) !== 'recovery_required');
+
+                        $stateToVersion = isset($state['to_version']) ? (string) $state['to_version'] : null;
+                        $stateTargetVersion = isset($state['target_version']) ? (string) $state['target_version'] : null;
+                        $hasConflictingTargets = ($stateToVersion !== null && $stateTargetVersion !== null && $stateToVersion !== $stateTargetVersion);
+
+                        $toVersionMatches = ($stateToVersion === null || $stateToVersion === $targetHandoffVersion);
+                        $targetVersionMatches = ($stateTargetVersion === null || $stateTargetVersion === $targetHandoffVersion);
+                        $hasTargetInState = ($stateToVersion !== null || $stateTargetVersion !== null);
+                        $targetsMatch = $toVersionMatches && $targetVersionMatches && $hasTargetInState && !$hasConflictingTargets;
+
+                        if (
+                            $isOwnedActiveOperation
+                            && is_array($state)
+                            && ($state['state'] ?? null) === 'completed'
+                            && ($state['operation'] ?? null) === 'electron_delta_install'
+                            && ($state['phase'] ?? null) === 'completed'
+                            && $stateErrorAbsent
+                            && $noRecoveryMarkers
+                            && $targetsMatch
+                        ) {
+                            $localVersionData = $this->updateService->getLocalVersion();
+                            $installedVersion = isset($localVersionData['version']) ? (string) $localVersionData['version'] : '';
+
+                            if ($installedVersion !== '' && $installedVersion === $targetHandoffVersion) {
+                                $payloadData['desktop_handoff_completed'] = true;
+                                $payloadData['requires_desktop_handoff'] = false;
+                            }
+                        }
+                    }
+
                     $resultData = $payloadData;
                 }
             } else {
                 // Legacy job: preserve old synchronous behavior
                 if (is_array($persistedResult) && ($persistedResult['ok'] ?? false) === true) {
                     $payloadData = is_array($persistedResult['data'] ?? null) ? $persistedResult['data'] : [];
+                    unset($payloadData['desktop_handoff_completed']);
                     $payloadData['ok'] = true;
                     $resultData = $payloadData;
                 }
@@ -315,6 +367,7 @@ class BackgroundUpdateApplyService
                 $failedData = is_array($jobData['result']['data'] ?? null) ? $jobData['result']['data'] : null;
                 if (is_array($failedData)) {
                     unset($failedData['ok']);
+                    unset($failedData['desktop_handoff_completed']);
                 }
                 $resultData = $failedData;
             }

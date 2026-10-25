@@ -310,6 +310,51 @@ export async function attachTransitionTransport({ui,application,storage,evidence
     },
     beforeApply(callback){assert.equal(beforeApplyResponse,null);beforeApplyResponse=callback;},
     onJobObservation(callback){jobObservationHook=callback;},
+    async readJobStatus(id){
+      assert.equal(repairContext,null,'readJobStatus requires repairContext to be null (installed production only)');
+      const expectedId=Number(id);
+      assert.ok(expectedId>0,'Invalid jobId for readJobStatus');
+      const destination=await ensureServer();
+      const headers=new Headers();
+      headers.set('origin','app://pos-app');
+      headers.set('cookie',cookieHeader());
+      if(signature)headers.set('x-xsrf-token',signature);
+      headers.set('accept-encoding','identity');
+      const response=await fetch(`${destination}/api/v1/update/jobs/${expectedId}`,{
+        method:'GET',
+        headers
+      });
+      assert.equal(response.status,200,`Expected status 200 reading job ${expectedId}, got ${response.status}`);
+      const rawText=await response.text();
+      const parsed=JSON.parse(rawText);
+      const data=parsed?.data??parsed;
+      assert.equal(Number(data?.id),expectedId,'Returned job id must match requested id');
+      assert.equal(data?.status,'completed','Job status must be completed');
+      assert.ok(data?.result&&typeof data.result==='object','Job result must be an object');
+      assert.equal(data.result.ok,true,'Job result.ok must be true');
+      assert.equal(data.result.desktop_handoff_completed,true,'desktop_handoff_completed must be true');
+      assert.equal(data.result.requires_desktop_handoff,false,'requires_desktop_handoff must be false');
+      fs.appendFileSync(
+        path.join(evidence,'transport-http.log'),
+        JSON.stringify({
+          time:new Date().toISOString(),
+          job_trace:{
+            id:data?.id??expectedId,
+            status:data?.status??null,
+            backend_source:'installed_application',
+            has_ok:data?.result?.ok===true,
+            desktop_handoff_completed:data?.result?.desktop_handoff_completed===true,
+            requires_desktop_handoff:data.result.requires_desktop_handoff,
+            path:`/api/v1/update/jobs/${expectedId}`,
+            status_code:response.status
+          }
+        })+'\n'
+      );
+      return {
+        ...parsed,
+        backendSource:'installed_application'
+      };
+    },
     async enableRepairBootstrap(verifiedContext){
       assert.ok(verifiedContext&&typeof verifiedContext==='object','verifiedContext is required');
       assert.ok(verifiedContext.candidate_phar_path,'verified candidate_phar_path required');

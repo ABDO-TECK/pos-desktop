@@ -74,6 +74,20 @@ class TestUpdateServiceDouble extends App\Services\UpdateService
         return $this->deltaMock ?? new App\Services\DeltaUpdateService(null, '', sys_get_temp_dir());
     }
 
+    public function getLocalVersion(): array
+    {
+        $rootDir = \App\Services\UpdateRuntimePaths::deployedRoot();
+        $file = str_replace('\\', '/', $rootDir) . '/version.json';
+        if (is_file($file)) {
+            $content = @file_get_contents($file);
+            $data = $content ? json_decode($content, true) : null;
+            if (is_array($data)) {
+                return $data;
+            }
+        }
+        return ['version' => '0.0.0', 'released_at' => null, 'changelog' => [], 'update_channel' => 'stable'];
+    }
+
     public function applyUpdate(bool $force, bool $deltaCapable = true, ?string $operationId = null): array
     {
         $this->applyCalled = true;
@@ -595,6 +609,307 @@ try {
         $statusH2 = $applyService->getJobStatus(515);
         verify($statusH2['result'] === null, "Legacy job with ok=false yields null result");
         verify(!$frontendAcceptsHandoff($statusH2, 515), "Frontend predicate rejects legacy unverified job");
+
+        // Helper to simulate frontend reconciliation predicate from UpdateSection.tsx lines 446-455
+        $frontendAcceptsReconciledSettlement = static function (?array $status, int $expectedJobId): bool {
+            if (!$status || ($status['id'] ?? null) !== $expectedJobId || ($status['status'] ?? null) !== 'completed') {
+                return false;
+            }
+            if (!isset($status['result']) || !is_array($status['result']) || ($status['result']['ok'] ?? null) !== true) {
+                return false;
+            }
+            return ($status['result']['desktop_handoff_completed'] ?? false) === true
+                && ($status['result']['requires_desktop_handoff'] ?? null) === false;
+        };
+
+        // ──────────────────────────────────────────────────────────────
+        // Case I1: Real positive native completed record:
+        // Bound job id/op id + matching installed version + electron_delta_install + phase completed
+        // => requires_desktop_handoff: false, desktop_handoff_completed: true, ok: true
+        // ──────────────────────────────────────────────────────────────
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (520, 'apply_update', '{\"operation_id\":\"op-520-native\"}', 'completed')");
+        $applyService->saveJobData(520, [
+            'job_id' => 520,
+            'operation_id' => 'op-520-native',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '0.0.12',
+                    'latest_version' => '0.0.12',
+                    'update_type' => 'delta',
+                    'logs' => ['Staged delta package', 'Ready for native replacement'],
+                ],
+            ],
+        ]);
+        file_put_contents($lab . '/version.json', json_encode(['version' => '0.0.12', 'update_channel' => 'stable']));
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI1 = $applyService->getJobStatus(520);
+        verify($statusI1['status'] === 'completed', "Case I1: Status must be completed");
+        verify($statusI1['settlement_error'] === null, "Case I1: Settlement error must be null");
+        verify($statusI1['result']['ok'] === true, "Case I1: Outer result ok=true strictly verified");
+        verify($statusI1['result']['desktop_handoff_completed'] === true, "Case I1: desktop_handoff_completed exposed as true on verified proof");
+        verify($statusI1['result']['requires_desktop_handoff'] === false, "Case I1: requires_desktop_handoff normalized to false on verified proof");
+        verify($statusI1['result']['handoff_version'] === '0.0.12', "Case I1: handoff_version preserved");
+        verify(!$frontendAcceptsHandoff($statusI1, 520), "Case I1: Old handoff predicate rejects because requires_desktop_handoff is false (prevents re-apply)");
+        verify($frontendAcceptsReconciledSettlement($statusI1, 520), "Case I1: Frontend reconciliation predicate accepts attested completion");
+
+        // ──────────────────────────────────────────────────────────────
+        // Negative Probes: Missing/unbound/wrong state op/phase/failed/error/recovery/target/installed version/persisted job id
+        // => NO trusted completion / unlock (desktop_handoff_completed is NOT true, requires_desktop_handoff remains true)
+        // ──────────────────────────────────────────────────────────────
+
+        // Case I2: Missing native state record -> requires_desktop_handoff remains true
+        $deltaMock->clearUpdateState();
+        $statusI2 = $applyService->getJobStatus(520);
+        verify($statusI2['status'] === 'completed', "Case I2: Status remains completed");
+        verify(!isset($statusI2['result']['desktop_handoff_completed']), "Case I2: desktop_handoff_completed not exposed without state record");
+        verify($statusI2['result']['requires_desktop_handoff'] === true, "Case I2: requires_desktop_handoff remains true");
+        verify(!$frontendAcceptsReconciledSettlement($statusI2, 520), "Case I2: Reconciliation rejected without native state");
+
+        // Case I3: Unbound / mismatched operation_id in native state
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-different-mismatched',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI3 = $applyService->getJobStatus(520);
+        verify(!isset($statusI3['result']['desktop_handoff_completed']), "Case I3: Mismatched operation_id in state rejects completion attestation");
+        verify($statusI3['result']['requires_desktop_handoff'] === true, "Case I3: requires_desktop_handoff remains true");
+        verify(!$frontendAcceptsReconciledSettlement($statusI3, 520), "Case I3: Reconciliation rejected on operation mismatch");
+
+        // Case I4: Wrong operation in native state (not electron_delta_install)
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'web_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI4 = $applyService->getJobStatus(520);
+        verify(!isset($statusI4['result']['desktop_handoff_completed']), "Case I4: Wrong operation rejects completion attestation");
+        verify($statusI4['result']['requires_desktop_handoff'] === true, "Case I4: requires_desktop_handoff remains true");
+
+        // Case I5: State is not 'completed' (e.g. 'applying')
+        $deltaMock->setUpdateState('applying', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI5 = $applyService->getJobStatus(520);
+        verify(!isset($statusI5['result']['desktop_handoff_completed']), "Case I5: Applying state rejects completion attestation");
+        verify($statusI5['result']['requires_desktop_handoff'] === true, "Case I5: requires_desktop_handoff remains true");
+
+        // Case I6: Phase is not 'completed' (e.g. 'migrating')
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'migrating',
+            'error' => null,
+        ]);
+        $statusI6 = $applyService->getJobStatus(520);
+        verify(!isset($statusI6['result']['desktop_handoff_completed']), "Case I6: Incomplete phase rejects completion attestation");
+        verify($statusI6['result']['requires_desktop_handoff'] === true, "Case I6: requires_desktop_handoff remains true");
+
+        // Case I7: State error present
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => 'Permission denied on restart',
+        ]);
+        $statusI7 = $applyService->getJobStatus(520);
+        verify(!isset($statusI7['result']['desktop_handoff_completed']), "Case I7: State error rejects completion attestation");
+        verify($statusI7['result']['requires_desktop_handoff'] === true, "Case I7: requires_desktop_handoff remains true");
+
+        // Case I8: Recovery marker present in state
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+            'requires_recovery' => true,
+        ]);
+        $statusI8 = $applyService->getJobStatus(520);
+        verify(!isset($statusI8['result']['desktop_handoff_completed']), "Case I8: Recovery marker rejects completion attestation");
+        verify($statusI8['result']['requires_desktop_handoff'] === true, "Case I8: requires_desktop_handoff remains true");
+
+        // Case I9: Conflicting targets in state
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.13',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI9 = $applyService->getJobStatus(520);
+        verify(!isset($statusI9['result']['desktop_handoff_completed']), "Case I9: Conflicting state targets reject completion attestation");
+        verify($statusI9['result']['requires_desktop_handoff'] === true, "Case I9: requires_desktop_handoff remains true");
+
+        // Case I10: State target version does not match job handoff_version
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.13',
+            'target_version' => '0.0.13',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI10 = $applyService->getJobStatus(520);
+        verify(!isset($statusI10['result']['desktop_handoff_completed']), "Case I10: Mismatched target version rejects completion attestation");
+        verify($statusI10['result']['requires_desktop_handoff'] === true, "Case I10: requires_desktop_handoff remains true");
+
+        // Case I11: Physical installed version in version.json does not match target
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-520',
+            'operation_id' => 'op-520-native',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        file_put_contents($lab . '/version.json', json_encode(['version' => '0.0.11', 'update_channel' => 'stable']));
+        $statusI11 = $applyService->getJobStatus(520);
+        verify(!isset($statusI11['result']['desktop_handoff_completed']), "Case I11: Installed version mismatch rejects completion attestation");
+        verify($statusI11['result']['requires_desktop_handoff'] === true, "Case I11: requires_desktop_handoff remains true");
+
+        // Restore version.json for subsequent tests
+        file_put_contents($lab . '/version.json', json_encode(['version' => '0.0.12', 'update_channel' => 'stable']));
+
+        // Case I12: Worker result requires_desktop_handoff is string 'true' (not strict boolean)
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (522, 'apply_update', '{\"operation_id\":\"op-522\"}', 'completed')");
+        $applyService->saveJobData(522, [
+            'job_id' => 522,
+            'operation_id' => 'op-522',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => 'true', // string truthy, not boolean true
+                    'handoff_version' => '0.0.12',
+                ],
+            ],
+        ]);
+        $deltaMock->setUpdateState('completed', [
+            'operation' => 'electron_delta_install',
+            'owner_id' => 'owner-522',
+            'operation_id' => 'op-522',
+            'to_version' => '0.0.12',
+            'target_version' => '0.0.12',
+            'phase' => 'completed',
+            'error' => null,
+        ]);
+        $statusI12 = $applyService->getJobStatus(522);
+        verify(!isset($statusI12['result']['desktop_handoff_completed']), "Case I12: String truthy handoff rejects completion attestation");
+
+        // ──────────────────────────────────────────────────────────────
+        // Spoof Stripping Tests:
+        // Spoofed nested desktop_handoff_completed: true while pending or legacy MUST be stripped
+        // ──────────────────────────────────────────────────────────────
+
+        // Case J1: Spoofed nested desktop_handoff_completed: true in persisted result while state is incomplete
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (523, 'apply_update', '{\"operation_id\":\"op-523\"}', 'completed')");
+        $applyService->saveJobData(523, [
+            'job_id' => 523,
+            'operation_id' => 'op-523',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'desktop_handoff_completed' => true, // spoofed claim without native proof
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '0.0.12',
+                ],
+            ],
+        ]);
+        $deltaMock->clearUpdateState();
+        $statusJ1 = $applyService->getJobStatus(523);
+        verify(!isset($statusJ1['result']['desktop_handoff_completed']), "Case J1: Spoofed nested desktop_handoff_completed MUST be stripped");
+        verify($statusJ1['result']['requires_desktop_handoff'] === true, "Case J1: requires_desktop_handoff remains true when spoof stripped");
+
+        // Case J2: Spoofed nested desktop_handoff_completed: true on legacy job (no operation_id)
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (524, 'apply_update', '{}', 'completed')");
+        $applyService->saveJobData(524, [
+            'job_id' => 524,
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'desktop_handoff_completed' => true, // spoofed on legacy job
+                    'logs' => ['Legacy spoof'],
+                ],
+            ],
+        ]);
+        $statusJ2 = $applyService->getJobStatus(524);
+        verify(!isset($statusJ2['result']['desktop_handoff_completed']), "Case J2: Legacy job strips spoofed desktop_handoff_completed");
+        verify($statusJ2['result']['ok'] === true, "Case J2: Legacy job retains ok=true");
+
+        // Case J3: Spoofed nested desktop_handoff_completed: true on failed job
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (525, 'apply_update', '{\"operation_id\":\"op-525\"}', 'failed')");
+        $applyService->saveJobData(525, [
+            'job_id' => 525,
+            'operation_id' => 'op-525',
+            'status' => 'failed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'desktop_handoff_completed' => true,
+                    'logs' => ['Failed step'],
+                ],
+            ],
+        ]);
+        $statusJ3 = $applyService->getJobStatus(525);
+        verify($statusJ3['status'] === 'failed', "Case J3: Status remains failed");
+        verify(!isset($statusJ3['result']['desktop_handoff_completed']), "Case J3: Failed job strips spoofed desktop_handoff_completed");
+
+        // Case J4: Spoofed nested desktop_handoff_completed: true on pending job
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (526, 'apply_update', '{\"operation_id\":\"op-526\"}', 'pending')");
+        $applyService->saveJobData(526, [
+            'job_id' => 526,
+            'operation_id' => 'op-526',
+            'status' => 'pending',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'desktop_handoff_completed' => true,
+                ],
+            ],
+        ]);
+        $statusJ4 = $applyService->getJobStatus(526);
+        verify($statusJ4['status'] === 'pending', "Case J4: Status remains pending");
+        verify($statusJ4['result'] === null, "Case J4: Pending job has null result, no spoof leaked");
 
         echo "PASS: BackgroundUpdateApplyService::getJobStatus verifies verified completed results fail-closed\n";
     }

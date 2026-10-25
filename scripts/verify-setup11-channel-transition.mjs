@@ -1116,6 +1116,44 @@ try{
   assertProtectedStatePreserved(systemStateBefore,await getSystemProtectedState(ui),'Step 1 (bootstrap)');
   console.log('Step 1 complete: Candidate 12 is running with Setup 11 native shell.');
 
+  // 7. Production backend direct attestation and UI settlement after Candidate 12 restart
+  console.log('Attesting Candidate 12 installed production job completion and handoff reconciliation...');
+  const productionJobStatus=await requestTransport.readJobStatus(boundJobId);
+  assert.equal(productionJobStatus.backendSource,'installed_application','Attestation must come from installed Candidate 12 backend');
+  const jobResult=productionJobStatus.data?.result??productionJobStatus.result;
+  assert.ok(jobResult&&typeof jobResult==='object','Job result must be an object');
+  assert.equal(jobResult.ok,true,'result.ok must be true');
+  assert.equal(jobResult.desktop_handoff_completed,true,'desktop_handoff_completed must be true');
+  assert.equal(jobResult.requires_desktop_handoff,false,'requires_desktop_handoff must be false');
+
+  console.log('Awaiting real UI post-handoff settlement and storage cleanup...');
+  await ui.system();
+  const settlementRunId='settlement_'+Date.now();
+  await ui.evaluate(`window.__pageRunId = ${JSON.stringify(settlementRunId)}`);
+
+  // Wait for Candidate 12 frontend to observe completed handoff and settle sessionStorage
+  await ui.until(
+    `sessionStorage.getItem('pos.active_update_job_id') === null && sessionStorage.getItem('pos.update_handoff_${boundJobId}') === 'done'`,
+    'sessionStorage pos.active_update_job_id cleared and handoff marker done'
+  );
+
+  // Root runtime's existing second reload after settlement might occur (1500ms timer)
+  await ui.until(
+    `window.__pageRunId !== ${JSON.stringify(settlementRunId)} && Boolean(document.querySelector("form, a[href='/settings']"))`,
+    'frontend stable after post-settlement reload',
+    10000
+  ).catch(()=>{});
+
+  if(await ui.evaluate('Boolean(document.querySelector("input[type=email]"))')){
+    await ui.login(auth.email,auth.password);
+  }
+
+  await ui.system();
+  await ui.until(
+    `sessionStorage.getItem('pos.active_update_job_id') === null && Boolean(document.querySelector("a[href='/settings']"))`,
+    'authenticated settings view stable after reconciliation'
+  );
+
   // Snapshot Candidate 12 vs Beta 10 file identity AFTER bootstrap
   const common=Object.keys(candidateInventory.files).filter(file=>beta10Inventory.files[file]?.sha256===candidateInventory.files[file].sha256);
   assert.ok(common.length>0,'Must have common files between Candidate 12 and Beta 10');
