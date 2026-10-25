@@ -287,12 +287,16 @@ class BackgroundUpdateApplyService
                     $effectiveStatus = 'needs_attention';
                     $settlementError = !$isMatchingOperation ? 'unbound_operation' : (!$isMatchingJobId ? 'unbound_job_id' : 'missing_verified_result');
                 } else {
-                    $resultData = $persistedResult['data'] ?? null;
+                    $payloadData = is_array($persistedResult['data'] ?? null) ? $persistedResult['data'] : [];
+                    $payloadData['ok'] = true;
+                    $resultData = $payloadData;
                 }
             } else {
                 // Legacy job: preserve old synchronous behavior
                 if (is_array($persistedResult) && ($persistedResult['ok'] ?? false) === true) {
-                    $resultData = $persistedResult['data'] ?? null;
+                    $payloadData = is_array($persistedResult['data'] ?? null) ? $persistedResult['data'] : [];
+                    $payloadData['ok'] = true;
+                    $resultData = $payloadData;
                 }
             }
         } elseif ($effectiveStatus === 'failed') {
@@ -308,7 +312,11 @@ class BackgroundUpdateApplyService
                     ? 'persistence_failure_after_apply'
                     : 'desktop_handoff_uncertain';
             } else {
-                $resultData = $jobData['result']['data'] ?? null;
+                $failedData = is_array($jobData['result']['data'] ?? null) ? $jobData['result']['data'] : null;
+                if (is_array($failedData)) {
+                    unset($failedData['ok']);
+                }
+                $resultData = $failedData;
             }
         }
 

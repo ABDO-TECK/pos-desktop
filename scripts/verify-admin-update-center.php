@@ -291,12 +291,31 @@ try {
         $updater = new TestUpdateServiceDouble($deltaMock);
         $applyService = new App\Services\BackgroundUpdateApplyService($updater, $lab . '/storage');
 
+        // Helper to simulate actual frontend predicate from UpdateSection.tsx lines 433-446
+        $frontendAcceptsHandoff = static function (?array $status, int $expectedJobId): bool {
+            if (!$status) {
+                return false;
+            }
+            if (($status['id'] ?? null) !== $expectedJobId) {
+                return false;
+            }
+            if (($status['status'] ?? null) !== 'completed') {
+                return false;
+            }
+            if (!isset($status['result']) || !is_array($status['result']) || ($status['result']['ok'] ?? null) !== true) {
+                return false;
+            }
+            return !empty($status['result']['requires_desktop_handoff']) && !empty($status['result']['handoff_version']);
+        };
+
         // Case A: Queue completed, but no result file written -> returns needs_attention
         $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (501, 'apply_update', '{\"operation_id\":\"op-501\"}', 'completed')");
         $statusA = $applyService->getJobStatus(501);
         verify($statusA !== null, "Job status found");
         verify($statusA['status'] === 'needs_attention', "Missing result file causes status needs_attention");
         verify($statusA['settlement_error'] === 'unbound_operation', "Settlement error marked unbound_operation");
+        verify($statusA['result'] === null, "Missing result file yields null resultData");
+        verify(!$frontendAcceptsHandoff($statusA, 501), "Frontend predicate rejects unverified missing result");
 
         // Case B: Queue completed, but operation_id in result file does not match -> returns needs_attention
         $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (502, 'apply_update', '{\"operation_id\":\"op-502-expected\"}', 'completed')");
@@ -304,24 +323,278 @@ try {
             'job_id' => 502,
             'operation_id' => 'op-502-other',
             'status' => 'completed',
-            'result' => ['ok' => true, 'data' => ['logs' => []]],
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                    'logs' => [],
+                ],
+            ],
         ]);
         $statusB = $applyService->getJobStatus(502);
         verify($statusB['status'] === 'needs_attention', "Mismatched operation_id causes status needs_attention");
         verify($statusB['settlement_error'] === 'unbound_operation', "Settlement error marked unbound_operation");
+        verify($statusB['result'] === null, "Mismatched operation_id yields null resultData");
+        verify(!$frontendAcceptsHandoff($statusB, 502), "Frontend predicate rejects mismatched operation_id");
 
-        // Case C: Queue completed, matching operation_id and job_id, ok=true -> returns completed
+        // Case C: Queue completed, matching operation_id and job_id, ok=true -> returns completed with strict boolean ok=true and flattened fields
         $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (503, 'apply_update', '{\"operation_id\":\"op-503-valid\"}', 'completed')");
         $applyService->saveJobData(503, [
             'job_id' => 503,
             'operation_id' => 'op-503-valid',
             'status' => 'completed',
-            'result' => ['ok' => true, 'data' => ['logs' => ['Successfully applied']]],
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                    'update_type' => 'delta',
+                    'logs' => ['Successfully applied delta update'],
+                ],
+            ],
         ]);
         $statusC = $applyService->getJobStatus(503);
         verify($statusC['status'] === 'completed', "Verified job file allows completed status");
         verify($statusC['settlement_error'] === null, "Verified job has no settlement_error");
-        verify($statusC['result']['logs'][0] === 'Successfully applied', "Result logs returned");
+        verify(is_array($statusC['result']), "Verified job returns result array");
+        verify($statusC['result']['ok'] === true, "Verified result exposes STRICT boolean ok=true");
+        verify($statusC['result']['requires_desktop_handoff'] === true, "Preserves flattened requires_desktop_handoff");
+        verify($statusC['result']['handoff_version'] === '12', "Preserves flattened handoff_version");
+        verify($statusC['result']['update_type'] === 'delta', "Preserves flattened update_type");
+        verify($statusC['result']['logs'][0] === 'Successfully applied delta update', "Preserves flattened logs");
+        verify($frontendAcceptsHandoff($statusC, 503), "Frontend predicate accepts verified desktop handoff");
+
+        // Case D1: Queue completed, but wrong job_id in result file -> returns needs_attention
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (504, 'apply_update', '{\"operation_id\":\"op-504\"}', 'completed')");
+        $applyService->saveJobData(504, [
+            'job_id' => 999, // Mismatched job_id
+            'operation_id' => 'op-504',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusD1 = $applyService->getJobStatus(504);
+        verify($statusD1['status'] === 'needs_attention', "Mismatched job_id causes status needs_attention");
+        verify($statusD1['settlement_error'] === 'unbound_job_id', "Settlement error marked unbound_job_id");
+        verify($statusD1['result'] === null, "Mismatched job_id yields null result");
+        verify(!$frontendAcceptsHandoff($statusD1, 504), "Frontend predicate rejects mismatched job_id");
+
+        // Case D2: Queue completed, but missing job_id in result file -> returns needs_attention
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (505, 'apply_update', '{\"operation_id\":\"op-505\"}', 'completed')");
+        $applyService->saveJobData(505, [
+            'operation_id' => 'op-505',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusD2 = $applyService->getJobStatus(505);
+        verify($statusD2['status'] === 'needs_attention', "Missing job_id causes status needs_attention");
+        verify($statusD2['settlement_error'] === 'unbound_job_id', "Settlement error marked unbound_job_id");
+        verify($statusD2['result'] === null, "Missing job_id yields null result");
+        verify(!$frontendAcceptsHandoff($statusD2, 505), "Frontend predicate rejects missing job_id");
+
+        // Case E1: Queue completed, but outer ok is false -> returns needs_attention
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (506, 'apply_update', '{\"operation_id\":\"op-506\"}', 'completed')");
+        $applyService->saveJobData(506, [
+            'job_id' => 506,
+            'operation_id' => 'op-506',
+            'status' => 'completed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusE1 = $applyService->getJobStatus(506);
+        verify($statusE1['status'] === 'needs_attention', "Outer ok=false causes status needs_attention");
+        verify($statusE1['settlement_error'] === 'missing_verified_result', "Settlement error marked missing_verified_result");
+        verify($statusE1['result'] === null, "Outer ok=false yields null result");
+        verify(!$frontendAcceptsHandoff($statusE1, 506), "Frontend predicate rejects outer ok=false");
+
+        // Case E2: Queue completed, but outer ok is missing -> returns needs_attention
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (507, 'apply_update', '{\"operation_id\":\"op-507\"}', 'completed')");
+        $applyService->saveJobData(507, [
+            'job_id' => 507,
+            'operation_id' => 'op-507',
+            'status' => 'completed',
+            'result' => [
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusE2 = $applyService->getJobStatus(507);
+        verify($statusE2['status'] === 'needs_attention', "Missing outer ok causes status needs_attention");
+        verify($statusE2['settlement_error'] === 'missing_verified_result', "Settlement error marked missing_verified_result");
+        verify($statusE2['result'] === null, "Missing outer ok yields null result");
+        verify(!$frontendAcceptsHandoff($statusE2, 507), "Frontend predicate rejects missing outer ok");
+
+        // Case E3: Queue completed, but outer ok is string 'true' -> returns needs_attention
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (508, 'apply_update', '{\"operation_id\":\"op-508\"}', 'completed')");
+        $applyService->saveJobData(508, [
+            'job_id' => 508,
+            'operation_id' => 'op-508',
+            'status' => 'completed',
+            'result' => [
+                'ok' => 'true', // string truthy, not strict boolean
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusE3 = $applyService->getJobStatus(508);
+        verify($statusE3['status'] === 'needs_attention', "String 'true' outer ok causes status needs_attention");
+        verify($statusE3['settlement_error'] === 'missing_verified_result', "Settlement error marked missing_verified_result");
+        verify($statusE3['result'] === null, "String 'true' outer ok yields null result");
+        verify(!$frontendAcceptsHandoff($statusE3, 508), "Frontend predicate rejects string truthy outer ok");
+
+        // Case F1: Queue completed, outer ok false, spoofed nested data.ok=true -> must NOT promote nested ok
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (509, 'apply_update', '{\"operation_id\":\"op-509\"}', 'completed')");
+        $applyService->saveJobData(509, [
+            'job_id' => 509,
+            'operation_id' => 'op-509',
+            'status' => 'completed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'ok' => true, // spoofed inner ok
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusF1 = $applyService->getJobStatus(509);
+        verify($statusF1['status'] === 'needs_attention', "Spoofed nested ok does not bypass outer ok check");
+        verify($statusF1['settlement_error'] === 'missing_verified_result', "Settlement error marked missing_verified_result");
+        verify($statusF1['result'] === null, "Unverified result yields null result");
+        verify(!$frontendAcceptsHandoff($statusF1, 509), "Frontend predicate rejects spoofed inner ok");
+
+        // Case F2: Outer ok true, conflicting nested data.ok=false -> outer trusted only produces ok=true
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (510, 'apply_update', '{\"operation_id\":\"op-510\"}', 'completed')");
+        $applyService->saveJobData(510, [
+            'job_id' => 510,
+            'operation_id' => 'op-510',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'ok' => false, // conflicting inner ok
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                    'logs' => ['Applied with inner conflict resolved'],
+                ],
+            ],
+        ]);
+        $statusF2 = $applyService->getJobStatus(510);
+        verify($statusF2['status'] === 'completed', "Outer ok=true confirms completed status");
+        verify($statusF2['settlement_error'] === null, "No settlement error");
+        verify($statusF2['result']['ok'] === true, "Outer trusted ok strictly overrides inner conflicting ok");
+        verify($statusF2['result']['requires_desktop_handoff'] === true, "Handoff flag preserved");
+        verify($frontendAcceptsHandoff($statusF2, 510), "Frontend predicate accepts verified handoff");
+
+        // Case F3: Outer ok true, empty data -> produces ok=true, does NOT fabricate handoff
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (511, 'apply_update', '{\"operation_id\":\"op-511\"}', 'completed')");
+        $applyService->saveJobData(511, [
+            'job_id' => 511,
+            'operation_id' => 'op-511',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [],
+            ],
+        ]);
+        $statusF3 = $applyService->getJobStatus(511);
+        verify($statusF3['status'] === 'completed', "Empty data completion confirms completed status");
+        verify($statusF3['result']['ok'] === true, "Result contains strict boolean ok=true");
+        verify(!isset($statusF3['result']['requires_desktop_handoff']), "No handoff flag fabricated for empty data");
+        verify(!$frontendAcceptsHandoff($statusF3, 511), "Frontend does not trigger handoff without explicit handoff flags");
+
+        // Case G1: Queue status failed, contains handoff -> needs_attention (desktop_handoff_uncertain)
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (512, 'apply_update', '{\"operation_id\":\"op-512\"}', 'failed')");
+        $applyService->saveJobData(512, [
+            'job_id' => 512,
+            'operation_id' => 'op-512',
+            'status' => 'failed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'ok' => true,
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '12',
+                ],
+            ],
+        ]);
+        $statusG1 = $applyService->getJobStatus(512);
+        verify($statusG1['status'] === 'needs_attention', "Failed queue job with handoff flagged becomes needs_attention");
+        verify($statusG1['settlement_error'] === 'desktop_handoff_uncertain', "Settlement error marked desktop_handoff_uncertain");
+        verify($statusG1['result'] === null, "Uncertain handoff yields null result");
+        verify(!$frontendAcceptsHandoff($statusG1, 512), "Frontend predicate rejects failed uncertain handoff");
+
+        // Case G2: Queue status failed (non-handoff), spoofed inner ok=true -> result ok is NOT promoted
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (513, 'apply_update', '{\"operation_id\":\"op-513\"}', 'failed')");
+        $applyService->saveJobData(513, [
+            'job_id' => 513,
+            'operation_id' => 'op-513',
+            'status' => 'failed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'ok' => true,
+                    'logs' => ['Failed step'],
+                ],
+            ],
+        ]);
+        $statusG2 = $applyService->getJobStatus(513);
+        verify($statusG2['status'] === 'failed', "Status remains failed");
+        verify(!isset($statusG2['result']['ok']), "Failed status strips nested ok true");
+        verify(!$frontendAcceptsHandoff($statusG2, 513), "Frontend predicate rejects failed queue status");
+
+        // Case H1: Legacy job (empty payload operation_id), outer ok=true -> completed with ok=true
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (514, 'apply_update', '{}', 'completed')");
+        $applyService->saveJobData(514, [
+            'job_id' => 514,
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => ['logs' => ['Legacy completed']],
+            ],
+        ]);
+        $statusH1 = $applyService->getJobStatus(514);
+        verify($statusH1['status'] === 'completed', "Legacy job allows completed status");
+        verify($statusH1['result']['ok'] === true, "Legacy result exposes ok=true");
+        verify($statusH1['result']['logs'][0] === 'Legacy completed', "Legacy logs preserved");
+
+        // Case H2: Legacy job with outer ok=false, spoofed inner ok=true -> null result, no handoff
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (515, 'apply_update', '{}', 'completed')");
+        $applyService->saveJobData(515, [
+            'job_id' => 515,
+            'status' => 'completed',
+            'result' => [
+                'ok' => false,
+                'data' => [
+                    'ok' => true,
+                    'logs' => ['Legacy spoof'],
+                ],
+            ],
+        ]);
+        $statusH2 = $applyService->getJobStatus(515);
+        verify($statusH2['result'] === null, "Legacy job with ok=false yields null result");
+        verify(!$frontendAcceptsHandoff($statusH2, 515), "Frontend predicate rejects legacy unverified job");
 
         echo "PASS: BackgroundUpdateApplyService::getJobStatus verifies verified completed results fail-closed\n";
     }
@@ -445,6 +718,7 @@ try {
 
         $statusResponse3 = $controller->runStatusForJob((string) $scheduledJobId);
         verify($statusResponse3['data']['status'] === 'completed', "Job status verified as completed");
+        verify($statusResponse3['data']['result']['ok'] === true, "Completed result exposes strict boolean ok=true through controller status endpoint");
         verify($statusResponse3['data']['result']['logs'][0] === 'Unpacked cleanly', "Completed result logs returned");
 
         echo "PASS: UpdateController rejects invalid background params, delegates real PDO SQLite background apply, and serves live job status\n";
