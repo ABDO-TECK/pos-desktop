@@ -572,7 +572,7 @@ write(path.join(tool, 'repair-config.json'), JSON.stringify({
 }, null, 2));
 invPreRes = spawnSync(php, [path.join(tool, 'repair.php'), 'prepare', iRoot, iWork, iAssets, iUserData], {encoding: 'utf8', windowsHide: true});
 assert.notEqual(invPreRes.status, 0);
-assert.match(invPreRes.stderr, /Forbidden private artifact in target_inventory/);
+assert.match(invPreRes.stderr, /Disallowed path in target_inventory \(only public app artifacts permitted\): \.env/);
 
 // Signed config mandates an extra target file that the delta does NOT provide
 const strictTargetConfig = {
