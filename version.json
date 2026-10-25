@@ -1,20 +1,23 @@
 {
-  "version": "0.0.11",
-  "application_version": "0.0.11",
+  "version": "0.0.12-beta.1",
+  "application_version": "0.0.12-beta.1",
   "update_engine_version": "1.0.0",
-  "channel": "stable",
+  "channel": "beta",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
   "release_generation": 3,
   "released_at": "2026-10-25",
   "changelog": [
-    "Complete Windows Setup 0.0.11 packaging cumulative catalog, Admin Update Center, and shell fixes.",
-    "Hardened Electron update handoff with bounded awaitable PHP termination and atomic rollback.",
-    "Reconcile MariaDB catalog trigger DEFINER to privileged migration identity on startup.",
-    "Responsive Admin Update Center with asynchronous background apply and accurate progress."
+    "Root release catalog resolution discovers signed bidirectional channel transitions independently of version ordering.",
+    "Strict protected certificate classification distinguishes packaged CA roots from mutable local device certificates in tooling and acceptance.",
+    "Hardened channel transition protocol reconciles bound native handoff across renderer restarts with honest error details.",
+    "Strict bound native-completion reconciliation and signed closed-app repair protect running services and local data."
   ],
   "requires_npm_install": false,
-  "update_channel": "stable",
-  "release_type": "setup",
+  "update_channel": "beta",
+  "release_type": "delta",
+  "delta_baseline_tags": [
+    "v0.0.11"
+  ],
   "installer_version": "0.0.11"
 }
