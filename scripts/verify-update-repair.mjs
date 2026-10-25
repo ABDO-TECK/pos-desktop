@@ -740,7 +740,7 @@ function runLauncher(userDataDir, extraArgs = []) {
 function assertPsReject(userDataDir, expectedPattern, label) {
   const res = runLauncher(userDataDir);
   assert.notEqual(res.status, 0, `Expected failure for ${label}, got exit 0: ${res.stdout}`);
-  const combined = (res.stderr || '') + (res.stdout || '');
+  const combined = ((res.stderr || '') + (res.stdout || '')).replace(/\s+/g, ' ');
   assert.match(combined, expectedPattern, `Unexpected error output for ${label}: ${combined}`);
 }
 
