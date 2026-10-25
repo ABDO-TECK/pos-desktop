@@ -800,8 +800,8 @@ $provider->assets[$beta5Url('alt-bad-path.sig')] = $sigAltBadPath;
 $previewAltBadPath = $service->preview(1, 'stable');
 compatAssert(
     $previewAltBadPath['status'] === 'blocked' &&
-    $previewAltBadPath['reason_code'] === 'path_invalid',
-    'Scenario 7.4: Invalid path on foreign runtime profile must fail closed with path_invalid even with valid alternate carrier present. Got: ' . json_encode($previewAltBadPath)
+    $previewAltBadPath['reason_code'] === 'path_protected',
+    'Scenario 7.4: Protected path on foreign runtime profile must fail closed with path_protected even with valid alternate carrier present. Got: ' . json_encode($previewAltBadPath)
 );
 
 // Wrong target on other profile fails closed immediately even when valid alternate is present
