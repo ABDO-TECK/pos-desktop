@@ -199,11 +199,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
           Write-Host "Building forward channel transition carrier: Setup 11 -> Beta 12..."
-          php scripts/build-channel-transition.php --target-root="$lab/candidate-app" --shell-root="$lab/app" --target-inventory="release-assets/deployment-inventory.json" --source-root=. --source-inventory="$lab/setup11-inventory.json" --carrier-tag=v0.0.12-beta.1 --target-repo=pos-desktop-updates --target-tag=v0.0.12-beta.1 --contract="$lab/data-contract.json" --output=release-assets
+          php scripts/build-channel-transition.php --target-root="$lab/candidate-app" --shell-root="$lab/app" --target-inventory="release-assets/deployment-inventory.json" --source-root="$lab/app/resources/app.asar.unpacked" --source-inventory="$lab/setup11-inventory.json" --carrier-tag=v0.0.12-beta.1 --target-repo=pos-desktop-updates --target-tag=v0.0.12-beta.1 --contract="$lab/data-contract.json" --output=release-assets
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
           Write-Host "Appending reverse channel transition carrier: Beta 12 -> Setup 11..."
-          php scripts/build-channel-transition.php --append --target-root="$lab/app/resources/app.asar.unpacked" --shell-root="$lab/app" --target-inventory="$lab/setup11-inventory.json" --source-root=. --source-inventory="release-assets/deployment-inventory.json" --carrier-tag=v0.0.12-beta.1 --target-repo=pos-desktop --target-tag=v0.0.11 --contract="$lab/data-contract.json" --output=release-assets
+          php scripts/build-channel-transition.php --append --target-root="$lab/app/resources/app.asar.unpacked" --shell-root="$lab/app" --target-inventory="$lab/setup11-inventory.json" --source-root="$lab/candidate-app" --source-inventory="release-assets/deployment-inventory.json" --carrier-tag=v0.0.12-beta.1 --target-repo=pos-desktop --target-tag=v0.0.11 --contract="$lab/data-contract.json" --output=release-assets
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Phase 5 - Execute Signed Beta Repair and Transition Acceptance
