@@ -67,7 +67,7 @@ const zipWriter = path.join(lab, 'zip.php');
 write(zipWriter, `<?php
 $zip = new ZipArchive();
 if ($zip->open($argv[1], ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) exit(1);
-$entries = json_decode($argv[2], true);
+$entries = json_decode(file_get_contents($argv[2]), true, 512, JSON_THROW_ON_ERROR);
 foreach ($entries as $item) {
     $zip->addFromString($item['name'], $item['content']);
 }
@@ -75,7 +75,10 @@ $zip->close();
 `);
 
 function makeZipEntries(zipPath, items) {
-  const result = spawnSync(php, [zipWriter, zipPath, JSON.stringify(items)], {encoding: 'utf8', windowsHide: true});
+  const entriesPath = path.join(lab, `zip-input-${crypto.randomUUID()}.json`);
+  write(entriesPath, JSON.stringify(items));
+  const result = spawnSync(php, [zipWriter, zipPath, entriesPath], {encoding: 'utf8', windowsHide: true});
+  assert.ifError(result.error);
   assert.equal(result.status, 0, `makeZipEntries failed: ${result.stderr}`);
 }
 
