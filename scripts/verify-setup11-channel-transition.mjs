@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createDesktopLab,delay} from './desktop-transition-lab.mjs';
 import {attachTransitionTransport} from './channel-transition-ui-transport.mjs';
+import {classifyVerifiedPublicStagedCa} from './protected-certificate-classification.mjs';
 
 const [phase,appArg,evidenceArg,assetsArg]=process.argv.slice(2);
 const application=path.resolve(appArg),evidence=path.resolve(evidenceArg),assets=path.resolve(assetsArg);
@@ -269,6 +270,13 @@ function getPortableBinariesHashes(appDir,desktopLabUi){
   return hashes;
 }
 
+function getActiveTrustedInventories(){
+  if(phase==='contract'){
+    return [setup11Inventory];
+  }
+  return [candidateInventory,beta10Inventory,setup11Inventory];
+}
+
 async function getSystemProtectedState(desktopLabUi){
   // 1. Mandatory credentials: look across the 8 POS targets
   const credFiles=[];
@@ -338,6 +346,10 @@ async function getSystemProtectedState(desktopLabUi){
     [qzKeyPath]:desktopLabUi.hash(qzKeyPath),
     [qzCertPath]:desktopLabUi.hash(qzCertPath)
   };
+  const activeTrustedInventories=getActiveTrustedInventories();
+  const publicStagedCaBundles=[];
+  const stagedCaSeen=new Set();
+
   for(const target of posTargets){
     if(!fs.existsSync(target))continue;
     function scanKeys(dir){
@@ -350,7 +362,17 @@ async function getSystemProtectedState(desktopLabUi){
           if(ext==='.key'||ext==='.crt'||ext==='.pem'){
             const resolved=path.resolve(full);
             if(!deviceKeyMap[resolved]&&fs.statSync(resolved).size>0){
-              deviceKeyMap[resolved]=desktopLabUi.hash(resolved);
+              const publicClassification=(target===posTargets[0])
+                ? classifyVerifiedPublicStagedCa(resolved,posTargets[0],activeTrustedInventories)
+                : null;
+              if(publicClassification){
+                if(!stagedCaSeen.has(resolved)){
+                  stagedCaSeen.add(resolved);
+                  publicStagedCaBundles.push(publicClassification);
+                }
+              }else{
+                deviceKeyMap[resolved]=desktopLabUi.hash(resolved);
+              }
             }
           }
         }
@@ -437,7 +459,9 @@ async function getSystemProtectedState(desktopLabUi){
     printingTrustInstalled:true,
     ownedPrintingFilesCount:Object.keys(qzTrustFiles).length,
     deviceKeyFilesCount:Object.keys(deviceKeyMap).length,
-    envFilesCount:envFiles.length
+    envFilesCount:envFiles.length,
+    publicStagedCaBundlesCount:publicStagedCaBundles.length,
+    publicStagedCaBundles
   };
 
   return {secrets,public:publicData};
@@ -495,22 +519,7 @@ function mapToSafeTargetRelative(filePath,targets,unknownState){
 function classifyPublicAppArtifact(fileHash){
   if(typeof fileHash!=='string'||!fileHash)return null;
   const hashLower=fileHash.toLowerCase();
-  const knownInventories=[];
-  try{
-    if(typeof candidateInventory!=='undefined'&&candidateInventory?.files){
-      knownInventories.push(candidateInventory);
-    }
-  }catch{}
-  try{
-    if(typeof beta10Inventory!=='undefined'&&beta10Inventory?.files){
-      knownInventories.push(beta10Inventory);
-    }
-  }catch{}
-  try{
-    if(typeof setup11Inventory!=='undefined'&&setup11Inventory?.files){
-      knownInventories.push(setup11Inventory);
-    }
-  }catch{}
+  const knownInventories=getActiveTrustedInventories();
 
   for(const inv of knownInventories){
     if(!inv||!inv.files)continue;
@@ -1544,7 +1553,8 @@ try{
   assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore,'Compatibility preserved after full return');
   assert.deepEqual(await pendingSale('get'),offlineBefore,'Offline sale preserved after full return');
   assert.deepEqual([ui.hash(path.join(application,'POS Desktop.exe')),ui.hash(path.join(application,'resources/app.asar'))],shellBefore,'Shell unchanged after full return');
-  assertProtectedStatePreserved(systemStateBefore,await getSystemProtectedState(ui),'Step 4 (full return)');
+  const finalSystemState=await getSystemProtectedState(ui);
+  assertProtectedStatePreserved(systemStateBefore,finalSystemState,'Step 4 (full return)');
 
   // Unchanged file identity preserved EVEN AFTER FULL RETURN (handoff filters identical byte files)
   for(const [file,expected] of Object.entries(candidate12Stats)){
@@ -1596,6 +1606,8 @@ try{
     printingThumbprint:systemStateBefore.public.printingThumbprint,
     ownedPrintingFilesChecked:systemStateBefore.public.ownedPrintingFilesCount,
     deviceKeyFilesChecked:systemStateBefore.public.deviceKeyFilesCount,
+    publicStagedCaBundlesChecked:finalSystemState.public.publicStagedCaBundlesCount,
+    publicStagedCaBundles:finalSystemState.public.publicStagedCaBundles,
     portableBinariesPreserved:true,
     portableBinariesChecked:Object.keys(systemStateBefore.public.portableHashes).length,
     selectionDoesNotInstall:true,

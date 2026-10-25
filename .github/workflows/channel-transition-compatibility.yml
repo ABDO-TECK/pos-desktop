@@ -122,6 +122,12 @@ jobs:
           php scripts/verify-admin-update-center.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+      - name: Verify Protected Certificate Classification
+        shell: pwsh
+        run: |
+          node scripts/verify-protected-certificate-classification.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
       - name: Frontend typecheck and build validation
         shell: pwsh
         run: |
