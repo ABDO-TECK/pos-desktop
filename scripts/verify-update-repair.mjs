@@ -836,5 +836,106 @@ if (process.platform === 'win32') {
   assert.match(combinedOut, /Corrupted job file/, 'unreadable job under lock');
 }
 
+// Case 12: Assert-Closed fail-closed CIM mock regressions (Windows only)
+if (process.platform === 'win32') {
+  makeTestEngineZip({
+    native_hashes: {
+      'POS Desktop.exe': 'dummy_hash',
+      'resources/app.asar': 'dummy_hash',
+      'resources/portable/php/php.exe': 'dummy_hash',
+      ...Object.fromEntries(Array.from({length: 320}, (_, i) => [`resources/portable/bin_${i}.dll`, 'dummy_hash']))
+      // Deliberately omits 'resources/portable/php/ext/php_openssl.dll'
+    }
+  });
+
+  const psScriptPath = path.join(psLab, 'Repair-POS.ps1');
+  function runLauncherWithCimMock(mockBody, userDataDir = udSparseValid) {
+    const mockCmd = `
+      $ErrorActionPreference = 'Stop'
+      function global:Get-CimInstance {
+        [CmdletBinding()]
+        param(
+          [Parameter(Position = 0)]
+          [string]$ClassName,
+          [Parameter(ValueFromRemainingArguments = $true)]
+          $RemainingArgs
+        )
+        ${mockBody}
+      }
+      & '${psScriptPath.replace(/'/g, "''")}' -InstallRoot '${psInstall.replace(/'/g, "''")}' -UserDataRoot '${userDataDir.replace(/'/g, "''")}'
+    `;
+    return spawnSync(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', mockCmd], {encoding: 'utf8', windowsHide: true});
+  }
+
+  function assertCimMockReject(mockBody, expectedPattern, label, userDataDir = udSparseValid) {
+    const res = runLauncherWithCimMock(mockBody, userDataDir);
+    assert.notEqual(res.status, 0, `Expected failure for ${label}, got exit 0: ${res.stdout}`);
+    const combined = ((res.stderr || '') + (res.stdout || '')).replace(/\s+/g, ' ');
+    assert.match(combined, expectedPattern, `Unexpected error output for ${label}: ${combined}`);
+  }
+
+  const relevantServices = [
+    'POS Desktop.exe',
+    'php.exe',
+    'php-cgi.exe',
+    'mysqld.exe',
+    'mariadbd.exe',
+    'java.exe',
+    'javaw.exe',
+    'qz-tray.exe'
+  ];
+
+  // For each relevant service name with null ExecutablePath: must reject specific closed/ownership stage before RSA/native pin
+  for (const name of relevantServices) {
+    assertCimMockReject(
+      `return @([PSCustomObject]@{ Name = '${name}'; ExecutablePath = $null })`,
+      /Cannot verify whether POS Desktop or its services are closed/,
+      `relevant service ${name} with null ExecutablePath`
+    );
+  }
+
+  const outsidePhp = path.join(psLab, 'outside', 'php.exe').replace(/'/g, "''");
+  const missingExtensionPinPattern = /Required native pin missing in configuration: resources\/portable\/php\/ext\/php_openssl\.dll/;
+
+  // Companion 1: Known non-owned PHP path outside InstallPrefix proceeds to missing required PHP extension pin
+  assertCimMockReject(
+    `return @([PSCustomObject]@{ Name = 'php.exe'; ExecutablePath = '${outsidePhp}' })`,
+    missingExtensionPinPattern,
+    'companion known non-owned PHP path outside InstallPrefix'
+  );
+
+  // Companion 2: Unrelated process name with null ExecutablePath proceeds to missing required PHP extension pin
+  assertCimMockReject(
+    `return @([PSCustomObject]@{ Name = 'unrelated-service.exe'; ExecutablePath = $null })`,
+    missingExtensionPinPattern,
+    'companion unrelated process name with null ExecutablePath'
+  );
+
+  // Companion 3: Both non-owned PHP and unrelated null path together proceed to missing required PHP extension pin
+  assertCimMockReject(
+    `return @(
+      [PSCustomObject]@{ Name = 'php.exe'; ExecutablePath = '${outsidePhp}' },
+      [PSCustomObject]@{ Name = 'unrelated-service.exe'; ExecutablePath = $null }
+    )`,
+    missingExtensionPinPattern,
+    'companion non-owned PHP and unrelated null path together'
+  );
+
+  // Readable ExecutablePath under InstallPrefix rejected
+  const insidePhp = path.join(psInstall, 'resources', 'portable', 'php', 'php.exe').replace(/'/g, "''");
+  assertCimMockReject(
+    `return @([PSCustomObject]@{ Name = 'php.exe'; ExecutablePath = '${insidePhp}' })`,
+    /Close POS Desktop and its services before running repair/,
+    'running process under InstallPrefix'
+  );
+
+  // CIM query failure fails closed
+  assertCimMockReject(
+    `throw 'Simulated CIM query failure'`,
+    /Simulated CIM query failure/,
+    'CIM query failure fails closed'
+  );
+}
+
 console.log('PASS PowerShell launcher regressions verified.');
 console.log('ALL UPDATE REPAIR VERIFICATION TESTS PASSED.');

@@ -403,6 +403,10 @@ POS Desktop one-time signed update repair to {$targetVersion}
 Close POS Desktop and all its services completely before running repair.
 Extract this ZIP archive.
 
+Run as the same installation owner who originally installed and runs POS Desktop.
+Do not default to Administrator: elevate only if installation file or process-ownership-inspection permissions require it, preserving user profile identity.
+If process ownership cannot be verified, the tool fails closed safely; do not kill unrelated global services.
+
 Run in PowerShell:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\\Repair-POS.ps1
 
@@ -411,7 +415,7 @@ Or double-click Repair-POS.cmd.
 For an alternative install folder, specify:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\\Repair-POS.ps1 -InstallRoot "C:\\path\\to\\POS Desktop"
 
-Do not uninstall POS Desktop or delete your database. This repair tool does not run migrations.
+Do not uninstall POS Desktop. No state, cache, or database deletion; no migrations; no trust or key regeneration.
 The launcher verifies the RSA-signed repair engine against the pinned updater public key before execution.
 The launcher strictly verifies public native binary hashes (POS Desktop.exe, app.asar, portable runtime) before spawning PHP.
 The engine verifies the signed delta manifest and exact installed 0.0.11 baseline files before replacing changed artifacts.

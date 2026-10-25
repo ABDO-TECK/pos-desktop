@@ -28,12 +28,22 @@ function Assert-NoReparse([string]$Path) {
 function Assert-Closed {
     # Fail closed if process inventory is unavailable; never stop a running process.
     $processes = Get-CimInstance Win32_Process -ErrorAction Stop
+    $knownServiceNames = @(
+        'POS Desktop.exe',
+        'php.exe',
+        'php-cgi.exe',
+        'mysqld.exe',
+        'mariadbd.exe',
+        'java.exe',
+        'javaw.exe',
+        'qz-tray.exe'
+    )
     foreach ($process in $processes) {
         if ($process.ExecutablePath -and $process.ExecutablePath.StartsWith($script:InstallPrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Close POS Desktop and its services before running repair.'
         }
-        if ($process.Name -eq 'POS Desktop.exe' -and -not $process.ExecutablePath) {
-            throw 'Cannot verify whether POS Desktop is closed.'
+        if ((-not $process.ExecutablePath -or [string]::IsNullOrWhiteSpace($process.ExecutablePath)) -and ($process.Name -in $knownServiceNames)) {
+            throw 'Cannot verify whether POS Desktop or its services are closed.'
         }
     }
 }

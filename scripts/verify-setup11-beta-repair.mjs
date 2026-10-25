@@ -62,7 +62,7 @@ assert.ok(fs.existsSync(ownedLabJson), 'Owned lab marker missing: ' + ownedLabJs
 const owned = JSON.parse(fs.readFileSync(ownedLabJson, 'utf8'));
 assert.equal(owned.application, application, 'Application directory must match owned lab marker');
 assert.equal(owned.storage, storage, 'Storage directory must match owned lab marker');
-assert.equal(owned.baseline, '0.0.11', 'Baseline version must match owned lab marker');
+assert.equal(owned.version, '0.0.11', 'Baseline version must match owned lab marker');
 
 const candidateInventoryPath = path.join(lab, 'candidate-inventory.json');
 const setup11InventoryPath = path.join(lab, 'setup11-inventory.json');

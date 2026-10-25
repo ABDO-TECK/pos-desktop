@@ -23,9 +23,11 @@ Per human authorization, this release delivers a **signed one-time repair tool**
    - Extract the repair archive into an isolated temporary folder (e.g., `C:\Temp\POS-Repair`), never directly into the application directory or user data roots.
 
 4. **Run the Repair Launcher as the Installation Owner**:
-   - Run the launcher as the **same user** who originally installed and runs POS Desktop.
+   - Run the launcher as the **same installation owner** who originally installed and runs POS Desktop.
    - Do **not** elevate to Administrator by default: default installations are per-user (e.g., `%LOCALAPPDATA%\Programs\pos-desktop`). Unnecessary elevation can point user profile guards and application data paths to the wrong account (`Administrator` instead of the POS user).
-   - Elevate only if the target directory permissions strictly require administrative privileges (e.g., `%ProgramFiles%\POS Desktop`), ensuring the user identity and profile paths are preserved.
+   - Elevate only if installation file or process-ownership-inspection permissions strictly require it, ensuring the user identity and profile paths are preserved.
+   - If the launcher cannot verify process ownership, it fails closed safely; do not kill unrelated global services.
+   - The repair tool performs no state, cache, or database deletion, no migrations, and no trust or key regeneration.
    - Execute via PowerShell:
      ```powershell
      powershell -NoProfile -ExecutionPolicy Bypass -File .\Repair-POS.ps1 -InstallRoot "$env:LOCALAPPDATA\Programs\pos-desktop"
