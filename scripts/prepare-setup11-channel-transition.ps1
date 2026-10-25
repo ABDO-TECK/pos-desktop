@@ -52,7 +52,10 @@ function Find-Tool {
     throw "Tool $Name not found in PATH"
 }
 
-$seven = Find-Tool '7z.exe' (Join-Path $PWD 'node_modules/electron-winstaller/vendor/7z.exe')
+$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $repo 'build/uninstall-data.ps1')
+
+$seven = Find-Tool '7z.exe' (Join-Path $repo 'node_modules/electron-winstaller/vendor/7z.exe')
 $php = Find-Tool 'php.exe' $env:PHP_BINARY
 
 if ($Phase -eq 'prepare') {
@@ -62,16 +65,23 @@ if ($Phase -eq 'prepare') {
         throw 'Security violation: UPDATE_PRIVATE_KEY must not exist during prepare phase.'
     }
 
-    # Verify no leftover POS state in APPDATA / PROGRAMDATA before creating any lab directories
-    foreach ($existing in @(
-        (Join-Path $env:PROGRAMDATA 'POS System'),
-        (Join-Path $env:APPDATA 'POS System'),
-        (Join-Path $env:APPDATA 'pos-desktop'),
-        (Join-Path $env:LOCALAPPDATA 'pos-desktop'),
-        (Join-Path $env:LOCALAPPDATA 'pos-desktop-updater')
-    )) {
+    # Verify no leftover POS state across all 8 canonical POS data targets
+    $targets = @(Get-PosCleanupTargets -Roaming $env:APPDATA -Local $env:LOCALAPPDATA -Shared $env:PROGRAMDATA)
+    foreach ($existing in $targets) {
         if (Test-Path -LiteralPath $existing) {
             throw "Existing POS state blocks isolated acceptance: $existing"
+        }
+    }
+
+    # Verify no existing installed POS registry identity
+    foreach ($regPath in @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.abdoteck.pos',
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.abdoteck.pos',
+        'HKCU:\Software\com.abdoteck.pos',
+        'HKLM:\Software\com.abdoteck.pos'
+    )) {
+        if (Test-Path -LiteralPath $regPath) {
+            throw "Existing POS registry identity blocks fresh prepare phase: $regPath"
         }
     }
 
@@ -136,14 +146,40 @@ if ($Phase -eq 'prepare') {
     gh release download v0.0.10-beta.10 --repo ABDO-TECK/pos-desktop-updates --pattern '*' --dir $beta10Dir
     if ($LASTEXITCODE -ne 0) { throw 'Beta 10 download failed.' }
 
-    # Extract Setup 0.0.11 to lab/app
-    Write-Host 'Extracting Setup 0.0.11 payload...'
-    $appExtract = Join-Path $lab 'setup11-extract'
-    & $seven e $setup11Exe '$PLUGINSDIR\app-64.7z' "-o$appExtract" -y | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to extract app-64.7z from Setup 0.0.11.' }
-    $appDir = Join-Path $lab 'app'
-    & $seven x (Join-Path $appExtract 'app-64.7z') "-o$appDir" -y | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to unpack Setup 0.0.11 application files.' }
+    # Silently install published Setup 0.0.11 into fresh canonical lab/app
+    $appDir = [IO.Path]::GetFullPath((Join-Path $lab 'app'))
+    if (Test-Path -LiteralPath $appDir) {
+        throw "Existing application directory blocks fresh Setup 0.0.11 installation: $appDir"
+    }
+    Assert-SafeDirectory $appDir | Out-Null
+
+    Write-Host "Installing published Setup 0.0.11 silently to $appDir..."
+    $process = Start-Process -FilePath $setup11Exe -ArgumentList @('/S', '/currentuser', "/D=$appDir") -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(180000)) {
+        throw 'Silent Setup 0.0.11 installation timed out.'
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "Silent Setup 0.0.11 installation failed with exit code: $($process.ExitCode)"
+    }
+
+    # Verify native installed application structure
+    $installedExe = Join-Path $appDir 'POS Desktop.exe'
+    if (-not (Test-Path -LiteralPath $installedExe)) {
+        throw "Installed Setup 0.0.11 executable missing: $installedExe"
+    }
+    $installedAsar = Join-Path $appDir 'resources/app.asar'
+    if (-not (Test-Path -LiteralPath $installedAsar)) {
+        throw "Installed Setup 0.0.11 app.asar missing: $installedAsar"
+    }
+    $installedMysql = Join-Path $appDir 'resources/portable/mysql'
+    if (-not (Test-Path -LiteralPath $installedMysql)) {
+        throw "Installed Setup 0.0.11 portable MySQL missing: $installedMysql"
+    }
+    $installedPhp = Join-Path $appDir 'resources/portable/php'
+    if (-not (Test-Path -LiteralPath $installedPhp)) {
+        throw "Installed Setup 0.0.11 portable PHP missing: $installedPhp"
+    }
+    Assert-PosTreeSafe $appDir
 
     # Extract Setup 0.0.1 baseline for Beta 10 reconstruction
     Write-Host 'Extracting Setup 0.0.1 baseline payload...'
