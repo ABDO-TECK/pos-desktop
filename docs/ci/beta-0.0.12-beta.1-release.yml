@@ -699,7 +699,7 @@ jobs:
 
           # 5. Verify RSA signature and package payload using downloaded DRAFT assets BEFORE publication
           Write-Host "Verifying manifest RSA signature and payload on downloaded DRAFT assets..."
-          php scripts/verify-release-package.php --release-dir=$draftDownloadDir --target-version=0.0.12-beta.1 --minimum-version=0.0.11
+          pwsh scripts/verify-beta-release-package.ps1 -ReleaseDir "$draftDownloadDir"
           if ($LASTEXITCODE -ne 0) {
               throw "Pre-publication validation failed: Manifest RSA or package payload invalid on draft assets!"
           }
@@ -807,7 +807,7 @@ jobs:
 
           # Final RSA signature and package payload verification on live public files
           Write-Host "Verifying manifest RSA signature and payload on live published assets..."
-          php scripts/verify-release-package.php --release-dir=$liveDownloadDir --target-version=0.0.12-beta.1 --minimum-version=0.0.11
+          pwsh scripts/verify-beta-release-package.ps1 -ReleaseDir "$liveDownloadDir"
           if ($LASTEXITCODE -ne 0) {
               throw "Post-publication verification failed: Manifest RSA or package payload invalid on live public assets!"
           }

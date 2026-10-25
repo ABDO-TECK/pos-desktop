@@ -292,7 +292,7 @@ elseif ($Phase -eq 'prepare-target') {
     }
 
     Write-Host "Verifying release package in $assetsDir before target reconstruction..."
-    & $php scripts/verify-release-package.php "--release-dir=$assetsDir" --target-version=0.0.12-beta.1 --minimum-version=0.0.11
+    pwsh scripts/verify-beta-release-package.ps1 -ReleaseDir "$assetsDir"
     if ($LASTEXITCODE -ne 0) {
         throw 'Release package pre-verification failed.'
     }
