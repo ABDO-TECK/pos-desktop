@@ -85,6 +85,18 @@ if ($Phase -eq 'prepare') {
         }
     }
 
+    # Guard fresh ProgramData/qz state before first installer/app start
+    # If pre-existing shared QZ / root cert could be independent, fail closed fresh-lab requirement
+    $sharedQzDir = Join-Path $env:PROGRAMDATA 'qz'
+    if (Test-Path -LiteralPath $sharedQzDir) {
+        throw "Existing shared QZ state blocks fresh prepare phase: $sharedQzDir"
+    }
+    foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'QZ Tray/qz-tray.exe'))) {
+            throw "Existing independent QZ Tray installation blocks fresh prepare phase: $programFiles"
+        }
+    }
+
     # Fresh lab & evidence requirement: throw if either exists instead of deleting
     if (Test-Path -LiteralPath $lab) {
         throw "Existing lab directory blocks fresh prepare phase: $lab"

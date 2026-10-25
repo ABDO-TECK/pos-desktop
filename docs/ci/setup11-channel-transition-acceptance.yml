@@ -129,6 +129,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: setup11-channel-transition-evidence
-          path: ${{ runner.temp }}/setup11-channel-transition-evidence
+          path: |
+            ${{ runner.temp }}/setup11-channel-transition-evidence
+            ${{ runner.temp }}/setup11-channel-transition-lab/contract-evidence/contract-qz-diagnostics.json
           if-no-files-found: ignore
           retention-days: 14

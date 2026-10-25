@@ -33,6 +33,414 @@ const posTargets=[
   path.join(process.env.LOCALAPPDATA||'','pos-desktop-updater'),
 ].map(p=>path.resolve(p));
 
+function fileSha256(file){
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function sanitizeReason(str){
+  if(typeof str!=='string')return '';
+  return str
+    .replace(/(["']?(?:password|token|secret|key|private_key|auth|api_key)["']?\s*[:=]\s*["'])([^"'\n]+)(["'])/gi,'$1[REDACTED]$3')
+    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA )?PRIVATE KEY-----/g,'[REDACTED PRIVATE KEY]')
+    .replace(/bearer\s+[A-Za-z0-9_\-\.]+/gi,'Bearer [REDACTED]')
+    .replace(/p(?:assword)?=[^;&\s]+/gi,'password=[REDACTED]');
+}
+
+function getPortableBinariesHashes(appDir,desktopLabUi){
+  const hasher=desktopLabUi?.hash?desktopLabUi.hash.bind(desktopLabUi):fileSha256;
+  const portableDir=path.join(appDir,'resources','portable');
+  const hashes={};
+  function scan(dir){
+    if(!fs.existsSync(dir))return;
+    for(const item of fs.readdirSync(dir,{withFileTypes:true})){
+      const full=path.join(dir,item.name);
+      if(item.isDirectory()){
+        scan(full);
+      }else if(item.isFile()){
+        const rel=path.relative(portableDir,full).replace(/\\/g,'/');
+        const ext=path.extname(item.name).toLowerCase();
+        if(ext==='.exe'||ext==='.dll'||ext==='.jar'){
+          hashes[rel]=hasher(full);
+        }
+      }
+    }
+  }
+  scan(portableDir);
+  // Also scan resources root for Java / QZ runtime jar if bundled
+  const resourcesDir=path.join(appDir,'resources');
+  if(fs.existsSync(resourcesDir)){
+    for(const item of fs.readdirSync(resourcesDir,{withFileTypes:true})){
+      if(item.isFile()&&item.name.toLowerCase().endsWith('.jar')){
+        hashes['resources/'+item.name]=hasher(path.join(resourcesDir,item.name));
+      }
+    }
+  }
+  assert.ok(Object.keys(hashes).length>0,'Portable binaries list (.exe, .dll, .jar) must be non-zero');
+  return hashes;
+}
+
+async function getSystemProtectedState(desktopLabUi){
+  // 1. Mandatory credentials: look across the 8 POS targets
+  const credFiles=[];
+  for(const target of posTargets){
+    const p=path.join(target,'db_credentials.json');
+    if(fs.existsSync(p)&&fs.statSync(p).isFile()&&fs.statSync(p).size>0){
+      credFiles.push(p);
+    }
+  }
+  assert.ok(credFiles.length>0,'Mandatory credentials file missing or empty in POS data targets');
+
+  // 2. Environment files (.env): look across the 8 POS targets
+  const envFiles=[];
+  for(const target of posTargets){
+    const p=path.join(target,'.env');
+    if(fs.existsSync(p)&&fs.statSync(p).isFile()&&fs.statSync(p).size>0){
+      envFiles.push(p);
+    }
+  }
+
+  // 3. Mandatory runtime QZ certificate pair (private-key.pem and digital-certificate.pem)
+  let foundQzDir=null;
+  for(const target of posTargets){
+    const dir=path.join(target,'qz-certs');
+    const key=path.join(dir,'private-key.pem');
+    const cert=path.join(dir,'digital-certificate.pem');
+    if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
+      foundQzDir=dir;
+      break;
+    }
+  }
+
+  // If not initialized, trigger real production IPC / UI printing initialization
+  if(!foundQzDir){
+    console.log('QZ cert pair not yet on disk; triggering real production printing IPC initialization...');
+    await desktopLabUi.evaluate('window.pos?.getQZCert ? window.pos.getQZCert() : null').catch(()=>null);
+    for(let i=0;i<20&&!foundQzDir;i++){
+      await delay(500);
+      for(const target of posTargets){
+        const dir=path.join(target,'qz-certs');
+        const key=path.join(dir,'private-key.pem');
+        const cert=path.join(dir,'digital-certificate.pem');
+        if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
+          foundQzDir=dir;
+          break;
+        }
+      }
+    }
+  }
+  assert.ok(foundQzDir,'Mandatory runtime QZ private-key.pem and digital-certificate.pem pair missing after printing initialization');
+  const qzKeyPath=path.join(foundQzDir,'private-key.pem');
+  const qzCertPath=path.join(foundQzDir,'digital-certificate.pem');
+
+  // Verify ssl-installed.flag when architecture present
+  const qzJar=path.join(application,'resources','portable','qz-tray','qz-tray.jar');
+  const javaBin=path.join(application,'resources','portable','java','bin','java.exe');
+  const architecturePresent=fs.existsSync(qzJar)&&fs.existsSync(javaBin);
+  if(architecturePresent){
+    const flagPath=path.join(foundQzDir,'ssl-installed.flag');
+    assert.ok(fs.existsSync(flagPath),'Mandatory ssl-installed.flag missing when architecture present: '+flagPath);
+    const flagContent=fs.readFileSync(flagPath,'utf8').trim();
+    assert.equal(flagContent,'installed',`ssl-installed.flag must be installed, got: '${flagContent}'`);
+  }
+
+  // Discover all device key/cert files across the 8 targets (matching verify-original-setup-upgrade.ps1:276-290)
+  const deviceKeyMap={
+    [qzKeyPath]:desktopLabUi.hash(qzKeyPath),
+    [qzCertPath]:desktopLabUi.hash(qzCertPath)
+  };
+  for(const target of posTargets){
+    if(!fs.existsSync(target))continue;
+    function scanKeys(dir){
+      for(const item of fs.readdirSync(dir,{withFileTypes:true})){
+        const full=path.join(dir,item.name);
+        if(item.isDirectory()){
+          scanKeys(full);
+        }else if(item.isFile()){
+          const ext=path.extname(item.name).toLowerCase();
+          if(ext==='.key'||ext==='.crt'||ext==='.pem'){
+            const resolved=path.resolve(full);
+            if(!deviceKeyMap[resolved]&&fs.statSync(resolved).size>0){
+              deviceKeyMap[resolved]=desktopLabUi.hash(resolved);
+            }
+          }
+        }
+      }
+    }
+    scanKeys(target);
+  }
+  assert.ok(Object.keys(deviceKeyMap).length>=2,'At least 2 device key/certificate files must be discovered');
+
+  // 4. Snapshot printing ownership receipt (discovered across the 8 POS targets)
+  // Matching verify-original-setup-upgrade.ps1:208-238: REQUIRES exactly ONE ownership receipt, qz root files nonzero, Enterprise trust exists
+  const receipts=[];
+  for(const target of posTargets){
+    const p=path.join(target,'qz-shared-install.json');
+    if(fs.existsSync(p)&&fs.statSync(p).isFile()){
+      assert.ok(fs.statSync(p).size>0,'QZ ownership receipt file is empty: '+p);
+      receipts.push(p);
+    }
+  }
+  assert.equal(receipts.length,1,`Original baseline did not record ownership of QZ printing trust in POS data targets (found ${receipts.length})`);
+  const receiptPath=path.resolve(receipts[0]);
+  const receiptDigest=desktopLabUi.hash(receiptPath);
+  const ownership=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
+
+  assert.ok(typeof ownership.rootCertificateBase64==='string'&&ownership.rootCertificateBase64.length>0,'Ownership receipt missing rootCertificateBase64');
+  const certDer=Buffer.from(ownership.rootCertificateBase64,'base64');
+  assert.ok(certDer.length>0,'Root certificate base64 decoded to zero bytes');
+  const printingThumbprint=crypto.createHash('sha1').update(certDer).digest('hex').toUpperCase();
+  assert.equal(printingThumbprint.length,40,'Computed certificate thumbprint must be 40 hex characters');
+
+  // Verify printing root certificate is installed in Enterprise store; subprocess errors MUST fail (not warn/catch)
+  const enterpriseKeyPath=`Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\EnterpriseCertificates\\Root\\Certificates\\${printingThumbprint}`;
+  const enterpriseCheck=execFileSync('powershell.exe',[
+    '-NoProfile','-NonInteractive','-Command',
+    `if (Test-Path -LiteralPath '${enterpriseKeyPath}') { 'True' } else { 'False' }`
+  ],{encoding:'utf8',windowsHide:true}).trim();
+  assert.equal(enterpriseCheck,'True',`Printing root certificate was not installed in Enterprise trust store: ${enterpriseKeyPath}`);
+
+  // ownership.files must be non-empty array, each valid normalized REL path under PROGRAMDATA/qz (no absolute, traversal, reparses)
+  assert.ok(Array.isArray(ownership.files)&&ownership.files.length>0,'Ownership receipt must declare non-empty files array');
+  const qzRoot=path.resolve(process.env.PROGRAMDATA||'C:\\ProgramData','qz');
+  const qzTrustFiles={};
+  for(const file of ownership.files){
+    assert.ok(file&&typeof file.path==='string'&&file.path.length>0,'Invalid owned file entry in ownership receipt');
+    assert.ok(!path.isAbsolute(file.path),'Owned file path must not be absolute: '+file.path);
+    const normalized=path.normalize(file.path).replace(/^[/\\]+/,'');
+    assert.ok(!normalized.startsWith('..')&&!path.isAbsolute(normalized),'Owned file path traversal detected: '+file.path);
+    const absPath=path.resolve(qzRoot,normalized);
+    assert.ok(absPath.startsWith(qzRoot+path.sep)||absPath===qzRoot,'Owned file path escapes PROGRAMDATA/qz: '+file.path);
+    assert.ok(fs.existsSync(absPath)&&fs.statSync(absPath).isFile(),'Owned printing file missing from disk: '+absPath);
+    assert.ok(fs.statSync(absPath).size>0,'Owned printing file must be non-empty: '+absPath);
+    qzTrustFiles[normalized]=desktopLabUi.hash(absPath).toLowerCase();
+  }
+
+  // 5. Optional LAN SSL keypair capture: look across the 8 POS targets
+  let lanSslEnabled=false;
+  const sslFiles=[];
+  for(const target of posTargets){
+    const key=path.join(target,'ssl','server.key');
+    const cert=path.join(target,'ssl','server.crt');
+    if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
+      lanSslEnabled=true;
+      sslFiles.push(key,cert);
+      break;
+    }
+  }
+
+  // Keep all secret hashes in-memory only (never exported to evidence or logs)
+  const secrets={
+    credentials:Object.fromEntries(credFiles.map(f=>[f,desktopLabUi.hash(f)])),
+    env:Object.fromEntries(envFiles.map(f=>[f,desktopLabUi.hash(f)])),
+    deviceKeys:deviceKeyMap,
+    qzReceipt:{
+      [receiptPath]:receiptDigest
+    },
+    qzTrust:qzTrustFiles,
+    sslCerts:Object.fromEntries(sslFiles.map(f=>[f,desktopLabUi.hash(f)]))
+  };
+
+  const publicData={
+    portableHashes:getPortableBinariesHashes(application,desktopLabUi),
+    lanSslEnabled,
+    printingThumbprint,
+    printingTrustInstalled:true,
+    ownedPrintingFilesCount:Object.keys(qzTrustFiles).length,
+    deviceKeyFilesCount:Object.keys(deviceKeyMap).length,
+    envFilesCount:envFiles.length
+  };
+
+  return {secrets,public:publicData};
+}
+
+function assertProtectedStatePreserved(initial,current,stageName){
+  // Compare secret state strictly in-memory using boolean comparisons
+  // DO NOT use assert.deepEqual on secrets to prevent Node from printing secret hashes in failure traces
+  for(const [category,initialFiles] of Object.entries(initial.secrets)){
+    const currentFiles=current.secrets[category]||{};
+    const initKeys=Object.keys(initialFiles);
+    const currKeys=Object.keys(currentFiles);
+    if(initKeys.length!==currKeys.length){
+      throw new Error(`Protected file count mismatch in category '${category}' during ${stageName}`);
+    }
+    for(const [filePath,expectedHash] of Object.entries(initialFiles)){
+      const currentHash=currentFiles[filePath];
+      if(typeof currentHash!=='string'||currentHash!==expectedHash){
+        const baseName=path.basename(filePath);
+        throw new Error(`Protected file modified in category '${category}': ${baseName} during ${stageName}`);
+      }
+    }
+  }
+
+  // Public portable binary hashes: standard assertion
+  assert.deepEqual(current.public.portableHashes,initial.public.portableHashes,`Portable binaries modified during ${stageName}`);
+  assert.equal(current.public.lanSslEnabled,initial.public.lanSslEnabled,`LAN SSL status changed during ${stageName}`);
+  assert.equal(current.public.printingThumbprint,initial.public.printingThumbprint,`Printing thumbprint changed during ${stageName}`);
+  assert.equal(current.public.printingTrustInstalled,true,`Printing trust not installed during ${stageName}`);
+  assert.equal(current.public.printingTrustInstalled,initial.public.printingTrustInstalled,`Printing trust installed flag changed during ${stageName}`);
+  assert.equal(current.public.ownedPrintingFilesCount,initial.public.ownedPrintingFilesCount,`Owned printing files count changed during ${stageName}`);
+}
+
+async function waitForQZProvisioning(desktopLabUi,appDir,evidenceDir,timeoutMs=180000){
+  const deadline=Date.now()+timeoutMs;
+  const qzJar=path.join(appDir,'resources','portable','qz-tray','qz-tray.jar');
+  const javaBin=path.join(appDir,'resources','portable','java','bin','java.exe');
+  const architecturePresent=fs.existsSync(qzJar)&&fs.existsSync(javaBin);
+
+  let lastFailureReason='INITIALIZING';
+
+  while(Date.now()<deadline){
+    // 1. Probe keypair
+    let foundQzDir=null;
+    for(const target of posTargets){
+      const dir=path.join(target,'qz-certs');
+      const key=path.join(dir,'private-key.pem');
+      const cert=path.join(dir,'digital-certificate.pem');
+      if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
+        foundQzDir=dir;
+        break;
+      }
+    }
+
+    if(!foundQzDir){
+      await desktopLabUi.evaluate('window.pos?.getQZCert ? window.pos.getQZCert() : null').catch(()=>null);
+      lastFailureReason='KEYPAIR_MISSING';
+      await delay(1000);
+      continue;
+    }
+
+    // 2. Check ssl-installed.flag when architecture present
+    if(architecturePresent){
+      const flagPath=path.join(foundQzDir,'ssl-installed.flag');
+      if(!fs.existsSync(flagPath)){
+        lastFailureReason='SSL_FLAG_MISSING';
+        await delay(1000);
+        continue;
+      }
+      const flagContent=fs.readFileSync(flagPath,'utf8').trim();
+      if(flagContent==='skipped'){
+        throw new Error('QZ silent SSL installation was skipped (UAC cancellation or execution error)');
+      }
+      if(flagContent!=='installed'){
+        throw new Error(`Unexpected ssl-installed.flag content: ${flagContent}`);
+      }
+    }
+
+    // 3. Check ownership receipt
+    const receipts=[];
+    for(const target of posTargets){
+      const p=path.join(target,'qz-shared-install.json');
+      if(fs.existsSync(p)&&fs.statSync(p).isFile()){
+        receipts.push(p);
+      }
+    }
+
+    if(receipts.length===0){
+      lastFailureReason='RECEIPT_MISSING';
+      await delay(1000);
+      continue;
+    }
+
+    if(receipts.length>1){
+      throw new Error(`Multiple QZ ownership receipts found (${receipts.length})`);
+    }
+
+    const receiptPath=receipts[0];
+    if(fs.statSync(receiptPath).size===0){
+      lastFailureReason='RECEIPT_EMPTY';
+      await delay(1000);
+      continue;
+    }
+
+    let ownership;
+    try{
+      ownership=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
+    }catch(e){
+      throw new Error(`Corrupt QZ ownership receipt JSON: ${e.message}`);
+    }
+
+    if(typeof ownership.rootCertificateBase64!=='string'||!ownership.rootCertificateBase64){
+      throw new Error('Ownership receipt missing rootCertificateBase64');
+    }
+
+    if(!Array.isArray(ownership.files)||ownership.files.length===0){
+      throw new Error('Ownership receipt must declare non-empty files array');
+    }
+
+    const certDer=Buffer.from(ownership.rootCertificateBase64,'base64');
+    if(certDer.length===0){
+      throw new Error('Root certificate base64 decoded to zero bytes');
+    }
+
+    const printingThumbprint=crypto.createHash('sha1').update(certDer).digest('hex').toUpperCase();
+    if(printingThumbprint.length!==40){
+      throw new Error('Computed certificate thumbprint must be 40 hex characters');
+    }
+
+    // 4. Check Enterprise Windows registry store
+    const enterpriseKeyPath=`Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\EnterpriseCertificates\\Root\\Certificates\\${printingThumbprint}`;
+    const enterpriseCheck=execFileSync('powershell.exe',[
+      '-NoProfile','-NonInteractive','-Command',
+      `if (Test-Path -LiteralPath '${enterpriseKeyPath}') { 'True' } else { 'False' }`
+    ],{encoding:'utf8',windowsHide:true}).trim();
+
+    if(enterpriseCheck!=='True'){
+      lastFailureReason='ENTERPRISE_REGISTRY_CERT_NOT_INSTALLED';
+      await delay(1000);
+      continue;
+    }
+
+    // All readiness predicates satisfied!
+    return true;
+  }
+
+  // Timed out: assemble allowlist diagnostics
+  const receiptCount=posTargets.filter(t=>fs.existsSync(path.join(t,'qz-shared-install.json'))).length;
+  let keypairPresence=false;
+  let sslFlagStatus='missing';
+  for(const target of posTargets){
+    const k=path.join(target,'qz-certs','private-key.pem');
+    const c=path.join(target,'qz-certs','digital-certificate.pem');
+    if(fs.existsSync(k)&&fs.existsSync(c)&&fs.statSync(k).size>0&&fs.statSync(c).size>0){
+      keypairPresence=true;
+    }
+    const f=path.join(target,'qz-certs','ssl-installed.flag');
+    if(fs.existsSync(f)){
+      try{sslFlagStatus=fs.readFileSync(f,'utf8').trim();}catch{}
+    }
+  }
+  const rootCertPresence=fs.existsSync(path.join(process.env.PROGRAMDATA||'C:\\ProgramData','qz','ssl','root-ca.crt'));
+
+  const safeLogLines=[];
+  const logFile=path.join(evidenceDir,'desktop.log');
+  if(fs.existsSync(logFile)){
+    try{
+      const lines=fs.readFileSync(logFile,'utf8').split(/\r?\n/);
+      for(const line of lines){
+        if(/\[(?:QZ Certs|QZ Tray|QZ Service)\]/i.test(line)){
+          safeLogLines.push(sanitizeReason(line.trim()));
+        }
+      }
+    }catch{}
+  }
+
+  const diagnostics={
+    receiptCount,
+    keypairPresence,
+    rootCertPresence,
+    sslFlagStatus,
+    publicStageOrFailureCode:lastFailureReason,
+    safeQZMessageLines:safeLogLines.slice(-25)
+  };
+
+  try{
+    fs.writeFileSync(path.join(evidenceDir,'contract-qz-diagnostics.json'),JSON.stringify(diagnostics,null,2));
+  }catch{}
+
+  console.error('[Contract QZ Readiness Diagnostics]',JSON.stringify(diagnostics,null,2));
+  throw new Error(`Bounded wait timed out waiting for QZ provisioning completion (${lastFailureReason}): receipts=${receiptCount}, keypair=${keypairPresence}, rootCert=${rootCertPresence}, sslFlag=${sslFlagStatus}`);
+}
+
 if(phase==='contract'){
   const ui=createDesktopLab(application,evidence);
   try{
@@ -43,12 +451,21 @@ if(phase==='contract'){
     const auth=await ui.freshLogin();
     // Ephemeral fixture credentials stay outside evidence and release artifacts.
     fs.writeFileSync(path.join(lab,'fixture-auth.json'),JSON.stringify(auth),{mode:0o600});
+
+    // Wait for actual native QZ provisioning to finish before first shutdown
+    await waitForQZProvisioning(ui,application,evidence,180000);
+
+    // Snapshot and verify real protected system state (keypair, Enterprise root cert, receipt, owned files)
+    const systemState=await getSystemProtectedState(ui);
+    assert.equal(systemState.public.printingTrustInstalled,true,'Printing trust must be installed in Enterprise store');
+    assert.ok(systemState.public.ownedPrintingFilesCount>0,'Must own at least one printing file');
+
     const contract=sql('prepare-compatibility');
     assert.equal(contract.runtime_metadata_readable,true);
     assert.equal(contract.metadata_view_read_only,true);
     fs.writeFileSync(path.join(lab,'data-contract.json'),JSON.stringify(contract,null,2));
     fs.writeFileSync(path.join(lab,'owned-lab.json'),JSON.stringify({application,storage,version:'0.0.11'}));
-    console.log('PASS Setup 0.0.11 contract: actual MariaDB metadata readable with restricted runtime; business schema retained');
+    console.log('PASS Setup 0.0.11 contract: actual MariaDB metadata readable with restricted runtime; business schema retained; owned QZ trust established');
   }finally{
     await ui.stop();
   }
@@ -174,238 +591,6 @@ async function waitForApplySlot(limiter='transition_apply'){
     }
   }
   history.push(Date.now());
-}
-
-function getPortableBinariesHashes(appDir){
-  const portableDir=path.join(appDir,'resources','portable');
-  const hashes={};
-  function scan(dir){
-    if(!fs.existsSync(dir))return;
-    for(const item of fs.readdirSync(dir,{withFileTypes:true})){
-      const full=path.join(dir,item.name);
-      if(item.isDirectory()){
-        scan(full);
-      }else if(item.isFile()){
-        const rel=path.relative(portableDir,full).replace(/\\/g,'/');
-        const ext=path.extname(item.name).toLowerCase();
-        if(ext==='.exe'||ext==='.dll'||ext==='.jar'){
-          hashes[rel]=ui.hash(full);
-        }
-      }
-    }
-  }
-  scan(portableDir);
-  // Also scan resources root for Java / QZ runtime jar if bundled
-  const resourcesDir=path.join(appDir,'resources');
-  if(fs.existsSync(resourcesDir)){
-    for(const item of fs.readdirSync(resourcesDir,{withFileTypes:true})){
-      if(item.isFile()&&item.name.toLowerCase().endsWith('.jar')){
-        hashes['resources/'+item.name]=ui.hash(path.join(resourcesDir,item.name));
-      }
-    }
-  }
-  assert.ok(Object.keys(hashes).length>0,'Portable binaries list (.exe, .dll, .jar) must be non-zero');
-  return hashes;
-}
-
-async function getSystemProtectedState(desktopLabUi){
-  // 1. Mandatory credentials: look across the 8 POS targets
-  const credFiles=[];
-  for(const target of posTargets){
-    const p=path.join(target,'db_credentials.json');
-    if(fs.existsSync(p)&&fs.statSync(p).isFile()&&fs.statSync(p).size>0){
-      credFiles.push(p);
-    }
-  }
-  assert.ok(credFiles.length>0,'Mandatory credentials file missing or empty in POS data targets');
-
-  // 2. Environment files (.env): look across the 8 POS targets
-  const envFiles=[];
-  for(const target of posTargets){
-    const p=path.join(target,'.env');
-    if(fs.existsSync(p)&&fs.statSync(p).isFile()&&fs.statSync(p).size>0){
-      envFiles.push(p);
-    }
-  }
-
-  // 3. Mandatory runtime QZ certificate pair (private-key.pem and digital-certificate.pem)
-  let foundQzDir=null;
-  for(const target of posTargets){
-    const dir=path.join(target,'qz-certs');
-    const key=path.join(dir,'private-key.pem');
-    const cert=path.join(dir,'digital-certificate.pem');
-    if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
-      foundQzDir=dir;
-      break;
-    }
-  }
-
-  // If not initialized, trigger real production IPC / UI printing initialization
-  if(!foundQzDir){
-    console.log('QZ cert pair not yet on disk; triggering real production printing IPC initialization...');
-    await desktopLabUi.evaluate('window.pos?.getQZCert ? window.pos.getQZCert() : null').catch(()=>null);
-    for(let i=0;i<20&&!foundQzDir;i++){
-      await delay(500);
-      for(const target of posTargets){
-        const dir=path.join(target,'qz-certs');
-        const key=path.join(dir,'private-key.pem');
-        const cert=path.join(dir,'digital-certificate.pem');
-        if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
-          foundQzDir=dir;
-          break;
-        }
-      }
-    }
-  }
-  assert.ok(foundQzDir,'Mandatory runtime QZ private-key.pem and digital-certificate.pem pair missing after printing initialization');
-  const qzKeyPath=path.join(foundQzDir,'private-key.pem');
-  const qzCertPath=path.join(foundQzDir,'digital-certificate.pem');
-
-  // Discover all device key/cert files across the 8 targets (matching verify-original-setup-upgrade.ps1:276-290)
-  const deviceKeyMap={
-    [qzKeyPath]:desktopLabUi.hash(qzKeyPath),
-    [qzCertPath]:desktopLabUi.hash(qzCertPath)
-  };
-  for(const target of posTargets){
-    if(!fs.existsSync(target))continue;
-    function scanKeys(dir){
-      for(const item of fs.readdirSync(dir,{withFileTypes:true})){
-        const full=path.join(dir,item.name);
-        if(item.isDirectory()){
-          scanKeys(full);
-        }else if(item.isFile()){
-          const ext=path.extname(item.name).toLowerCase();
-          if(ext==='.key'||ext==='.crt'||ext==='.pem'){
-            const resolved=path.resolve(full);
-            if(!deviceKeyMap[resolved]&&fs.statSync(resolved).size>0){
-              deviceKeyMap[resolved]=desktopLabUi.hash(resolved);
-            }
-          }
-        }
-      }
-    }
-    scanKeys(target);
-  }
-  assert.ok(Object.keys(deviceKeyMap).length>=2,'At least 2 device key/certificate files must be discovered');
-
-  // 4. Snapshot printing ownership receipt (discovered across the 8 POS targets)
-  // Matching verify-original-setup-upgrade.ps1:208-238: REQUIRES exactly ONE ownership receipt, qz root files nonzero, Enterprise trust exists
-  const receipts=[];
-  for(const target of posTargets){
-    const p=path.join(target,'qz-shared-install.json');
-    if(fs.existsSync(p)&&fs.statSync(p).isFile()){
-      assert.ok(fs.statSync(p).size>0,'QZ ownership receipt file is empty: '+p);
-      receipts.push(p);
-    }
-  }
-  assert.equal(receipts.length,1,`Original baseline did not record ownership of QZ printing trust in POS data targets (found ${receipts.length})`);
-  const receiptPath=path.resolve(receipts[0]);
-  const receiptDigest=desktopLabUi.hash(receiptPath);
-  const ownership=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
-
-  assert.ok(typeof ownership.rootCertificateBase64==='string'&&ownership.rootCertificateBase64.length>0,'Ownership receipt missing rootCertificateBase64');
-  const certDer=Buffer.from(ownership.rootCertificateBase64,'base64');
-  assert.ok(certDer.length>0,'Root certificate base64 decoded to zero bytes');
-  const printingThumbprint=crypto.createHash('sha1').update(certDer).digest('hex').toUpperCase();
-  assert.equal(printingThumbprint.length,40,'Computed certificate thumbprint must be 40 hex characters');
-
-  // Verify printing root certificate is installed in Enterprise store; subprocess errors MUST fail (not warn/catch)
-  const enterpriseKeyPath=`Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\EnterpriseCertificates\\Root\\Certificates\\${printingThumbprint}`;
-  const enterpriseCheck=execFileSync('powershell.exe',[
-    '-NoProfile','-NonInteractive','-Command',
-    `if (Test-Path -LiteralPath '${enterpriseKeyPath}') { 'True' } else { 'False' }`
-  ],{encoding:'utf8',windowsHide:true}).trim();
-  assert.equal(enterpriseCheck,'True',`Printing root certificate was not installed in Enterprise trust store: ${enterpriseKeyPath}`);
-
-  // ownership.files must be non-empty array, each valid normalized REL path under PROGRAMDATA/qz (no absolute, traversal, reparses)
-  assert.ok(Array.isArray(ownership.files)&&ownership.files.length>0,'Ownership receipt must declare non-empty files array');
-  const qzRoot=path.resolve(process.env.PROGRAMDATA||'C:\\ProgramData','qz');
-  const qzTrustFiles={};
-  for(const file of ownership.files){
-    assert.ok(file&&typeof file.path==='string'&&file.path.length>0,'Invalid owned file entry in ownership receipt');
-    assert.ok(!path.isAbsolute(file.path),'Owned file path must not be absolute: '+file.path);
-    const normalized=path.normalize(file.path).replace(/^[/\\]+/,'');
-    assert.ok(!normalized.startsWith('..')&&!path.isAbsolute(normalized),'Owned file path traversal detected: '+file.path);
-    const absPath=path.resolve(qzRoot,normalized);
-    assert.ok(absPath.startsWith(qzRoot+path.sep)||absPath===qzRoot,'Owned file path escapes PROGRAMDATA/qz: '+file.path);
-    assert.ok(fs.existsSync(absPath)&&fs.statSync(absPath).isFile(),'Owned printing file missing from disk: '+absPath);
-    assert.ok(fs.statSync(absPath).size>0,'Owned printing file must be non-empty: '+absPath);
-    qzTrustFiles[normalized]=desktopLabUi.hash(absPath).toLowerCase();
-  }
-
-  // 5. Optional LAN SSL keypair capture: look across the 8 POS targets
-  let lanSslEnabled=false;
-  const sslFiles=[];
-  for(const target of posTargets){
-    const key=path.join(target,'ssl','server.key');
-    const cert=path.join(target,'ssl','server.crt');
-    if(fs.existsSync(key)&&fs.existsSync(cert)&&fs.statSync(key).size>0&&fs.statSync(cert).size>0){
-      lanSslEnabled=true;
-      sslFiles.push(key,cert);
-      break;
-    }
-  }
-
-  // Keep all secret hashes in-memory only (never exported to evidence or logs)
-  const secrets={
-    credentials:Object.fromEntries(credFiles.map(f=>[f,desktopLabUi.hash(f)])),
-    env:Object.fromEntries(envFiles.map(f=>[f,desktopLabUi.hash(f)])),
-    deviceKeys:deviceKeyMap,
-    qzReceipt:{
-      [receiptPath]:receiptDigest
-    },
-    qzTrust:qzTrustFiles,
-    sslCerts:Object.fromEntries(sslFiles.map(f=>[f,desktopLabUi.hash(f)]))
-  };
-
-  const publicData={
-    portableHashes:getPortableBinariesHashes(application),
-    lanSslEnabled,
-    printingThumbprint,
-    printingTrustInstalled:true,
-    ownedPrintingFilesCount:Object.keys(qzTrustFiles).length,
-    deviceKeyFilesCount:Object.keys(deviceKeyMap).length,
-    envFilesCount:envFiles.length
-  };
-
-  return {secrets,public:publicData};
-}
-
-function assertProtectedStatePreserved(initial,current,stageName){
-  // Compare secret state strictly in-memory using boolean comparisons
-  // DO NOT use assert.deepEqual on secrets to prevent Node from printing secret hashes in failure traces
-  for(const [category,initialFiles] of Object.entries(initial.secrets)){
-    const currentFiles=current.secrets[category]||{};
-    const initKeys=Object.keys(initialFiles);
-    const currKeys=Object.keys(currentFiles);
-    if(initKeys.length!==currKeys.length){
-      throw new Error(`Protected file count mismatch in category '${category}' during ${stageName}`);
-    }
-    for(const [filePath,expectedHash] of Object.entries(initialFiles)){
-      const currentHash=currentFiles[filePath];
-      if(typeof currentHash!=='string'||currentHash!==expectedHash){
-        const baseName=path.basename(filePath);
-        throw new Error(`Protected file modified in category '${category}': ${baseName} during ${stageName}`);
-      }
-    }
-  }
-
-  // Public portable binary hashes: standard assertion
-  assert.deepEqual(current.public.portableHashes,initial.public.portableHashes,`Portable binaries modified during ${stageName}`);
-  assert.equal(current.public.lanSslEnabled,initial.public.lanSslEnabled,`LAN SSL status changed during ${stageName}`);
-  assert.equal(current.public.printingThumbprint,initial.public.printingThumbprint,`Printing thumbprint changed during ${stageName}`);
-  assert.equal(current.public.printingTrustInstalled,true,`Printing trust not installed during ${stageName}`);
-  assert.equal(current.public.printingTrustInstalled,initial.public.printingTrustInstalled,`Printing trust installed flag changed during ${stageName}`);
-  assert.equal(current.public.ownedPrintingFilesCount,initial.public.ownedPrintingFilesCount,`Owned printing files count changed during ${stageName}`);
-}
-
-function sanitizeReason(str){
-  if(typeof str!=='string')return '';
-  return str
-    .replace(/(["']?(?:password|token|secret|key|private_key|auth|api_key)["']?\s*[:=]\s*["'])([^"'\n]+)(["'])/gi,'$1[REDACTED]$3')
-    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA )?PRIVATE KEY-----/g,'[REDACTED PRIVATE KEY]')
-    .replace(/bearer\s+[A-Za-z0-9_\-\.]+/gi,'Bearer [REDACTED]')
-    .replace(/p(?:assword)?=[^;&\s]+/gi,'password=[REDACTED]');
 }
 
 const ui=createDesktopLab(application,evidence);
