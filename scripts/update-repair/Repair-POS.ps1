@@ -14,6 +14,24 @@ function Get-Prop($obj, [string]$prop, $default = $null) {
     return $default
 }
 
+function Get-FileSha256([string]$Path) {
+    $sha256 = $null
+    $stream = $null
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $stream = [System.IO.File]::OpenRead($Path)
+        $hashBytes = $sha256.ComputeHash($stream)
+        return [System.BitConverter]::ToString($hashBytes).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        if ($null -ne $sha256) {
+            $sha256.Dispose()
+        }
+    }
+}
+
 function Assert-NoReparse([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $item = Get-Item -LiteralPath $Path -Force
@@ -322,7 +340,7 @@ try {
             throw "Required public native binary missing: $rel"
         }
         Assert-NoReparse $fullPath
-        $actualHash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256 $fullPath
         $expectedHash = $prop.Value.ToString().ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
             throw "Public native binary hash mismatch for $rel. Expected $expectedHash, got $actualHash"

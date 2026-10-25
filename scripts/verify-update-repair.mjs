@@ -694,7 +694,7 @@ const ps1Source = fs.readFileSync(path.join(source, 'scripts/update-repair/Repai
 const ps1Patched = ps1Source.replace('@PUBLIC_KEY_XML@', publicXml);
 write(path.join(psLab, 'Repair-POS.ps1'), ps1Patched);
 
-function makeTestEngineZip(configOverrides = {}) {
+function makeTestEngineZip(configOverrides = {}, destDir = psLab) {
   const engineConfig = {
     tool_version: '1.0.0',
     installer_version: '0.0.11',
@@ -713,8 +713,8 @@ function makeTestEngineZip(configOverrides = {}) {
     },
     ...configOverrides
   };
-  const zipPath = path.join(psLab, 'repair-engine.zip');
-  const sigPath = path.join(psLab, 'repair-engine.sig');
+  const zipPath = path.join(destDir, 'repair-engine.zip');
+  const sigPath = path.join(destDir, 'repair-engine.sig');
   makeZip(zipPath, {
     'repair.php': '<?php echo "dummy repair";',
     'repair-config.json': JSON.stringify(engineConfig, null, 2)
@@ -934,6 +934,113 @@ if (process.platform === 'win32') {
     `throw 'Simulated CIM query failure'`,
     /Simulated CIM query failure/,
     'CIM query failure fails closed'
+  );
+}
+
+// Case 13: Native pin SHA256 streaming verification without Get-FileHash dependency (Windows only)
+if (process.platform === 'win32') {
+  const psNativePinLab = path.join(lab, 'test-ps-native-pin-lab');
+  fs.mkdirSync(psNativePinLab, {recursive: true});
+
+  const psNativePinInstall = path.join(psNativePinLab, 'install');
+  const psNativePinScript = path.join(psNativePinLab, 'Repair-POS.ps1');
+  write(psNativePinScript, ps1Patched);
+
+  // App root files required before native pin checks
+  write(path.join(psNativePinInstall, 'POS Desktop.exe'), 'genuine fixture pos desktop exe');
+  write(path.join(psNativePinInstall, 'resources/app.asar'), 'genuine fixture app asar');
+  write(path.join(psNativePinInstall, 'resources/app.asar.unpacked/version.json'), JSON.stringify({version: '0.0.11', channel: 'beta', installer_version: '0.0.11'}));
+  write(path.join(psNativePinInstall, 'resources/app.asar.unpacked/backend/backend.phar'), 'genuine fixture backend phar');
+  write(path.join(psNativePinInstall, 'resources/portable/php/php.exe'), 'genuine fixture portable php exe');
+
+  // Genuine required PHP extension DLLs
+  write(path.join(psNativePinInstall, 'resources/portable/php/ext/php_openssl.dll'), 'fixture php_openssl dll');
+  write(path.join(psNativePinInstall, 'resources/portable/php/ext/php_curl.dll'), 'fixture php_curl dll');
+  write(path.join(psNativePinInstall, 'resources/portable/php/ext/php_mbstring.dll'), 'fixture php_mbstring dll');
+  write(path.join(psNativePinInstall, 'resources/portable/php/ext/php_zip.dll'), 'fixture php_zip dll');
+
+  // 316 noncritical DLL fixture files (bringing total native pins to 7 + 316 = 323)
+  for (let i = 0; i < 316; i++) {
+    write(path.join(psNativePinInstall, `resources/portable/bin_${i}.dll`), `fixture portable dll ${i}`);
+  }
+
+  // Construct native pins list and compute genuine SHA-256 hashes
+  const nativePinsList = [
+    'POS Desktop.exe',
+    'resources/app.asar',
+    'resources/portable/php/php.exe',
+    'resources/portable/php/ext/php_openssl.dll',
+    'resources/portable/php/ext/php_curl.dll',
+    'resources/portable/php/ext/php_mbstring.dll',
+    'resources/portable/php/ext/php_zip.dll'
+  ];
+  for (let i = 0; i < 316; i++) {
+    nativePinsList.push(`resources/portable/bin_${i}.dll`);
+  }
+
+  const nativeHashes = {};
+  for (const rel of nativePinsList) {
+    const fullPath = path.join(psNativePinInstall, rel);
+    nativeHashes[rel] = hash(fullPath);
+  }
+
+  // Intentionally mismatch last noncritical DLL hash (valid 64 hex)
+  const lastNonCriticalRel = 'resources/portable/bin_315.dll';
+  const realLastHash = nativeHashes[lastNonCriticalRel];
+  const mismatchedHash = realLastHash === '0'.repeat(64) ? 'f'.repeat(64) : '0'.repeat(64);
+  nativeHashes[lastNonCriticalRel] = mismatchedHash;
+
+  // Sign test engine for native pin lab
+  makeTestEngineZip({
+    native_hashes: nativeHashes
+  }, psNativePinLab);
+
+  // Sparse valid user data in owned lab
+  const udNativePin = path.join(psNativePinLab, 'ud-sparse-valid');
+  write(path.join(udNativePin, 'update-state.json'), JSON.stringify({state: 'idle'}));
+  write(path.join(udNativePin, 'update-jobs/job_101.json'), JSON.stringify({
+    job_id: 101,
+    operation_id: 'unit101',
+    status: 'completed',
+    result: {ok: true, data: {}}
+  }));
+
+  // Simulate unavailable Get-FileHash via LAB-ONLY global advanced function shadow that throws
+  const nativePinCmd = `
+    $ErrorActionPreference = 'Stop'
+    function global:Get-FileHash {
+      [CmdletBinding()]
+      param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        $RemainingArgs
+      )
+      throw 'Simulated Get-FileHash unavailable: Get-FileHash must not be called.'
+    }
+    & '${psNativePinScript.replace(/'/g, "''")}' -InstallRoot '${psNativePinInstall.replace(/'/g, "''")}' -UserDataRoot '${udNativePin.replace(/'/g, "''")}'
+  `;
+
+  const nativePinRes = spawnSync(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', nativePinCmd], {
+    encoding: 'utf8',
+    windowsHide: true
+  });
+
+  assert.ifError(nativePinRes.error);
+  assert.notEqual(nativePinRes.status, 0, `Expected failure at native pin hash mismatch, got exit 0: ${nativePinRes.stdout}`);
+  const combinedOut = ((nativePinRes.stderr || '') + (nativePinRes.stdout || '')).replace(/\s+/g, ' ');
+  assert.match(
+    combinedOut,
+    /Public native binary hash mismatch for resources[\\\/]portable[\\\/]bin_315\.dll/,
+    `Expected failure at specific native file hash mismatch for resources/portable/bin_315.dll: ${combinedOut}`
+  );
+  assert.doesNotMatch(
+    combinedOut,
+    /Get-FileHash/,
+    `Get-FileHash must not be invoked during native pin verification: ${combinedOut}`
+  );
+  assert.doesNotMatch(
+    combinedOut,
+    /ApplicationFailedException|is not recognized as an operable program|The term '.*php(\.exe)?' is not recognized/,
+    `Dummy PHP must never execute before all native pins are verified: ${combinedOut}`
   );
 }
 
