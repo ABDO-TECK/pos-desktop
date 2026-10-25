@@ -505,8 +505,10 @@ final class Setup11TransitionAcceptanceHelper
             throw new RuntimeException("Cannot open zip archive: {$zipPath}");
         }
 
-        $manifestFiles = $manifest['files'] ?? [];
-        $expectedNames = array_keys($manifestFiles);
+        $manifestFiles = array_column($manifest['files'] ?? [], null, 'path');
+        if (count($manifestFiles) !== count($manifest['files'] ?? [])) {
+            throw new RuntimeException('Duplicate or missing path in signed manifest files.');
+        }
         $zipEntryNames = [];
 
         for ($i = 0; $i < $zip->numFiles; $i++) {
