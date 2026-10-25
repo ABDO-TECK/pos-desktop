@@ -25,7 +25,7 @@ export default function ChannelTransitionPanel({
   return (
     <div data-testid="channel-transition" style={{ border: '1px solid var(--border)', borderRadius: 12, padding: '1rem', display: 'grid', gap: '.75rem' }} aria-busy={transition.busy || transition.checking}>
       <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-        <strong>المثبّت: v{installedVersion} · {installedChannel.toUpperCase()}</strong>
+        <strong>إصدار التطبيق المثبّت: v{installedVersion} · {installedChannel.toUpperCase()}</strong>
         <span>قناة المتابعة: {channel.toUpperCase()}</span>
       </div>
       <p style={{ margin: 0, color: 'var(--text-muted)' }}>اختيار القناة يحفظ تفضيل المتابعة فقط. تثبيت إصدارها يحتاج معاينة وتأكيدًا منفصلًا.</p>

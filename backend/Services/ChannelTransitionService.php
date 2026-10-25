@@ -98,13 +98,25 @@ final class ChannelTransitionService
             if (!in_array($channel,UpdateChannelPolicy::active(),true)) throw new RuntimeException('inactive_channel');
             $installed['shell_sha256']=$this->shellDigest();$preview['installed']=$installed;
             if ($installed['channel']==='retired') throw new RuntimeException('retired_installed_release');
-            $source=$this->provider->getReleaseByTag('v'.$version);
-            if (!$source['ok'] && $installed['channel']==='stable') $source=$this->provider->getReleaseByTag('v'.$version,'pos-desktop');
+            $sourceRepo = 'pos-desktop-updates';
+            $source = $this->provider->getReleaseByTag('v'.$version, 'pos-desktop-updates');
+            if (!$source['ok']) {
+                $httpCode = (int)($source['http_code'] ?? 0);
+                $error = (string)($source['error'] ?? '');
+                $is404 = ($httpCode === 404) || ($httpCode === 0 && ($error === 'Release is unavailable.' || str_contains(strtolower($error), 'not found')));
+                if (!$is404) {
+                    throw new RuntimeException('discovery_failed');
+                }
+                if ($installed['channel'] === 'stable') {
+                    $source = $this->provider->getReleaseByTag('v'.$version, 'pos-desktop');
+                    $sourceRepo = 'pos-desktop';
+                }
+            }
             if (!$source['ok']) throw new RuntimeException('source_release_unavailable');
             $rawInventory=$this->content($source['release'],'deployment-inventory.json');
             $inventory=json_decode($rawInventory,true,64,JSON_THROW_ON_ERROR);
             if (($inventory['version']??null)!==$version || empty($inventory['files']['version.json'])) throw new RuntimeException('source_inventory_unavailable');
-            $installed=[...$installed,'inventory_sha256'=>hash('sha256',$rawInventory),'inventory'=>$inventory];
+            $installed=[...$installed,'source_repo'=>$sourceRepo,'repo'=>$sourceRepo,'inventory_sha256'=>hash('sha256',$rawInventory),'inventory'=>$inventory,'release'=>$source['release']];
             if (!$this->receipts->verifyFiles($inventory,[])) throw new RuntimeException('source_inventory_mismatch');
             $catalog=(new ChannelTransitionReleaseCatalog($this->provider))->resolve($channel,$installed);
             if (!$catalog['ok']) { $preview['status']='unreachable';throw new RuntimeException('discovery_failed'); }
@@ -114,37 +126,210 @@ final class ChannelTransitionService
             if ($target['version']===$version && $target['inventory_sha256']===$installed['inventory_sha256']) {
                 return ['preview'=>[...$preview,'status'=>'same_release','reason_code'=>'same_release','message'=>'النسخة المثبتة هي آخر إصدار للقناة المختارة.']];
             }
-            if ($catalog['reason_code']) throw new RuntimeException($catalog['reason_code']);
-            $carrier=$catalog['carrier'];
-            $index=$this->manifests->verifyIndex($this->content($carrier,'channel-transitions.json'),$this->content($carrier,'channel-transitions.sig'),$carrier);
-            if (!$index['ok']) throw new RuntimeException($index['reason_code']);
-            $entries=array_values(array_filter($index['index']['entries'],static fn(array $entry):bool=>$entry['from_version']===$version && $entry['source_inventory_sha256']===$installed['inventory_sha256'] && $entry['version']===$target['version'] && $entry['channel']===$channel));
-            usort($entries,static fn(array $a,array $b):int=>($a['type']==='delta'?0:1)<=>($b['type']==='delta'?0:1));
-            foreach ($entries as $entry) {
-                if (!ChannelTransitionReleaseCatalog::asset($carrier,$entry['descriptor']) || !ChannelTransitionReleaseCatalog::asset($carrier,$entry['signature'])) continue;
-                $raw=$this->content($carrier,$entry['descriptor']);
-                if (!hash_equals($entry['descriptor_sha256'],hash('sha256',$raw))) throw new RuntimeException('descriptor_digest_mismatch');
-                $verified=$this->manifests->verify($raw,$this->content($carrier,$entry['signature']),$carrier,$installed,$target);
-                if (!$verified['ok']) throw new RuntimeException($verified['reason_code']);
-                $descriptor=$verified['descriptor'];
-                if ($descriptor['type']!==$entry['type']) throw new RuntimeException('package_type_mismatch');
-                $package=ChannelTransitionReleaseCatalog::asset($carrier,$descriptor['package']['asset']);
-                if (!$package) continue;
-                $assessment=$this->compatibility->assess($this->database(),$descriptor['data_compatibility'],version_compare($target['version'],$version,'<'));
-                if (!$assessment['compatible']) {
-                    \App\Helpers\Logger::warning('Channel transition data assessment blocked', [
-                        'reason_code' => $assessment['reason_code'],
-                        'error' => $assessment['error'] ?? null,
-                    ]);
-                    throw new RuntimeException($assessment['reason_code']);
+            if ($catalog['reason_code'] && $catalog['reason_code'] !== 'transition_package_unavailable') throw new RuntimeException($catalog['reason_code']);
+            $carriers = $catalog['carriers'] ?? ($catalog['carrier'] ? [$catalog['carrier']] : []);
+            if (!$carriers) throw new RuntimeException('transition_package_unavailable');
+
+            $validCandidates = [];
+            $seenAuthority = [];
+            $hasShellMismatch = false;
+
+            foreach ($carriers as $carrier) {
+                $candidates = $this->validateCarrierEntries($carrier, $installed, $target, $version, $channel, $seenAuthority, $hasShellMismatch);
+                foreach ($candidates as $cand) {
+                    $validCandidates[] = $cand;
                 }
-                $binding=['installed_version'=>$version,'source_inventory'=>$installed['inventory_sha256'],'shell'=>$installed['shell_sha256'],'channel'=>$channel,'target'=>$preview['target'],'descriptor'=>hash('sha256',$raw),'schema'=>$assessment['schema_sha256'],'ledger'=>$assessment['ledger_sha256']];
-                return ['preview'=>[...$preview,'status'=>'ready','package_type'=>$descriptor['type'],'reason_code'=>null,'message'=>'يمكن تثبيت إصدار القناة المختارة بعد تأكيدك. الرجوع يعيد واجهة الإصدار القديم؛ بيانات العمل تُحفظ.'],'descriptor'=>$descriptor,'package'=>$package,'binding'=>$binding];
             }
-            throw new RuntimeException('transition_package_unavailable');
+
+            if (empty($validCandidates)) {
+                if ($hasShellMismatch) {
+                    throw new RuntimeException('shell_mismatch');
+                }
+                throw new RuntimeException('transition_package_unavailable');
+            }
+
+            return $this->selectCandidate($validCandidates, $installed, $target, $preview, $version);
         } catch (Throwable $error) {
             return ['preview'=>[...$preview,'reason_code'=>$error instanceof RuntimeException?$error->getMessage():'transition_unverifiable','message'=>'تعذر تجهيز انتقال آمن حاليًا. لم تتغير النسخة المثبتة أو بيانات العمل.']];
         }
+    }
+
+    private function validateCarrierEntries(
+        array $carrier,
+        array $installed,
+        array $target,
+        string $version,
+        string $channel,
+        array &$seenAuthority,
+        bool &$hasShellMismatch
+    ): array {
+        if (!ChannelTransitionReleaseCatalog::asset($carrier, 'channel-transitions.json') || !ChannelTransitionReleaseCatalog::asset($carrier, 'channel-transitions.sig')) {
+            return [];
+        }
+
+        $rawIndex = $this->content($carrier, 'channel-transitions.json');
+        $rawIndexSig = $this->content($carrier, 'channel-transitions.sig');
+        $index = $this->manifests->verifyIndex($rawIndex, $rawIndexSig, $carrier);
+        if (!$index['ok']) throw new RuntimeException($index['reason_code']);
+
+        $entries = array_values(array_filter($index['index']['entries'], static fn(array $entry): bool =>
+            $entry['from_version'] === $version &&
+            $entry['source_inventory_sha256'] === $installed['inventory_sha256'] &&
+            $entry['version'] === $target['version'] &&
+            $entry['channel'] === $channel
+        ));
+        if (!$entries) return [];
+
+        $approvedCandidates = [];
+        foreach ($entries as $entry) {
+            if (!ChannelTransitionReleaseCatalog::asset($carrier, $entry['descriptor']) || !ChannelTransitionReleaseCatalog::asset($carrier, $entry['signature'])) {
+                continue;
+            }
+            $raw = $this->content($carrier, $entry['descriptor']);
+            if (!hash_equals($entry['descriptor_sha256'], hash('sha256', $raw))) {
+                throw new RuntimeException('descriptor_digest_mismatch');
+            }
+            $sig = $this->content($carrier, $entry['signature']);
+
+            // Parse descriptor JSON to discover declared shell profile for complete validation
+            $descJson = json_decode($raw, true);
+            if (!is_array($descJson)) throw new RuntimeException('descriptor_invalid');
+            $declaredShell = $descJson['shell_sha256'] ?? null;
+            if (!is_string($declaredShell) || !preg_match('/^[a-f0-9]{64}$/D', $declaredShell)) {
+                throw new RuntimeException('digest_invalid');
+            }
+
+            // Always run complete cryptographic, path, inventory, target, and contract verification against declared profile
+            $installedForValidation = $installed;
+            $installedForValidation['shell_sha256'] = $declaredShell;
+            $verified = $this->manifests->verify($raw, $sig, $carrier, $installedForValidation, $target);
+            if (!$verified['ok']) {
+                // Fails closed immediately on signature_invalid, path_invalid, target_mismatch, data_contract_invalid, etc.
+                throw new RuntimeException($verified['reason_code']);
+            }
+
+            $descriptor = $verified['descriptor'];
+            if ($descriptor['type'] !== $entry['type']) {
+                throw new RuntimeException('package_type_mismatch');
+            }
+
+            // Compare canonical signed operation authority across carriers (excluding carrier wrapper)
+            $authKey = $this->canonicalOperationKey($descriptor);
+            $authDigest = $this->canonicalOperationDigest($descriptor);
+            if (isset($seenAuthority[$authKey]) && $seenAuthority[$authKey] !== $authDigest) {
+                throw new RuntimeException('index_ambiguous');
+            }
+            $seenAuthority[$authKey] = $authDigest;
+
+            // Check if this descriptor matches the ACTUAL installed runtime shell
+            if (!hash_equals($installed['shell_sha256'], $declaredShell)) {
+                $hasShellMismatch = true;
+                // Exclude foreign runtime profile from candidates installable on this machine
+                continue;
+            }
+
+            $package = ChannelTransitionReleaseCatalog::asset($carrier, $descriptor['package']['asset']);
+            if (!$package) {
+                // Missing package allows legitimate fallback to full bundle or alternate carrier
+                continue;
+            }
+
+            $approvedCandidates[] = [
+                'carrier' => $carrier,
+                'entry' => $entry,
+                'descriptor' => $descriptor,
+                'package' => $package,
+                'raw' => $raw,
+            ];
+        }
+
+        return $approvedCandidates;
+    }
+
+    private function canonicalOperationKey(array $descriptor): string
+    {
+        return ($descriptor['from_version'] ?? '') . '->' . ($descriptor['version'] ?? '') . ':' . ($descriptor['type'] ?? '') . '@' . ($descriptor['shell_sha256'] ?? '');
+    }
+
+    private function canonicalOperationDigest(array $descriptor): string
+    {
+        $files = $descriptor['files'] ?? [];
+        $normalizedFiles = [];
+        foreach ($files as $file) {
+            if (is_array($file)) {
+                ksort($file);
+                $normalizedFiles[] = $file;
+            }
+        }
+        usort($normalizedFiles, static fn(array $a, array $b): int => strcmp($a['path'] ?? '', $b['path'] ?? ''));
+
+        $deleted = $descriptor['deleted_files'] ?? [];
+        sort($deleted);
+
+        $contract = $descriptor['data_compatibility'] ?? [];
+        ksort($contract);
+
+        $canonical = [
+            'operation' => $descriptor['operation'] ?? 'channel_transition',
+            'from_version' => $descriptor['from_version'] ?? '',
+            'from_channel' => $descriptor['from_channel'] ?? '',
+            'source_inventory_sha256' => $descriptor['source_inventory_sha256'] ?? '',
+            'version' => $descriptor['version'] ?? '',
+            'channel' => $descriptor['channel'] ?? '',
+            'target_repo' => $descriptor['target_repo'] ?? '',
+            'target_tag' => $descriptor['target_tag'] ?? '',
+            'target_inventory_sha256' => $descriptor['target_inventory_sha256'] ?? '',
+            'shell_sha256' => $descriptor['shell_sha256'] ?? '',
+            'type' => $descriptor['type'] ?? '',
+            'files' => $normalizedFiles,
+            'deleted_files' => $deleted,
+            'migrations' => $descriptor['migrations'] ?? [],
+            'data_compatibility' => $contract,
+        ];
+
+        return hash('sha256', json_encode($canonical, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+    }
+
+    private function selectCandidate(array $candidates, array $installed, array $target, array $preview, string $version): array
+    {
+        usort($candidates, static fn(array $a, array $b): int => ($a['descriptor']['type'] === 'delta' ? 0 : 1) <=> ($b['descriptor']['type'] === 'delta' ? 0 : 1));
+        $selected = $candidates[0];
+        $descriptor = $selected['descriptor'];
+        $package = $selected['package'];
+        $raw = $selected['raw'];
+
+        $assessment = $this->compatibility->assess($this->database(), $descriptor['data_compatibility'], version_compare($target['version'], $version, '<'));
+        if (!$assessment['compatible']) {
+            \App\Helpers\Logger::warning('Channel transition data assessment blocked', [
+                'reason_code' => $assessment['reason_code'],
+                'error' => $assessment['error'] ?? null,
+            ]);
+            throw new RuntimeException($assessment['reason_code']);
+        }
+
+        $binding = [
+            'installed_version' => $version,
+            'source_inventory' => $installed['inventory_sha256'],
+            'shell' => $installed['shell_sha256'],
+            'channel' => $preview['selected_channel'],
+            'target' => $preview['target'],
+            'descriptor' => hash('sha256', $raw),
+            'schema' => $assessment['schema_sha256'],
+            'ledger' => $assessment['ledger_sha256']
+        ];
+
+        return [
+            'preview' => [
+                ...$preview,
+                'status' => 'ready',
+                'package_type' => $descriptor['type'],
+                'reason_code' => null,
+                'message' => 'يمكن تثبيت إصدار القناة المختارة بعد تأكيدك. الرجوع يعيد واجهة الإصدار القديم؛ بيانات العمل تُحفظ.'
+            ],
+            'descriptor' => $descriptor,
+            'package' => $package,
+            'binding' => $binding
+        ];
     }
 
     private function content(array $release, string $name): string

@@ -42,9 +42,10 @@ final class ChannelTransitionManifestService
             $data = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
             $this->require(is_array($data) && ($data['format'] ?? null) === 1 && ($data['operation'] ?? null) === 'channel_transition', 'descriptor_invalid');
             $this->require(($carrier['draft'] ?? true) === false && ($data['carrier_tag'] ?? null) === ($carrier['tag_name'] ?? null), 'carrier_mismatch');
-            foreach (['from_version'=>'version','from_channel'=>'channel','source_inventory_sha256'=>'inventory_sha256','shell_sha256'=>'shell_sha256'] as $field=>$binding) {
+            foreach (['from_version'=>'version','from_channel'=>'channel','source_inventory_sha256'=>'inventory_sha256'] as $field=>$binding) {
                 $this->require(isset($installed[$binding]) && ($data[$field] ?? null) === $installed[$binding], 'source_mismatch');
             }
+            $this->require(isset($installed['shell_sha256']) && ($data['shell_sha256'] ?? null) === $installed['shell_sha256'], 'shell_mismatch');
             foreach (['version'=>'version','channel'=>'channel','target_repo'=>'repo','target_tag'=>'tag','target_inventory_sha256'=>'inventory_sha256'] as $field=>$binding) {
                 $this->require(isset($target[$binding]) && ($data[$field] ?? null) === $target[$binding], 'target_mismatch');
             }

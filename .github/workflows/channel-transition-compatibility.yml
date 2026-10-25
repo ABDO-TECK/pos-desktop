@@ -1,0 +1,125 @@
+name: Channel Transition Compatibility
+
+on:
+  push:
+    branches:
+      - fix-channel-transition-compatibility
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: channel-transition-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked root and frontend dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Install locked backend dependencies
+        shell: pwsh
+        run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Active Channels and Policy Migration
+        shell: pwsh
+        run: |
+          php scripts/verify-active-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Release Channels Filtering and Precedence
+        shell: pwsh
+        run: |
+          php scripts/verify-release-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Electron Channel Policy Unit Tests
+        shell: pwsh
+        run: |
+          node scripts/verify-update-channel-policy.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Channel Transition Manifests and Signatures
+        shell: pwsh
+        run: |
+          php scripts/verify-transition-manifest.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Transition Data Compatibility Engine
+        shell: pwsh
+        run: |
+          php scripts/verify-transition-data.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Transition Release Catalog Resolution
+        shell: pwsh
+        run: |
+          php scripts/verify-transition-catalog.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Channel Transition Builder Integrity and Append Guards
+        shell: pwsh
+        run: |
+          php scripts/verify-channel-transition-builder.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Transition Preview Store and Concurrency
+        shell: pwsh
+        run: |
+          php scripts/verify-transition-preview.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Transition Receipt State Engine
+        shell: pwsh
+        run: |
+          php scripts/verify-transition-receipt.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Channel Transition End-to-End Flow
+        shell: pwsh
+        run: |
+          php scripts/verify-channel-transition-flow.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-channel-transition-flow.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify Cross-Channel Transition Compatibility Matrix
+        shell: pwsh
+        run: |
+          php scripts/verify-channel-transition-compatibility.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Frontend typecheck and build validation
+        shell: pwsh
+        run: |
+          npm --prefix frontend run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

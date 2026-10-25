@@ -26,6 +26,8 @@ export function transitionReason(reason: string | null): string {
     source_inventory_mismatch: 'ملفات الإصدار المثبّت تختلف عن النسخة المعتمدة؛ لا يمكن تجاوز هذا الفحص بحزمة كاملة.',
     signature_invalid: 'توقيع حزمة الانتقال غير صالح؛ لن يتم تثبيتها.',
     shell_mismatch: 'محرك تشغيل البرنامج غير متوافق مع هذه الحزمة.',
+    runtime_incompatible: 'محرك تشغيل البرنامج غير متوافق مع هذه الحزمة.',
+    index_ambiguous: 'تعارضت بيانات اعتماد الانتقال في مصادر التحديث.',
     immutable_shell_unavailable: 'هذا الانتقال يتطلب نسخة سطح المكتب المتوافقة.',
     preview_expired_or_changed: 'انتهت المعاينة أو تغير الإصدار/القناة. تحقق مجددًا قبل التأكيد.',
     update_operation_busy: 'هناك عملية بيع أو تحديث قيد التنفيذ. أكملها أولًا.',
