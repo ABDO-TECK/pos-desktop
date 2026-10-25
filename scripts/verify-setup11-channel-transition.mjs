@@ -8,11 +8,201 @@ import {attachTransitionTransport} from './channel-transition-ui-transport.mjs';
 
 const [phase,appArg,evidenceArg,assetsArg]=process.argv.slice(2);
 const application=path.resolve(appArg),evidence=path.resolve(evidenceArg),assets=path.resolve(assetsArg);
+const allowRepairBootstrap=process.argv.includes('--allow-repair-bootstrap');
+const php=process.env.PHP_BINARY||'php';
+let originalClientQueuedUpdate=null;
+let bootstrapMode='frozen-original';
+let repairApiPharSha256=null;
+let boundJobId=null;
+let repairBootstrapUsed=false;
+
 const lab=path.dirname(application),root=path.join(application,'resources/app.asar.unpacked');
 const storage=path.join(process.env.PROGRAMDATA,'POS System');
-const php=process.env.PHP_BINARY||'php';
 const fixture=path.resolve('scripts/fixtures/channel-transition-capability.php');
 const sql=mode=>JSON.parse(execFileSync(php,[fixture,mode],{encoding:'utf8',windowsHide:true}));
+
+function runRepairVerifier(args){
+  const verifierScript=path.resolve('scripts/verify-setup11-repair-bootstrap.php');
+  return execFileSync(php,[
+    '-d','auto_prepend_file=',
+    verifierScript,
+    ...args
+  ],{encoding:'utf8',windowsHide:true});
+}
+
+function executeVerifierProbes({application,candidatePhar,manifest,signature,jobId}){
+  console.log('Executing trust verifier negative probes (GHA security validation)...');
+  const probesDir=path.join(lab,'probes');
+  if(!fs.existsSync(probesDir)){
+    fs.mkdirSync(probesDir,{recursive:true});
+  }
+
+  const createdProbeFiles=[];
+  function createProbeFile(fileName,content){
+    const fullPath=path.join(probesDir,fileName);
+    if(fs.existsSync(fullPath)){
+      throw new Error(`Probe file already exists, refusing overwrite: ${fullPath}`);
+    }
+    // 'wx' flag: open for writing, fails if file exists (CREATE_NEW)
+    fs.writeFileSync(fullPath,content,{flag:'wx'});
+    createdProbeFiles.push(fullPath);
+    return fullPath;
+  }
+
+  try {
+    // Probe 1: outside_path - pass package.json in repository workspace (outside owned lab boundary)
+    const outsideCandidatePhar=path.resolve('package.json');
+    let p1Rejected=false;
+    try{
+      runRepairVerifier([
+        `--application=${application}`,
+        `--candidate-phar=${outsideCandidatePhar}`,
+        `--manifest=${manifest}`,
+        `--signature=${signature}`,
+        `--job-id=${jobId}`,
+      ]);
+    }catch(err){
+      const out=(err.stderr||'')+(err.stdout||'')+(err.message||'');
+      if(out.includes('ERR_OUTSIDE_OWNED_PATH')){
+        p1Rejected=true;
+      }else{
+        throw new Error(`Probe outside_path unexpected error: ${out}`);
+      }
+    }
+    assert.ok(p1Rejected,'Probe outside_path must reject with ERR_OUTSIDE_OWNED_PATH');
+
+    // Probe 2: tampered_phar - copy actual candidate PHAR, flip byte in copy (NEVER execute copy), pass with original manifest
+    const tamperedPharPath=path.join(probesDir,'tampered-backend.phar');
+    if(fs.existsSync(tamperedPharPath)){
+      throw new Error(`Tampered phar already exists: ${tamperedPharPath}`);
+    }
+    fs.copyFileSync(candidatePhar,tamperedPharPath,fs.constants.COPYFILE_EXCL);
+    createdProbeFiles.push(tamperedPharPath);
+    const fd=fs.openSync(tamperedPharPath,'r+');
+    const b=Buffer.alloc(1);
+    fs.readSync(fd,b,0,1,0);
+    b[0]=b[0]^0xff;
+    fs.writeSync(fd,b,0,1,0);
+    fs.closeSync(fd);
+
+    let p2Rejected=false;
+    try{
+      runRepairVerifier([
+        `--application=${application}`,
+        `--candidate-phar=${tamperedPharPath}`,
+        `--manifest=${manifest}`,
+        `--signature=${signature}`,
+        `--job-id=${jobId}`,
+      ]);
+    }catch(err){
+      const out=(err.stderr||'')+(err.stdout||'')+(err.message||'');
+      if(out.includes('ERR_PHAR_HASH_MISMATCH')){
+        p2Rejected=true;
+      }else{
+        throw new Error(`Probe tampered_phar unexpected error: ${out}`);
+      }
+    }
+    assert.ok(p2Rejected,'Probe tampered_phar must reject with ERR_PHAR_HASH_MISMATCH');
+
+    // Probe 3: wrong_signature - pass corrupt signature with original manifest
+    const corruptSigPath=createProbeFile('corrupt.sig',Buffer.from('corrupt_signature_bytes_not_valid_rsa'));
+    let p3Rejected=false;
+    try{
+      runRepairVerifier([
+        `--application=${application}`,
+        `--candidate-phar=${candidatePhar}`,
+        `--manifest=${manifest}`,
+        `--signature=${corruptSigPath}`,
+        `--job-id=${jobId}`,
+      ]);
+    }catch(err){
+      const out=(err.stderr||'')+(err.stdout||'')+(err.message||'');
+      if(out.includes('ERR_SIGNATURE_INVALID')){
+        p3Rejected=true;
+      }else{
+        throw new Error(`Probe wrong_signature unexpected error: ${out}`);
+      }
+    }
+    assert.ok(p3Rejected,'Probe wrong_signature must reject with ERR_SIGNATURE_INVALID');
+
+    // Probe 4: wrong_source - authenticated metadata tamper: copy manifest, mutate from_version to 0.0.10, keep original signature
+    const origManifestData=JSON.parse(fs.readFileSync(manifest,'utf8'));
+    const tamperedSourceData={...origManifestData,from_version:'0.0.10'};
+    const tamperedSourceManifestPath=createProbeFile('manifest-tampered-source.json',JSON.stringify(tamperedSourceData,null,2));
+    let p4Rejected=false;
+    try{
+      runRepairVerifier([
+        `--application=${application}`,
+        `--candidate-phar=${candidatePhar}`,
+        `--manifest=${tamperedSourceManifestPath}`,
+        `--signature=${signature}`,
+        `--job-id=${jobId}`,
+      ]);
+    }catch(err){
+      const out=(err.stderr||'')+(err.stdout||'')+(err.message||'');
+      if(out.includes('ERR_SIGNATURE_INVALID')){
+        p4Rejected=true;
+      }else{
+        throw new Error(`Probe wrong_source unexpected error: ${out}`);
+      }
+    }
+    assert.ok(p4Rejected,'Probe wrong_source (authenticated metadata tamper) must reject with ERR_SIGNATURE_INVALID');
+
+    // Probe 5: wrong_target - prefer existing historical VALID signed Beta 10 manifest (version 0.0.10-beta.10)
+    const beta10ManifestCandidates=[
+      path.join(lab,'beta10-download','manifest-0.0.1.json'),
+      path.join(lab,'beta10-download','manifest.json'),
+    ];
+    const beta10SigCandidates=[
+      path.join(lab,'beta10-download','manifest-0.0.1.sig'),
+      path.join(lab,'beta10-download','manifest.sig'),
+    ];
+    const historicalBeta10Manifest=beta10ManifestCandidates.find(p=>fs.existsSync(p));
+    const historicalBeta10Sig=beta10SigCandidates.find(p=>fs.existsSync(p));
+
+    let p5Rejected=false;
+    let expectedP5Code='ERR_SIGNATURE_INVALID';
+    let p5ManifestPath=null;
+    let p5SigPath=signature;
+
+    if(historicalBeta10Manifest&&historicalBeta10Sig){
+      expectedP5Code='ERR_WRONG_TARGET_VERSION';
+      p5ManifestPath=historicalBeta10Manifest;
+      p5SigPath=historicalBeta10Sig;
+    }else{
+      // Fallback: authenticated metadata tamper for target version
+      const tamperedTargetData={...origManifestData,version:'0.0.13'};
+      p5ManifestPath=createProbeFile('manifest-tampered-target.json',JSON.stringify(tamperedTargetData,null,2));
+      expectedP5Code='ERR_SIGNATURE_INVALID';
+    }
+
+    try{
+      runRepairVerifier([
+        `--application=${application}`,
+        `--candidate-phar=${candidatePhar}`,
+        `--manifest=${p5ManifestPath}`,
+        `--signature=${p5SigPath}`,
+        `--job-id=${jobId}`,
+      ]);
+    }catch(err){
+      const out=(err.stderr||'')+(err.stdout||'')+(err.message||'');
+      if(out.includes(expectedP5Code)){
+        p5Rejected=true;
+      }else{
+        throw new Error(`Probe wrong_target unexpected error: ${out}`);
+      }
+    }
+    assert.ok(p5Rejected,`Probe wrong_target must reject with ${expectedP5Code}`);
+
+    console.log(`All 5 trust verifier negative probes rejected before candidate code execution as expected.`);
+  } finally {
+    // Safe cleanup: delete only owned probe files and remove probe directory
+    for(const f of createdProbeFiles){
+      try{if(fs.existsSync(f))fs.unlinkSync(f);}catch{}
+    }
+    try{if(fs.existsSync(probesDir))fs.rmdirSync(probesDir);}catch{}
+  }
+}
 
 const setup11InventoryPath=path.join(lab,'setup11-inventory.json');
 const candidateInventoryPath=path.join(lab,'candidate-inventory.json');
@@ -772,6 +962,26 @@ try{
   // Routes/admin.php line 44 uses update_apply limiter key (separate from transition_apply)
   await waitForApplySlot('update_apply');
 
+  let observedOriginalBlockedJob=null;
+  requestTransport.onJobObservation(obs=>{
+    if(
+      obs.responseStatus===200&&
+      obs.status==='completed'&&
+      obs.backendSource==='frozen-original'&&
+      typeof obs.polledJobId==='number'&&
+      obs.polledJobId>0&&
+      typeof obs.jobId==='number'&&
+      obs.jobId===obs.polledJobId&&
+      obs.result&&
+      typeof obs.result==='object'&&
+      obs.result.requires_desktop_handoff===true&&
+      obs.result.handoff_version==='0.0.12'&&
+      !Object.hasOwn(obs.result,'ok')
+    ){
+      observedOriginalBlockedJob=obs;
+    }
+  });
+
   await ui.system();
   await ui.click('التحقق من التحديثات');
   await ui.until('[...document.querySelectorAll("button")].some(b=>b.textContent.trim()==="تثبيت التحديث الآن"&&!b.disabled)','update button visible');
@@ -781,8 +991,124 @@ try{
   await ui.evaluate(`window.__pageRunId = ${JSON.stringify(bootstrapRunId)}`);
   await ui.click('تثبيت التحديث الآن');
   await ui.click('تأكيد');
-  await delay(1500);
+
+  // Wait for the original frozen Setup 11 client to complete the staging worker and drop result.ok
+  console.log('Awaiting original Setup 11 queued update completion and missing result.ok observation...');
+  const observeDeadline=Date.now()+60000;
+  while(!observedOriginalBlockedJob&&Date.now()<observeDeadline){
+    await delay(300);
+  }
+  assert.ok(observedOriginalBlockedJob,'Must observe actual original job completed with missing result.ok');
+  boundJobId=Number(observedOriginalBlockedJob.jobId);
+  assert.ok(boundJobId>0,'Observed original blocked job must have a valid positive job id');
+
+  // Verify UI enters needs attention and displays the resume button
+  await ui.until('Boolean([...document.querySelectorAll("button")].some(b=>b.textContent.includes("استئناف متابعة الحالة")&&!b.disabled))','UI needs attention resume button visible');
+  await ui.screenshot('original-setup11-needs-attention');
+
+  // Attest original queued update blocked while actual installed root, inventory files, and shell remain strictly 0.0.11
+  const versionOnDiskBlocked=JSON.parse(fs.readFileSync(path.join(root,'version.json'),'utf8')).version;
+  assert.equal(versionOnDiskBlocked,'0.0.11','Application root version.json must remain 0.0.11 while blocked');
+  verifyInventory(setup11Inventory);
+  assert.deepEqual(
+    [ui.hash(path.join(application,'POS Desktop.exe')),ui.hash(path.join(application,'resources/app.asar'))],
+    shellBefore,
+    'Native shell must remain intact and match baseline while blocked'
+  );
+  originalClientQueuedUpdate='blocked_missing_result_ok';
+  console.log(`Original Setup 11 client queued update safely blocked (job #${boundJobId}, missing result.ok, root still 0.0.11).`);
+
+  if(!allowRepairBootstrap){
+    throw new Error('original_client_bootstrap_blocked: Setup 11 client cannot self-update due to missing result.ok in queued apply job');
+  }
+
+  console.log('Activating Supervisor: One-Time Authenticated Read-Only Repair Control Plane...');
+  const candidatePhar=path.join(lab,'candidate-app/backend/backend.phar');
+  const manifestCandidates=[
+    path.join(assets,'manifest-0.0.11.json'),
+    path.join(assets,'manifest.json'),
+  ];
+  const sigCandidates=[
+    path.join(assets,'manifest-0.0.11.sig'),
+    path.join(assets,'manifest.sig'),
+  ];
+  const manifestPath=manifestCandidates.find(p=>fs.existsSync(p));
+  const signaturePath=sigCandidates.find(p=>fs.existsSync(p));
+  assert.ok(manifestPath&&signaturePath,'Signed manifest and signature must exist in assets');
+
+  // 1. Run negative security probes
+  executeVerifierProbes({
+    application,
+    candidatePhar,
+    manifest:manifestPath,
+    signature:signaturePath,
+    jobId:boundJobId,
+  });
+
+  // 2. Run real frozen trust verifier
+  const verifierOutput=runRepairVerifier([
+    `--application=${application}`,
+    `--candidate-phar=${candidatePhar}`,
+    `--manifest=${manifestPath}`,
+    `--signature=${signaturePath}`,
+    `--job-id=${boundJobId}`,
+    `--candidate-inventory=${candidateInventoryPath}`,
+  ]);
+  const verifiedContext=JSON.parse(verifierOutput.trim());
+  assert.equal(verifiedContext.verified,true,'Trust verifier did not return verified=true');
+  assert.equal(verifiedContext.from_version,'0.0.11','Verified context from_version mismatch');
+  assert.equal(verifiedContext.to_version,'0.0.12','Verified context to_version mismatch');
+  assert.equal(Number(verifiedContext.target_job_id),boundJobId,'Verified context job ID mismatch');
+
+  // 3. Assert actual original raw persisted state binding ultimately repaired production service will check
+  const jobFilePath=path.join(storage,'update-jobs',`job_${boundJobId}.json`);
+  assert.ok(fs.existsSync(jobFilePath),`Persisted job file missing: ${jobFilePath}`);
+  const persistedJobRaw=JSON.parse(fs.readFileSync(jobFilePath,'utf8'));
+  assert.equal(Number(persistedJobRaw.job_id),boundJobId,'Persisted job_id mismatch');
+  const persistedOpId=String(persistedJobRaw.operation_id||'');
+  assert.ok(persistedOpId.length>0,'Persisted operation_id must not be empty');
+  assert.equal(persistedJobRaw.result?.ok,true,'Persisted raw job result must have ok: true');
+
+  const stateFilePath=path.join(storage,'update-state.json');
+  assert.ok(fs.existsSync(stateFilePath),`Update state file missing: ${stateFilePath}`);
+  const stateRaw=JSON.parse(fs.readFileSync(stateFilePath,'utf8'));
+  assert.equal(String(stateRaw.operation_id||''),persistedOpId,'Update state operation_id must match persisted job operation_id');
+  assert.equal(stateRaw.state,'desktop_handoff_pending','Update state must be desktop_handoff_pending before handoff');
+  if(stateRaw.from_version !== undefined){
+    assert.equal(stateRaw.from_version,'0.0.11','Update state from_version must be 0.0.11');
+  }
+  const stateTargetVersion = stateRaw.to_version ?? stateRaw.version;
+  assert.equal(stateTargetVersion,'0.0.12','Update state target version must be 0.0.12');
+  if(stateRaw.requires_desktop_handoff !== undefined){
+    assert.equal(stateRaw.requires_desktop_handoff,true,'Update state requires_desktop_handoff must be true');
+  }
+
+  const jobResultData = persistedJobRaw.result?.data ?? persistedJobRaw.result ?? {};
+  const requiresHandoff = stateRaw.requires_desktop_handoff ?? jobResultData.requires_desktop_handoff ?? (stateRaw.state === 'desktop_handoff_pending');
+  assert.equal(requiresHandoff,true,'Persisted op binding must require desktop handoff');
+  const handoffVersion = jobResultData.handoff_version ?? jobResultData.latest_version ?? jobResultData.version ?? stateTargetVersion;
+  assert.equal(handoffVersion,'0.0.12','Persisted op binding handoff version must be 0.0.12');
+
+  bootstrapMode='signed_repair_control_plane';
+  repairApiPharSha256=verifiedContext.candidate_backend_sha256;
+  repairBootstrapUsed=true;
+
+  // 4. Enable repair control plane for bound job only
+  await requestTransport.enableRepairBootstrap(verifiedContext);
+
+  // 5. Click ORIGINAL resume UI button in the frontend (NOT test script manual IPC)
+  console.log('Clicking original UI resume button to trigger repaired status poll and native handoff...');
+  await ui.evaluate(`(() => {
+    const b = [...document.querySelectorAll('button')].find(b => b.textContent.includes('استئناف متابعة الحالة'));
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click(); }
+  })()`);
+
   await versionIs('0.0.12',bootstrapStart,bootstrapRunId);
+
+  // 6. Disable repair control plane IMMEDIATELY after Step 1
+  await requestTransport.disableRepairBootstrap();
+  requestTransport.resume();
+  console.log('Repair control plane disabled; proceeding with installed production code.');
   verifyInventory(candidateInventory,setup11Inventory);
   assert.deepEqual(sql('inspect'),before,'Database data preserved across 11 -> 12 bootstrap');
   assert.deepEqual(sql('inspect-compatibility'),compatibilityBefore,'Compatibility preserved across bootstrap');
@@ -1017,6 +1343,11 @@ try{
     ok:true,
     actualSetup11:true,
     transport:'isolated copied signed packages; live GitHub feeds verified separately after publication',
+    original_client_queued_update:originalClientQueuedUpdate,
+    bootstrap_mode:bootstrapMode,
+    repair_api_phar_sha256:repairApiPharSha256,
+    bound_job_id:boundJobId,
+    repair_bootstrap_used:repairBootstrapUsed,
     bootstrapVersion:'0.0.11',
     candidateVersion:'0.0.12',
     betaTargetVersion:'0.0.10-beta.10',

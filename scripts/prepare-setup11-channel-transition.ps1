@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('prepare', 'sign', 'acceptance')]
-    [string]$Phase = 'prepare'
+    [string]$Phase = 'prepare',
+    [switch]$AllowRepairBootstrap
 )
 
 Set-StrictMode -Version Latest
@@ -9,6 +10,10 @@ $ErrorActionPreference = 'Stop'
 
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
     throw 'Ephemeral Windows GitHub Actions runner required.'
+}
+
+if ($AllowRepairBootstrap -and $Phase -ne 'acceptance') {
+    throw '-AllowRepairBootstrap switch is only permitted during the acceptance phase.'
 }
 
 $lab = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'setup11-channel-transition-lab'))
@@ -297,6 +302,9 @@ elseif ($Phase -eq 'sign') {
 }
 elseif ($Phase -eq 'acceptance') {
     Write-Host '=== Setup 0.0.11 Channel Transition: Acceptance Phase ==='
+    if ($AllowRepairBootstrap) {
+        Write-Host 'Supervisor Mode: -AllowRepairBootstrap enabled (One-Time Repair Control Plane).'
+    }
 
     if ($env:UPDATE_PRIVATE_KEY) {
         throw 'Security violation: UPDATE_PRIVATE_KEY must not exist during acceptance phase.'
@@ -322,7 +330,11 @@ elseif ($Phase -eq 'acceptance') {
         throw "Owned lab marker application mismatch: expected $appDir, got $($owned.application)"
     }
 
-    node scripts/verify-setup11-channel-transition.mjs acceptance "$appDir" "$evidence" "$assets"
+    $nodeArgs = @('scripts/verify-setup11-channel-transition.mjs', 'acceptance', $appDir, $evidence, $assets)
+    if ($AllowRepairBootstrap) {
+        $nodeArgs += '--allow-repair-bootstrap'
+    }
+    node @nodeArgs
     if ($LASTEXITCODE -ne 0) { throw 'Setup 0.0.11 acceptance execution failed.' }
 
     $acceptanceJson = Join-Path $evidence 'acceptance.json'
