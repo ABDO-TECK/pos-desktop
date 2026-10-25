@@ -443,6 +443,172 @@ async function getSystemProtectedState(desktopLabUi){
   return {secrets,public:publicData};
 }
 
+const POS_TARGET_LABELS=[
+  'ProgramData/POS System',
+  'AppData/Roaming/POS System',
+  'AppData/Roaming/POS Desktop',
+  'AppData/Roaming/pos-desktop',
+  'AppData/Local/POS System',
+  'AppData/Local/POS Desktop',
+  'AppData/Local/pos-desktop',
+  'AppData/Local/pos-desktop-updater',
+];
+
+function mapToSafeTargetRelative(filePath,targets,unknownState){
+  const resolved=path.resolve(filePath);
+  const resolvedLower=resolved.toLowerCase();
+
+  for(let i=0;i<targets.length;i++){
+    const targetDir=path.resolve(targets[i]);
+    const targetLower=targetDir.toLowerCase();
+    const targetWithSep=targetLower.endsWith(path.sep)?targetLower:targetLower+path.sep;
+
+    if(resolvedLower===targetLower||resolvedLower.startsWith(targetWithSep)){
+      const rel=path.relative(targetDir,resolved);
+      const normalizedRel=rel.split(path.sep).join('/');
+      return {
+        target_index:i,
+        target_label:POS_TARGET_LABELS[i]||`posTargets[${i}]`,
+        relative_path:normalizedRel,
+        basename:path.basename(resolved),
+        extension:path.extname(resolved).toLowerCase(),
+      };
+    }
+  }
+
+  let unknownId=unknownState.map.get(resolvedLower);
+  if(!unknownId){
+    unknownState.counter++;
+    unknownId=unknownState.counter;
+    unknownState.map.set(resolvedLower,unknownId);
+  }
+
+  return {
+    target_index:-1,
+    target_label:`unknown_owned_target_${unknownId}`,
+    relative_path:null,
+    basename:path.basename(resolved),
+    extension:path.extname(resolved).toLowerCase(),
+  };
+}
+
+function classifyPublicAppArtifact(fileHash){
+  if(typeof fileHash!=='string'||!fileHash)return null;
+  const hashLower=fileHash.toLowerCase();
+  const knownInventories=[];
+  try{
+    if(typeof candidateInventory!=='undefined'&&candidateInventory?.files){
+      knownInventories.push(candidateInventory);
+    }
+  }catch{}
+  try{
+    if(typeof beta10Inventory!=='undefined'&&beta10Inventory?.files){
+      knownInventories.push(beta10Inventory);
+    }
+  }catch{}
+  try{
+    if(typeof setup11Inventory!=='undefined'&&setup11Inventory?.files){
+      knownInventories.push(setup11Inventory);
+    }
+  }catch{}
+
+  for(const inv of knownInventories){
+    if(!inv||!inv.files)continue;
+    for(const [logicalPath,meta] of Object.entries(inv.files)){
+      if(typeof meta?.sha256==='string'&&meta.sha256.toLowerCase()===hashLower){
+        return {
+          version:inv.version||'unknown',
+          logical_path:logicalPath.split('\\').join('/'),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function writeProtectedStateDiff({stageName,category,initialFiles,currentFiles,evidenceDir}){
+  try{
+    if(!evidenceDir||!fs.existsSync(evidenceDir))return;
+    const diffFile=path.join(evidenceDir,'protected-state-diff.json');
+    if(fs.existsSync(diffFile)){
+      return;
+    }
+
+    const canonicalPath=p=>path.resolve(p).toLowerCase();
+    const initMap=new Map();
+    for(const [p,h] of Object.entries(initialFiles||{})){
+      initMap.set(canonicalPath(p),{originalPath:p,hash:h});
+    }
+    const currMap=new Map();
+    for(const [p,h] of Object.entries(currentFiles||{})){
+      currMap.set(canonicalPath(p),{originalPath:p,hash:h});
+    }
+
+    const unknownState={map:new Map(),counter:0};
+
+    const added=[];
+    for(const [canPath,currItem] of currMap.entries()){
+      if(!initMap.has(canPath)){
+        const targetMeta=mapToSafeTargetRelative(currItem.originalPath,posTargets,unknownState);
+        const matchedArtifact=classifyPublicAppArtifact(currItem.hash);
+        added.push({
+          ...targetMeta,
+          matched_app_artifact:matchedArtifact,
+        });
+      }
+    }
+
+    const removed=[];
+    for(const [canPath,initItem] of initMap.entries()){
+      if(!currMap.has(canPath)){
+        const targetMeta=mapToSafeTargetRelative(initItem.originalPath,posTargets,unknownState);
+        removed.push({
+          ...targetMeta,
+        });
+      }
+    }
+
+    const modified=[];
+    for(const [canPath,initItem] of initMap.entries()){
+      if(currMap.has(canPath)){
+        const currItem=currMap.get(canPath);
+        if(initItem.hash!==currItem.hash){
+          const targetMeta=mapToSafeTargetRelative(currItem.originalPath,posTargets,unknownState);
+          modified.push({
+            ...targetMeta,
+            hash_changed:true,
+          });
+        }
+      }
+    }
+
+    const sortEntries=(a,b)=>{
+      if(a.target_index!==b.target_index)return a.target_index-b.target_index;
+      const pathA=a.relative_path||a.basename||'';
+      const pathB=b.relative_path||b.basename||'';
+      return pathA.localeCompare(pathB);
+    };
+    added.sort(sortEntries);
+    removed.sort(sortEntries);
+    modified.sort(sortEntries);
+
+    const diffData={
+      stageName,
+      category,
+      initial_count:Object.keys(initialFiles||{}).length,
+      current_count:Object.keys(currentFiles||{}).length,
+      added,
+      removed,
+      modified,
+    };
+
+    fs.writeFileSync(diffFile,JSON.stringify(diffData,null,2),{flag:'wx'});
+  }catch(writeErr){
+    const safeCode=(typeof writeErr?.code==='string'&&/^[A-Z0-9_]+$/.test(writeErr.code))?writeErr.code:'ERR_DIAGNOSTIC_WRITE_FAILED';
+    console.error('DIAGNOSTIC_WRITE_ERROR:',safeCode);
+  }
+}
+
 function assertProtectedStatePreserved(initial,current,stageName){
   // Compare secret state strictly in-memory using boolean comparisons
   // DO NOT use assert.deepEqual on secrets to prevent Node from printing secret hashes in failure traces
@@ -451,12 +617,28 @@ function assertProtectedStatePreserved(initial,current,stageName){
     const initKeys=Object.keys(initialFiles);
     const currKeys=Object.keys(currentFiles);
     if(initKeys.length!==currKeys.length){
+      writeProtectedStateDiff({
+        stageName,
+        category,
+        initialFiles,
+        currentFiles,
+        evidenceDir:evidence,
+      });
+      console.error(`Protected file count mismatch in category '${category}' during ${stageName}: initial=${initKeys.length}, current=${currKeys.length}`);
       throw new Error(`Protected file count mismatch in category '${category}' during ${stageName}`);
     }
     for(const [filePath,expectedHash] of Object.entries(initialFiles)){
       const currentHash=currentFiles[filePath];
       if(typeof currentHash!=='string'||currentHash!==expectedHash){
+        writeProtectedStateDiff({
+          stageName,
+          category,
+          initialFiles,
+          currentFiles,
+          evidenceDir:evidence,
+        });
         const baseName=path.basename(filePath);
+        console.error(`Protected file modified in category '${category}': ${baseName} during ${stageName}`);
         throw new Error(`Protected file modified in category '${category}': ${baseName} during ${stageName}`);
       }
     }
