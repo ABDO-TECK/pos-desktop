@@ -34,7 +34,8 @@ export async function attachTransitionTransport({ui,application,storage,evidence
   const php=path.join(application,'resources/portable/php/php.exe');
   const root=path.join(application,'resources/app.asar.unpacked');
   let server,starting,base,preparing=false,beforeApplyResponse=null;
-  const tasks=new Set();
+  let handoffWinner=false,handoffStopPromise=null;
+  const tasks=new Set(),httpInflight=new Set();
   async function ensureServer(){
     if(starting)return starting;
     if(server&&server.exitCode===null)return base;
@@ -62,41 +63,141 @@ export async function attachTransitionTransport({ui,application,storage,evidence
       try{await ui.call('Fetch.continueRequest',{requestId});}catch(err){if(!isInterceptionDropped(err))throw err;}
       return;
     }
-    const url=new URL(request.url),mutation=request.method==='POST'&&/\/(?:apply|rollback)$/.test(url.pathname);
+    const url=new URL(request.url);
+    const mutation=request.method==='POST'&&/\/(?:apply|rollback)$/.test(url.pathname);
+    const jobMatch=request.method==='GET'&&url.pathname.match(/\/update\/jobs\/(\d+)/);
+    const isJobPoll=Boolean(jobMatch);
+    const polledJobId=jobMatch?Number(jobMatch[1]):null;
+
     if(preparing){
+      if(handoffStopPromise)await handoffStopPromise;
       try{await ui.call('Fetch.continueRequest',{requestId});}catch(err){if(!isInterceptionDropped(err))throw err;}
       return;
     }
-    if(mutation){preparing=true;await Promise.allSettled([...tasks]);}
+    if(mutation){
+      preparing=true;
+      if(httpInflight.size>0)await Promise.allSettled([...httpInflight]);
+    }
+    let response,body,bodyStr;
+    let resolveIo;
+    const ioPromise=new Promise(resolve=>{resolveIo=resolve;});
+    httpInflight.add(ioPromise);
     try{
-      const destination=await ensureServer();
-      const headers=new Headers(request.headers);headers.set('origin','app://pos-app');headers.set('cookie',cookieHeader());headers.set('x-xsrf-token',signature);headers.set('accept-encoding','identity');
-      for(const name of ['host','content-length','connection'])headers.delete(name);
-      const response=await fetch(destination+url.pathname+url.search,{method:request.method,headers,...(request.postData?{body:request.postData}:{})});
-      const body=Buffer.from(await response.arrayBuffer());
-      const bodyStr=body.toString();
+      try{
+        const destination=await ensureServer();
+        const headers=new Headers(request.headers);
+        headers.set('origin','app://pos-app');
+        headers.set('cookie',cookieHeader());
+        headers.set('x-xsrf-token',signature);
+        headers.set('accept-encoding','identity');
+        for(const name of ['host','content-length','connection'])headers.delete(name);
+        response=await fetch(destination+url.pathname+url.search,{
+          method:request.method,
+          headers,
+          ...(request.postData?{body:request.postData}:{})
+        });
+        body=Buffer.from(await response.arrayBuffer());
+        bodyStr=body.toString();
+      }finally{
+        resolveIo();
+        httpInflight.delete(ioPromise);
+      }
       fs.appendFileSync(path.join(evidence,'transport-http.log'),JSON.stringify({time:new Date().toISOString(),method:request.method,url:url.pathname+url.search,status:response.status,body:bodyStr.slice(0,1000)})+'\n');
       if(url.pathname.endsWith('/transition/preview')){
         let result;try{result=JSON.parse(bodyStr);}catch{}
         fs.appendFileSync(path.join(evidence,'preview-responses.jsonl'),JSON.stringify({status:response.status,channel:result?.data?.selected_channel,result:result?.data?.status,reason:result?.data?.reason_code,error:result?.status==='error'?result?.message:null})+'\n');
       }
-      const responseHeaders=[];for(const [name,value] of response.headers)if(!['content-length','content-encoding','transfer-encoding','set-cookie'].includes(name.toLowerCase()))responseHeaders.push({name,value});
+
+      let parsed;
+      try{parsed=JSON.parse(bodyStr);}catch{}
+
+      const isQueuedAdmission=mutation&&response.status===200&&parsed?.data&&typeof parsed.data==='object'
+        &&('job_id' in parsed.data||parsed.data.status==='pending'||parsed.data.status==='processing')
+        &&!parsed.data.requires_desktop_handoff
+        &&!parsed.data.result?.requires_desktop_handoff;
+
+      const isJobHandoffReady=isJobPoll&&response.status===200
+        &&parsed?.data&&typeof parsed.data==='object'
+        &&parsed.data.status==='completed'
+        &&(polledJobId===null||Number(parsed.data.id)===polledJobId)
+        &&parsed.data.result&&typeof parsed.data.result==='object'
+        &&parsed.data.result.ok===true
+        &&parsed.data.result.requires_desktop_handoff===true
+        &&typeof parsed.data.result.handoff_version==='string'
+        &&parsed.data.result.handoff_version.length>0;
+
+      if(isJobPoll){
+        fs.appendFileSync(
+          path.join(evidence,'transport-http.log'),
+          JSON.stringify({
+            time:new Date().toISOString(),
+            job_trace:{
+              id:parsed?.data?.id??polledJobId,
+              status:parsed?.data?.status??null,
+              handoff_ready:isJobHandoffReady,
+              path:url.pathname,
+              status_code:response.status
+            }
+          })+'\n'
+        );
+      }else if(isQueuedAdmission){
+        fs.appendFileSync(
+          path.join(evidence,'transport-http.log'),
+          JSON.stringify({
+            time:new Date().toISOString(),
+            queue_trace:{
+              job_id:parsed.data.job_id??null,
+              status:parsed.data.status??'pending',
+              handoff_ready:false,
+              path:url.pathname,
+              status_code:response.status
+            }
+          })+'\n'
+        );
+      }
+
+      const responseHeaders=[];
+      for(const [name,value] of response.headers)if(!['content-length','content-encoding','transfer-encoding','set-cookie'].includes(name.toLowerCase()))responseHeaders.push({name,value});
       for(const value of response.headers.getSetCookie())responseHeaders.push({name:'set-cookie',value});
+
+      const isReadyMutation=mutation&&response.status===200&&!isQueuedAdmission;
       if(mutation){
-        // End the actual request PHP parent before Electron stops its own runtime.
-        await stopServer();
-        let prepared;try{prepared=JSON.parse(bodyStr);}catch{}
         if(response.status!==200){
           console.error(`Mutation ${request.method} ${url.pathname} returned HTTP ${response.status}: ${bodyStr}`);
+          preparing=false;
+        }else if(isQueuedAdmission){
+          preparing=false;
         }
-        if(response.status===200&&beforeApplyResponse){const hook=beforeApplyResponse;beforeApplyResponse=null;await hook(prepared);}
       }
+
+      if(isReadyMutation||isJobHandoffReady){
+        preparing=true;
+        if(!handoffWinner){
+          handoffWinner=true;
+          handoffStopPromise=(async()=>{
+            if(httpInflight.size>0)await Promise.allSettled([...httpInflight]);
+            await stopServer();
+            if(beforeApplyResponse){
+              const hook=beforeApplyResponse;
+              beforeApplyResponse=null;
+              const preparedData=isJobPoll?{
+                ...(parsed?.data?.result||{}),
+                ...parsed?.data,
+                requires_desktop_handoff:parsed?.data?.result?.requires_desktop_handoff,
+                handoff_version:parsed?.data?.result?.handoff_version
+              }:parsed;
+              await hook(isJobPoll?{...parsed,data:preparedData}:preparedData);
+            }
+          })();
+        }
+        await handoffStopPromise;
+      }
+
       try{
         await ui.call('Fetch.fulfillRequest',{requestId,responseCode:response.status,responseHeaders,body:body.toString('base64')});
       }catch(err){
         if(!isInterceptionDropped(err))throw err;
       }
-      if(mutation&&response.status!==200)preparing=false;
     }catch(error){
       preparing=false;
       if(isInterceptionDropped(error))return;
@@ -114,10 +215,21 @@ export async function attachTransitionTransport({ui,application,storage,evidence
     }).finally(()=>tasks.delete(task));
     tasks.add(task);
   });
-  await ui.call('Fetch.enable',{patterns:[{urlPattern:'*/api/*/updates/*',requestStage:'Request'},{urlPattern:'*/api/updates/*',requestStage:'Request'}]});
+  await ui.call('Fetch.enable',{patterns:[
+    {urlPattern:'*/api/*/updates/*',requestStage:'Request'},
+    {urlPattern:'*/api/updates/*',requestStage:'Request'},
+    {urlPattern:'*/api/*/update/jobs/*',requestStage:'Request'},
+    {urlPattern:'*/api/update/jobs/*',requestStage:'Request'}
+  ]});
   return {
     reauth,
-    resume(){preparing=false;if(failure)throw failure;},
+    resume(){
+      preparing=false;
+      handoffWinner=false;
+      handoffStopPromise=null;
+      httpInflight.clear();
+      if(failure)throw failure;
+    },
     beforeApply(callback){assert.equal(beforeApplyResponse,null);beforeApplyResponse=callback;},
     async close(){unsubscribe();await Promise.allSettled([...tasks]);await ui.call('Fetch.disable').catch(()=>{});await stopServer();if(failure)throw failure;},
   };

@@ -1112,6 +1112,25 @@ try{
         fs.writeFileSync(path.join(evidence,'diagnostic-receipts.json'),JSON.stringify(allowlistReceipts,null,2));
       }catch{}
     }
+    const jobsDir=path.join(storage,'update-jobs');
+    if(fs.existsSync(jobsDir)){
+      try{
+        const allowlistJobs=[];
+        for(const file of fs.readdirSync(jobsDir)){
+          if(file.endsWith('.json')){
+            const jb=JSON.parse(fs.readFileSync(path.join(jobsDir,file),'utf8'));
+            allowlistJobs.push({
+              job_id:jb.job_id??null,
+              status:jb.status??null,
+              handoff_ready:jb.result?.data?.requires_desktop_handoff??false,
+              updated_at:jb.updated_at??jb.completed_at??null,
+              error:typeof jb.result?.error==='string'?sanitizeReason(jb.result.error):null,
+            });
+          }
+        }
+        fs.writeFileSync(path.join(evidence,'diagnostic-jobs.json'),JSON.stringify(allowlistJobs,null,2));
+      }catch{}
+    }
   }catch(diagErr){
     console.error('Failed to capture diagnostics:',diagErr.message);
   }
