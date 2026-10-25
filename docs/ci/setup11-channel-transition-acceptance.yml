@@ -1,0 +1,134 @@
+# Isolated CI Acceptance Workflow for Setup 0.0.11 Channel Transition
+#
+# IMPORTANT:
+# - This workflow template is designed for isolated execution in a dedicated test branch
+#   (test/setup11-channel-transition-acceptance) in ABDO-TECK/pos-desktop-updates.
+# - It checks out the frozen, reviewed commit SHA from ABDO-TECK/pos-desktop.
+# - persist-credentials is false; no unreviewed branch code can access secrets.
+# - It performs live CI acceptance on an ephemeral Windows runner using the real Setup 0.0.11
+#   runtime and production RSA signing key (UPDATE_PRIVATE_KEY) to prove bidirectional channel
+#   transition integrity.
+# - It NEVER publishes releases, tags, blockmaps, or assets to any GitHub Release.
+# - The supervisor pins SOURCE_REF_TO_PIN to the exact reviewed 40-hex commit SHA before running.
+
+name: Setup 0.0.11 Channel Transition Acceptance
+
+on:
+  push:
+    branches:
+      - test/setup11-channel-transition-acceptance
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup11-transition-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout pos-desktop repository
+        uses: actions/checkout@v4
+        with:
+          repository: ABDO-TECK/pos-desktop
+          ref: SOURCE_REF_TO_PIN
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked root and frontend dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Install locked backend dependencies
+        shell: pwsh
+        run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Establish ephemeral CI-only candidate 0.0.12 identity and compile artifacts
+        shell: pwsh
+        run: |
+          # Set candidate application version metadata ephemerally in transient runner workspace before building
+          # Retain Setup 11 native installer identity 0.0.11
+          $v = Get-Content -LiteralPath version.json -Raw | ConvertFrom-Json
+          $v.version = '0.0.12'
+          $v.application_version = '0.0.12'
+          $v.installer_version = '0.0.11'
+          $v.channel = 'stable'
+          $v.update_channel = 'stable'
+          $v.release_type = 'delta'
+          $v | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath version.json
+          
+          # Compile frontend and backend runtime artifacts with Candidate 0.0.12 identity
+          npm run frontend:build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run build:phar
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-phar-runtime.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # Verify candidate version metadata is accurately embedded in built PHAR
+          $pharMeta = php -r "`$p = new Phar('backend/backend.phar'); echo `$p['version.json']->getContent();" | ConvertFrom-Json
+          if ($pharMeta.version -ne '0.0.12' -or $pharMeta.application_version -ne '0.0.12') {
+              throw "Built PHAR did not embed Candidate application version 0.0.12 (found '$($pharMeta.version)')"
+          }
+          if ($pharMeta.installer_version -ne '0.0.11') {
+              throw "Built PHAR installer_version must retain Setup 11 identity 0.0.11 (found '$($pharMeta.installer_version)')"
+          }
+          Write-Host "Candidate 0.0.12 runtime compilation verified (application 0.0.12, retained installer 0.0.11)."
+
+      - name: Phase 1 - Prepare Lab, Reconstruct Beta 10 and Capture Data Contract
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pwsh scripts/prepare-setup11-channel-transition.ps1 -Phase prepare
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Phase 2 - Build and Sign Bootstrap and Bidirectional Channel Transitions
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+        run: |
+          pwsh scripts/prepare-setup11-channel-transition.ps1 -Phase sign
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Phase 3 - Execute Multi-Step Setup 0.0.11 Channel Transition Acceptance
+        shell: pwsh
+        run: |
+          pwsh scripts/prepare-setup11-channel-transition.ps1 -Phase acceptance
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload Transition Acceptance Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup11-channel-transition-evidence
+          path: ${{ runner.temp }}/setup11-channel-transition-evidence
+          if-no-files-found: ignore
+          retention-days: 14

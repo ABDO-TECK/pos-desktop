@@ -13,9 +13,14 @@ class GitHubReleaseProvider extends IsolatedChannelProviderBase
         $fixture=$this->fixture();$response=$fixture['responses'][$url]??null;
         if(isset($fixture['trace']))file_put_contents($fixture['trace'],json_encode(['metadata_url'=>$url,'transport'=>'frozen_metadata'])."\n",FILE_APPEND|LOCK_EX);
         if (!is_array($response)) throw new RuntimeException('Unexpected isolated discovery URL.');
+        if (isset($response['http_code']) && (int)$response['http_code'] !== 200) {
+            $code = (int)$response['http_code'];
+            $body = isset($response['body']) ? (is_string($response['body']) ? $response['body'] : json_encode($response['body'])) : json_encode(['message' => 'Not Found']);
+            return ['ok' => false, 'body' => $body, 'http_code' => $code, 'curl_error' => 'HTTP ' . $code, 'curl_errno' => 0, 'response_headers' => []];
+        }
         if (($fixture['mode']??'')==='full') {
             $filter=static function(array $release):array {
-                if (isset($release['assets'])) $release['assets']=array_values(array_filter($release['assets'],static fn(array $asset):bool=>!str_contains($asset['name'],'-to-stable-0.0.1-delta.zip')));
+                if (isset($release['assets'])) $release['assets']=array_values(array_filter($release['assets'],static fn(array $asset):bool=>!str_ends_with($asset['name'],'-delta.zip')));
                 return $release;
             };
             $response=array_is_list($response)?array_map($filter,$response):$filter($response);
