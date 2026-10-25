@@ -172,7 +172,7 @@ if ($Phase -eq 'prepare') {
     & $php scripts/build-setup11-transition-acceptance.php `
         --action=prepare-candidate `
         --source-root="$PWD" `
-        --setup11-inventory=(Join-Path $lab 'setup11-inventory.json') `
+        "--setup11-inventory=$(Join-Path $lab 'setup11-inventory.json')" `
         --output="$candidateApp"
     if ($LASTEXITCODE -ne 0) { throw 'Candidate 12 preparation failed.' }
     Copy-Item -LiteralPath (Join-Path $candidateApp 'deployment-inventory.json') -Destination (Join-Path $lab 'candidate-inventory.json')
