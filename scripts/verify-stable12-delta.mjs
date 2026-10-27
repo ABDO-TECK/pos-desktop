@@ -624,7 +624,7 @@ const acceptanceRecord = {
   physicalPrinterTested: false,
   bootstrapLimitationAcknowledged: true,
   productionRepairZipShipped: false,
-  customerBootstrapPath: 'Setup 0.0.13 in-place installer',
+  customerBootstrapPath: 'Setup 0.0.12 in-place installer',
   frozenSetup11DtoDropResultOk: true,
   acceptanceEngineType: 'isolated artifact-engine acceptance; NOT original 11 client HTTP bootstrap',
   nativeShellVersion: '0.0.11',
