@@ -353,6 +353,32 @@ function getActualDeploymentFiles(root) {
   return result;
 }
 
+function findLanSslPair(targets = posTargets) {
+  const pairs = [];
+  for (const target of targets) {
+    const key = path.join(target, 'ssl', 'server.key');
+    const cert = path.join(target, 'ssl', 'server.crt');
+    if (fs.existsSync(key) && fs.existsSync(cert)) {
+      const keyStat = fs.statSync(key);
+      const certStat = fs.statSync(cert);
+      if (keyStat.isFile() && certStat.isFile() && keyStat.size > 0 && certStat.size > 0) {
+        assertNoReparse(key);
+        assertNoReparse(cert);
+        const resolvedKey = path.resolve(key);
+        const resolvedCert = path.resolve(cert);
+        assert.ok(path.isAbsolute(resolvedKey), 'LAN SSL server.key must be an absolute path: ' + resolvedKey);
+        assert.ok(path.isAbsolute(resolvedCert), 'LAN SSL server.crt must be an absolute path: ' + resolvedCert);
+        pairs.push({ key: resolvedKey, cert: resolvedCert });
+      }
+    }
+  }
+  if (pairs.length === 0) {
+    return null;
+  }
+  assert.equal(pairs.length, 1, `Ambiguous LAN SSL keypair discovery across targets: found ${pairs.length} pairs`);
+  return pairs[0];
+}
+
 async function getSystemProtectedState(desktopLabUi) {
   const credFiles = [];
   for (const target of posTargets) {
@@ -444,17 +470,13 @@ async function getSystemProtectedState(desktopLabUi) {
   }
   assert.ok(Object.keys(qzTrustFiles).length >= 4, 'Non-empty QZ trust files required (>= 4)');
 
-  const sslFiles = [];
-  for (const target of posTargets) {
-    const key = path.join(target, 'ssl', 'server.key');
-    const cert = path.join(target, 'ssl', 'server.crt');
-    if (fs.existsSync(key) && fs.existsSync(cert) && fs.statSync(key).size > 0 && fs.statSync(cert).size > 0) {
-      assertNoReparse(key);
-      assertNoReparse(cert);
-      sslFiles.push(key, cert);
-      break;
-    }
+  const sslPair = findLanSslPair(posTargets);
+  assert.ok(sslPair && sslPair.key && sslPair.cert, 'Mandatory non-empty LAN SSL server.key and server.crt pair missing');
+  if (boundSslPair) {
+    assert.equal(sslPair.key, boundSslPair.key, 'LAN SSL server.key path must remain stable and bound');
+    assert.equal(sslPair.cert, boundSslPair.cert, 'LAN SSL server.crt path must remain stable and bound');
   }
+  const sslFiles = [sslPair.key, sslPair.cert];
   assert.equal(sslFiles.length, 2, 'Mandatory non-empty LAN SSL server.key and server.crt pair missing');
 
   const secrets = {
@@ -672,6 +694,7 @@ let observedHandoffVersion = null;
 let handoffPlanSnapshot = null;
 let boundJobId = null;
 let preHandoffOperationId = null;
+let boundSslPair = null;
 let primaryError = null;
 let acceptanceEvidence = null;
 
@@ -1136,19 +1159,20 @@ final class DeltaFixtureMarker0014
   assert.ok(auth.email && auth.password, 'Fresh admin credentials must be established');
 
   // Mandatory bounded poll for LAN SSL key/cert generation
-  console.log('      Waiting for LAN SSL server.key/crt generation...');
+  console.log('      Waiting for LAN SSL server.key/crt generation across canonical targets...');
   const sslDeadline = Date.now() + 60000;
-  let lanSslReady = false;
   while (Date.now() < sslDeadline) {
-    const keyPath = path.join(storage, 'ssl/server.key');
-    const crtPath = path.join(storage, 'ssl/server.crt');
-    if (fs.existsSync(keyPath) && fs.existsSync(crtPath) && fs.statSync(keyPath).size > 0 && fs.statSync(crtPath).size > 0) {
-      lanSslReady = true;
+    const pair = findLanSslPair(posTargets);
+    if (pair) {
+      boundSslPair = pair;
       break;
     }
     await delay(1000);
   }
-  assert.ok(lanSslReady, 'Mandatory LAN SSL server.key/crt generation timed out after 60s');
+  assert.ok(boundSslPair, 'Mandatory LAN SSL server.key/crt generation timed out after 60s');
+  assert.ok(path.isAbsolute(boundSslPair.key), 'LAN SSL server.key must be an absolute path: ' + boundSslPair.key);
+  assert.ok(path.isAbsolute(boundSslPair.cert), 'LAN SSL server.crt must be an absolute path: ' + boundSslPair.cert);
+  console.log(`      PASS: LAN SSL keypair detected at ${path.dirname(boundSslPair.key)}`);
 
   // Pure native snapshot taken AFTER onboarding
   const initialNativeSnapshot = snapshotImmutableNative(application);
@@ -1483,6 +1507,15 @@ final class DeltaFixtureMarker0014
   console.log('      PASS: IndexedDB offline records preserved.');
 
   // I. Protected System State & Sentinel Preservation
+  const postDeltaSslPair = findLanSslPair(posTargets);
+  assert.ok(postDeltaSslPair, 'LAN SSL server.key/crt pair missing after delta update');
+  assert.equal(postDeltaSslPair.key, boundSslPair.key, 'LAN SSL server.key path modified during delta update');
+  assert.equal(postDeltaSslPair.cert, boundSslPair.cert, 'LAN SSL server.crt path modified during delta update');
+  assert.ok(fs.statSync(postDeltaSslPair.key).size > 0, 'LAN SSL server.key must be non-empty after delta update');
+  assert.ok(fs.statSync(postDeltaSslPair.cert).size > 0, 'LAN SSL server.crt must be non-empty after delta update');
+  assertNoReparse(postDeltaSslPair.key);
+  assertNoReparse(postDeltaSslPair.cert);
+
   const systemStateAfter = await getSystemProtectedState(ui);
   assertProtectedStatePreserved(systemStateBefore, systemStateAfter, 'post-delta');
   assert.ok(fs.existsSync(sentinelPath), 'Business sentinel file deleted during update');
