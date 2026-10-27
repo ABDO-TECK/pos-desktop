@@ -12,7 +12,7 @@
     "Strict protected certificate classification distinguishes packaged CA roots from mutable local device certificates.",
     "Hardened channel transition protocol reconciles bound native handoff across renderer restarts with honest error details.",
     "Strict bound native-completion reconciliation protects running services and local data.",
-    "Important Setup 0.0.11 bootstrap note: frozen original Setup 11 client background DTO drops result.ok; full Setup 0.0.13 in-place installer is the official customer bootstrap path without separate repair tool."
+    "Important Setup 0.0.11 bootstrap note: frozen original Setup 11 client background DTO drops result.ok; full Setup 0.0.12 in-place installer is the planned customer bootstrap path without a separate repair tool, subject to successful installer acceptance."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
