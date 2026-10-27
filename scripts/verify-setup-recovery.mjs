@@ -17,7 +17,7 @@ const portable = path.join(resources, 'portable');
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
 const ver = JSON.parse(fs.readFileSync(path.join(repoRoot, 'version.json'), 'utf8'));
 
-const targetVersion = '0.0.11';
+const targetVersion = '0.0.12';
 assert.equal(pkg.version, targetVersion, `package.json version must be ${targetVersion}`);
 assert.equal(ver.version, targetVersion, `version.json version must be ${targetVersion}`);
 assert.equal(ver.application_version, targetVersion, `version.json application_version must be ${targetVersion}`);
