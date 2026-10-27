@@ -1,0 +1,720 @@
+name: Signed stable delta release
+
+# Safe release workflow template for Stable 0.0.12.
+# Parent installs this template as .github/workflows/delta-release.yml on a new
+# updates release branch based on main.
+# The literal placeholder SOURCE_REF_TO_PIN is replaced by the parent with the 40-hex commit SHA.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish verified assets (otherwise validation only)'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-stable-0.0.12
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, Sign, and Verify Stable Delta Release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pos-desktop repository at pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: ABDO-TECK/pos-desktop
+          ref: SOURCE_REF_TO_PIN
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked root and frontend dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Install locked backend dependencies
+        shell: pwsh
+        run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Frontend typecheck and build validation
+        shell: pwsh
+        run: |
+          npm --prefix frontend run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run frontend:build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build and verify backend PHAR runtime
+        shell: pwsh
+        run: |
+          npm run build:phar
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-phar-runtime.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Run channel transition, admin update center, and security regressions
+        shell: pwsh
+        run: |
+          php scripts/verify-active-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-release-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-channel-policy.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-manifest.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-data.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-catalog.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-channel-transition-builder.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-preview.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-receipt.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-channel-transition-flow.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-channel-transition-flow.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-channel-transition-compatibility.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-admin-update-center.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-protected-certificate-classification.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-repair.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Validate release tag provenance and bind local clone tag
+        shell: pwsh
+        env:
+          IS_PUBLISH: ${{ inputs.publish }}
+          SOURCE_REPO: ABDO-TECK/pos-desktop
+          EXPECTED_TAG: v0.0.12
+        run: |
+          $headSha = (git rev-parse HEAD).Trim()
+          Write-Host "Local checkout HEAD SHA: $headSha"
+
+          if ($env:IS_PUBLISH -eq 'true') {
+              Write-Host "Publish requested: Verifying source remote tag $env:EXPECTED_TAG exists in $env:SOURCE_REPO..."
+              $remoteTagLine = (git ls-remote --tags "https://github.com/$env:SOURCE_REPO.git" "refs/tags/$env:EXPECTED_TAG" 2>&1)
+              if ($LASTEXITCODE -ne 0 -or -not $remoteTagLine -or $remoteTagLine -notmatch '^([0-9a-f]{40})\s+refs/tags/') {
+                  throw "Publish rejected: Source remote tag $env:EXPECTED_TAG does not exist on $env:SOURCE_REPO or query failed! Parent must create real source tag after review."
+              }
+              $remoteTagSha = $Matches[1]
+              $derefLine = (git ls-remote --tags "https://github.com/$env:SOURCE_REPO.git" "refs/tags/$env:EXPECTED_TAG^{}" 2>&1)
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Publish rejected: Failed querying dereferenced source remote tag on $env:SOURCE_REPO: $derefLine"
+              }
+              if ($derefLine -match '^([0-9a-f]{40})\s+refs/tags/') {
+                  $remoteTagSha = $Matches[1]
+              }
+              if ($remoteTagSha -ne $headSha) {
+                  throw "Publish rejected: Remote tag $env:EXPECTED_TAG resolves to $remoteTagSha, which does not match exact pinned checkout commit $headSha!"
+              }
+              $localExisting = (git rev-parse --verify "refs/tags/$env:EXPECTED_TAG^{commit}" 2>&1)
+              if ($LASTEXITCODE -eq 0) {
+                  $localSha = ($localExisting | Out-String).Trim()
+                  if ($localSha -ne $headSha) {
+                      throw "Publish rejected: Local clone tag $env:EXPECTED_TAG points to $localSha, but checkout HEAD is $headSha!"
+                  }
+              } else {
+                  git tag $env:EXPECTED_TAG $headSha
+              }
+              Write-Host "Remote tag $env:EXPECTED_TAG verified and matches checkout HEAD $headSha."
+          } else {
+              Write-Host "Validation run (publish=false): Binding local clone tag $env:EXPECTED_TAG if absent..."
+              $existingLocal = (git rev-parse --verify "refs/tags/$env:EXPECTED_TAG^{commit}" 2>&1)
+              if ($LASTEXITCODE -eq 0) {
+                  $localSha = ($existingLocal | Out-String).Trim()
+                  if ($localSha -ne $headSha) {
+                      throw "Validation rejected: Existing local tag $env:EXPECTED_TAG points to $localSha, which does not equal exact checkout SHA $headSha!"
+                  }
+                  Write-Host "Local tag $env:EXPECTED_TAG verified at exact checkout SHA $headSha."
+              } else {
+                  git tag $env:EXPECTED_TAG $headSha
+                  Write-Host "Created ephemeral local tag $env:EXPECTED_TAG at $headSha for build validators (will not push)."
+              }
+          }
+
+      - name: Phase 1 - Prepare Lab and Capture Baseline Setup 0.0.11 Contract
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pwsh scripts/prepare-setup11-beta-release.ps1 -Phase prepare -Assets release-assets
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Phase 2 - Build and Sign Dual-Baseline Stable Delta Packages
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+        run: |
+          pwsh scripts/build-delta-release.ps1 -Tag v0.0.12 -Channel stable
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Assemble Release Provenance Prerequisite
+        shell: pwsh
+        run: |
+          # Record explicit release provenance with ToUniversalTime conversion
+          $provenance = [ordered]@{
+              release_tag = 'v0.0.12'
+              target_version = '0.0.12'
+              channel = 'stable'
+              source_repository = 'ABDO-TECK/pos-desktop'
+              source_commit = 'SOURCE_REF_TO_PIN'
+              supported_baselines = @('v0.0.11', 'v0.0.12-beta.1')
+              native_shell_version = '0.0.11'
+              native_shell_commit = 'aa14fce3dc5c0ec15b3a38c8ae83010430a50cf7'
+              built_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          }
+          $provenance | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath 'release-assets/source-provenance.json' -Encoding utf8
+
+      - name: Phase 3 - Execute Dual-Baseline Stable Delta Acceptance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/verify-stable12-delta.mjs release-assets
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Validate Acceptance Evidence and Assemble Release Checksums
+        shell: pwsh
+        run: |
+          # Enforce that no private, auth, database, or sensitive lab material is in release-assets
+          $forbidden = Get-ChildItem -Path release-assets -Recurse | Where-Object {
+              $_.Name -match '(?i)(auth\.json|\.env|private|key|\.pem|\.key|\.db|\.sqlite|data-contract|owned-lab)' -and $_.Name -notmatch '\.sig$'
+          }
+          if ($forbidden) {
+              throw "Forbidden sensitive artifact detected in release-assets: $($forbidden.Name -join ', ')"
+          }
+
+          # Verify acceptance artifact fields, versions, and mandatory proofs
+          $accPath = 'release-assets/stable12-delta-acceptance.json'
+          if (-not (Test-Path -LiteralPath $accPath)) {
+              throw "Missing acceptance artifact: $accPath"
+          }
+          $acc = Get-Content -LiteralPath $accPath -Raw | ConvertFrom-Json
+
+          # 1. Base status & exact required fields
+          if ($acc.ok -isnot [bool] -or $acc.ok -ne $true) {
+              throw "Acceptance validation failed: .ok must be boolean true"
+          }
+          if ($acc.targetVersion -ne '0.0.12') {
+              throw "Acceptance validation failed: .targetVersion must be '0.0.12' (got: '$($acc.targetVersion)')"
+          }
+          if ($acc.releaseChannel -ne 'stable') {
+              throw "Acceptance validation failed: .releaseChannel must be 'stable' (got: '$($acc.releaseChannel)')"
+          }
+          if ($acc.baselinesTested -notcontains '0.0.11' -or $acc.baselinesTested -notcontains '0.0.12-beta.1') {
+              throw "Acceptance validation failed: .baselinesTested must contain both 0.0.11 and 0.0.12-beta.1"
+          }
+          if ($acc.originalSetup11Verified -ne $true -or $acc.publishedBeta12Verified -ne $true) {
+              throw "Acceptance validation failed: baseline authentications must be true"
+          }
+          if ($acc.rsaSignaturesVerified -ne $true -or $acc.manifestsMatched -ne $true) {
+              throw "Acceptance validation failed: cryptographic manifest proofs must be true"
+          }
+          if ($acc.codePayloadReplaced -ne $true -or $acc.pharReplaced -ne $true -or $acc.versionReplaced -ne $true) {
+              throw "Acceptance validation failed: code payload replacement proofs must be true"
+          }
+          if ($acc.databaseSchemaPreserved -ne $true -or $acc.customerLedgerDataPreserved -ne $true) {
+              throw "Acceptance validation failed: data preservation proofs must be true"
+          }
+          if ($acc.credentialsPreserved -ne $true -or $acc.printerKeysPreserved -ne $true) {
+              throw "Acceptance validation failed: credential preservation proofs must be true"
+          }
+          if ($acc.bootstrapLimitationAcknowledged -ne $true) {
+              throw "Acceptance validation failed: bootstrap limitation must be acknowledged"
+          }
+          if ($acc.productionRepairZipShipped -ne $false) {
+              throw "Acceptance validation failed: productionRepairZipShipped must be false"
+          }
+
+          # Check exact 13 expected files in release-assets
+          $expectedAssetNames = @(
+              'manifest-0.0.11.json',
+              'manifest-0.0.11.sig',
+              'delta-0.0.11-to-0.0.12.zip',
+              'manifest-0.0.12-beta.1.json',
+              'manifest-0.0.12-beta.1.sig',
+              'delta-0.0.12-beta.1-to-0.0.12.zip',
+              'manifest.json',
+              'manifest.sig',
+              'delta.zip',
+              'deployment-inventory.json',
+              'release-notes.md',
+              'source-provenance.json',
+              'stable12-delta-acceptance.json'
+          )
+
+          # Verify no subdirectories, reparse points, or unlisted files exist
+          $items = Get-ChildItem -Path release-assets -Force
+          foreach ($item in $items) {
+              if ($item.PSIsContainer) {
+                  throw "Unexpected subdirectory in release-assets: $($item.Name)"
+              }
+              if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                  throw "Reparse point / symlink in release-assets is forbidden: $($item.Name)"
+              }
+              if ($item.Name -ne 'SHA256SUMS.txt' -and $expectedAssetNames -notcontains $item.Name) {
+                  throw "Unexpected unhashed or unlisted file in release-assets: $($item.Name)"
+              }
+          }
+          foreach ($exp in $expectedAssetNames) {
+              if (-not (Test-Path -LiteralPath (Join-Path 'release-assets' $exp))) {
+                  throw "Mandatory release asset missing from release-assets: $exp"
+              }
+          }
+
+          # Generate SHA256SUMS.txt covering all 13 expected files
+          Push-Location release-assets
+          try {
+              if (Test-Path -LiteralPath 'SHA256SUMS.txt') {
+                  throw "Pre-existing SHA256SUMS.txt detected in release-assets; refusing unverified overwrite."
+              }
+              $checksumLines = @()
+              foreach ($name in ($expectedAssetNames | Sort-Object)) {
+                  $h = (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant()
+                  $checksumLines += "$h  $name"
+              }
+              $checksumLines | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding ascii
+          } finally {
+              Pop-Location
+          }
+
+          # Pre-upload verification of release package views for both baselines
+          pwsh scripts/verify-stable12-release.ps1 -ReleaseDir release-assets -RequireChecksums
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-0.0.12
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Stable Release to pos-desktop-updates
+    needs: build
+    if: inputs.publish == true
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source repository for verification tooling
+        uses: actions/checkout@v4
+        with:
+          repository: ABDO-TECK/pos-desktop
+          ref: SOURCE_REF_TO_PIN
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked backend dependencies for verification
+        shell: pwsh
+        run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE -ne 0) { throw "Composer install failed in publish job with exit code $LASTEXITCODE" }
+
+      - name: Download verified release assets from current run
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-0.0.12
+          path: release-assets
+
+      - name: Verify package checksums and release preconditions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+          RELEASE_TAG: v0.0.12
+        run: |
+          $expectedAssetNames = @(
+              'manifest-0.0.11.json',
+              'manifest-0.0.11.sig',
+              'delta-0.0.11-to-0.0.12.zip',
+              'manifest-0.0.12-beta.1.json',
+              'manifest-0.0.12-beta.1.sig',
+              'delta-0.0.12-beta.1-to-0.0.12.zip',
+              'manifest.json',
+              'manifest.sig',
+              'delta.zip',
+              'deployment-inventory.json',
+              'release-notes.md',
+              'source-provenance.json',
+              'stable12-delta-acceptance.json'
+          )
+
+          Push-Location release-assets
+          try {
+              $sumsPath = 'SHA256SUMS.txt'
+              if (-not (Test-Path -LiteralPath $sumsPath)) {
+                  throw "SHA256SUMS.txt is missing from release-assets!"
+              }
+              $rawLines = Get-Content -LiteralPath $sumsPath
+              $seenNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+              $matchedFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+              foreach ($line in $rawLines) {
+                  $trimmed = $line.Trim()
+                  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+                      throw "Malformed SHA256SUMS.txt: empty line detected."
+                  }
+                  if ($trimmed -notmatch '^([0-9a-f]{64})\s\s([A-Za-z0-9._-]+)$') {
+                      throw "Malformed SHA256SUMS.txt line format: '$line'"
+                  }
+                  $expectedHash = $Matches[1].ToLowerInvariant()
+                  $leafName = $Matches[2]
+
+                  if ($leafName -match '[\\/]' -or $leafName -eq '.' -or $leafName -eq '..') {
+                      throw "Unsafe leaf asset name in SHA256SUMS.txt: '$leafName'"
+                  }
+                  if (-not $seenNames.Add($leafName)) {
+                      throw "Duplicate entry detected in SHA256SUMS.txt: '$leafName'"
+                  }
+                  if (-not (Test-Path -LiteralPath $leafName)) {
+                      throw "Checksum verification failed: file '$leafName' listed in SHA256SUMS.txt is missing!"
+                  }
+                  $actualHash = (Get-FileHash -LiteralPath $leafName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  if ($actualHash -ne $expectedHash) {
+                      throw "Checksum mismatch for '$leafName'! Expected $expectedHash, got $actualHash"
+                  }
+                  $matchedFiles.Add($leafName) | Out-Null
+              }
+
+              foreach ($exp in $expectedAssetNames) {
+                  if (-not $matchedFiles.Contains($exp)) {
+                      throw "Expected artifact '$exp' is missing from SHA256SUMS.txt!"
+                  }
+              }
+              if ($matchedFiles.Count -ne $expectedAssetNames.Count) {
+                  throw "SHA256SUMS.txt entry count ($($matchedFiles.Count)) does not match expected artifact count ($($expectedAssetNames.Count))!"
+              }
+
+              $allDiskItems = Get-ChildItem -Force
+              foreach ($item in $allDiskItems) {
+                  if ($item.PSIsContainer) {
+                      throw "Reparse point or directory detected in release-assets: $($item.Name)"
+                  }
+                  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                      throw "Reparse point detected in release-assets: $($item.Name)"
+                  }
+                  if ($item.Name -ne 'SHA256SUMS.txt' -and -not $matchedFiles.Contains($item.Name)) {
+                      throw "Unhashed extra file detected on disk: $($item.Name)"
+                  }
+              }
+          } finally {
+              Pop-Location
+          }
+
+          Write-Host "Verifying release and tag preconditions in $env:TARGET_REPO for $env:RELEASE_TAG..."
+          $releaseApiRaw = & gh api "repos/$env:TARGET_REPO/releases/tags/$env:RELEASE_TAG" 2>&1
+          if ($LASTEXITCODE -eq 0) {
+              throw "Precondition violated: Release $env:RELEASE_TAG already exists in $env:TARGET_REPO! Overwriting or modifying historical releases is prohibited."
+          }
+          $releaseApiErr = ($releaseApiRaw | Out-String).Trim()
+          if ($releaseApiErr -match '(?i)rate limit|bad credentials|401|403|forbidden|could not resolve|connection refused|timeout') {
+              throw "Precondition failed: Error querying release from updates repo: $releaseApiErr"
+          }
+          if ($releaseApiErr -notmatch '"status":\s*"404"' -and $releaseApiErr -notmatch 'HTTP 404' -and $releaseApiErr -notmatch '"message":\s*"Not Found"') {
+              throw "Precondition failed: Unexpected error querying release from updates repo: $releaseApiErr"
+          }
+
+          $updatesTagCheck = & git ls-remote --tags "https://github.com/$env:TARGET_REPO.git" "refs/tags/$env:RELEASE_TAG" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Precondition failed: Failed querying remote tags on $env:TARGET_REPO: $updatesTagCheck"
+          }
+          if ($updatesTagCheck -match 'refs/tags/') {
+              throw "Precondition violated: Git tag $env:RELEASE_TAG already exists in updates repository $env:TARGET_REPO! Reusing an existing tag via --target is prohibited."
+          }
+          Write-Host "Preconditions verified: Release and Git tag $env:RELEASE_TAG are strictly absent in $env:TARGET_REPO."
+
+      - name: Create Owned Draft Release and Upload Verified Public Assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+          RELEASE_TAG: v0.0.12
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          $notesPath = Join-Path (Get-Location) 'release-notes-final.md'
+          $notesLines = @(
+              '# POS Desktop 0.0.12',
+              '',
+              'Target Application Version: 0.0.12',
+              'Update Channel: stable',
+              'Release Type: delta',
+              'Supported Baselines: v0.0.11 (Windows Setup 0.0.11), v0.0.12-beta.1 (Beta 0.0.12-beta.1)',
+              'Native Runtime Shell: 0.0.11 (aa14fce3dc5c0ec15b3a38c8ae83010430a50cf7)',
+              'Source Repository: ABDO-TECK/pos-desktop',
+              'Source Tag: v0.0.12',
+              'Source Commit: SOURCE_REF_TO_PIN',
+              "Updates Workflow Commit: $env:WORKFLOW_SHA",
+              '',
+              '## Summary of Changes',
+              '- Dual baseline delta support provides artifact compatibility for both Setup 0.0.11 and Beta 0.0.12-beta.1 runtime shells targeting Stable 0.0.12, subject to documented Setup 0.0.11 bootstrap limitations (official customer bootstrap via Setup 0.0.13; no external repair product shipped).',
+              '- Strict protected certificate classification distinguishes packaged CA roots from mutable local device certificates.',
+              '- Hardened channel transition protocol reconciles bound native handoff across renderer restarts with honest error details.',
+              '- Strict bound native-completion reconciliation protects running services and local data.',
+              '',
+              '## Setup 0.0.11 Bootstrap Limitation Notice',
+              '- Frozen original Setup 11 client background DTO drops result.ok on async apply jobs.',
+              '- Publishing Stable Delta 12 provides artifact compatibility but does not patch frozen historical Setup 11 clients.',
+              '- Full Setup 0.0.13 in-place installer is the official customer bootstrap path; no external repair product or ZIP is shipped.',
+              '',
+              '## Operational and Security Boundaries',
+              '- Supported Baselines: Strictly Windows Setup 0.0.11 and Beta 0.0.12-beta.1 native runtime shells.',
+              '- Zero Database Migrations: Local SQLite/MariaDB databases and schemas are untouched and preserved.',
+              '- Cryptographic Verification: Manifests carry RSA-2048 application signatures verified against update_public_key.pem by scripts/verify-release-package.php.',
+              '- Public Artifact Integrity: Release notes, provenance, and acceptance records are part of the checksummed public artifact set verified by SHA256SUMS.txt.'
+          )
+          $notesLines | Set-Content -LiteralPath $notesPath -Encoding utf8
+
+          Write-Host "Creating NEW OWNED DRAFT release for tag $env:RELEASE_TAG bound to workflow commit $env:WORKFLOW_SHA..."
+          gh release create $env:RELEASE_TAG release-assets/* `
+              --repo $env:TARGET_REPO `
+              --target $env:WORKFLOW_SHA `
+              --title "POS Desktop $env:RELEASE_TAG" `
+              --notes-file $notesPath `
+              --draft `
+              --latest=false
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create draft release in $env:TARGET_REPO."
+          }
+
+          $draftViewRaw = & gh release view $env:RELEASE_TAG --repo $env:TARGET_REPO --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,assets 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed inspecting created draft release: $draftViewRaw"
+          }
+          $draftObj = ($draftViewRaw | Out-String) | ConvertFrom-Json
+          if (-not $draftObj.databaseId -or [string]$draftObj.databaseId -notmatch '^\d+$') {
+              throw "Failed to resolve positive numeric databaseId from created draft release (got: '$($draftObj.databaseId)')."
+          }
+          $createdReleaseId = [int64]$draftObj.databaseId
+          if ($createdReleaseId -le 0) {
+              throw "Resolved draft release databaseId must be a positive integer, got: $createdReleaseId"
+          }
+          if ($draftObj.tagName -ne $env:RELEASE_TAG) {
+              throw "Draft release tag mismatch: expected $env:RELEASE_TAG, got $($draftObj.tagName)"
+          }
+          if ($draftObj.targetCommitish -ne $env:WORKFLOW_SHA) {
+              throw "Draft release target commit mismatch: expected $env:WORKFLOW_SHA, got $($draftObj.targetCommitish)"
+          }
+          if ($draftObj.isDraft -ne $true) {
+              throw "Release was not created as a draft!"
+          }
+          if ($draftObj.isPrerelease -ne $false) {
+              throw "Stable release must not be marked prerelease!"
+          }
+
+          # Download draft assets for pre-publication validation
+          $draftDownloadDir = Join-Path $env:RUNNER_TEMP 'draft-download'
+          New-Item -ItemType Directory -Path $draftDownloadDir -Force | Out-Null
+          Write-Host "Downloading draft assets for pre-publication validation..."
+          gh release download $env:RELEASE_TAG --repo $env:TARGET_REPO --dir $draftDownloadDir
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed downloading assets from draft release."
+          }
+
+          $buildFiles = Get-ChildItem -Path release-assets -File
+          $downloadedDraftFiles = Get-ChildItem -Path $draftDownloadDir -File
+          if ($downloadedDraftFiles.Count -ne $buildFiles.Count) {
+              throw "Draft asset count ($($downloadedDraftFiles.Count)) does not match build asset count ($($buildFiles.Count))!"
+          }
+          foreach ($bf in $buildFiles) {
+              $dfPath = Join-Path $draftDownloadDir $bf.Name
+              if (-not (Test-Path -LiteralPath $dfPath)) {
+                  throw "Draft release is missing asset: $($bf.Name)"
+              }
+              $bHash = (Get-FileHash -LiteralPath $bf.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              $dHash = (Get-FileHash -LiteralPath $dfPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($bHash -ne $dHash) {
+                  throw "Draft asset hash mismatch for '$($bf.Name)'! Build: $bHash, Draft: $dHash"
+              }
+          }
+
+          Write-Host "Verifying ordinary release package views on downloaded DRAFT assets..."
+          pwsh scripts/verify-stable12-release.ps1 -ReleaseDir "$draftDownloadDir" -RequireChecksums
+          if ($LASTEXITCODE -ne 0) {
+              throw "Pre-publication validation failed on draft assets!"
+          }
+
+          Write-Host "Verifying owned draft release via REST API with numeric ID $createdReleaseId before publication..."
+          $draftRestRaw = & gh api "repos/$env:TARGET_REPO/releases/$createdReleaseId" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to fetch draft release via REST endpoint for ID ${createdReleaseId}: $draftRestRaw"
+          }
+          $draftRest = ($draftRestRaw | Out-String) | ConvertFrom-Json
+          if ([int64]$draftRest.id -ne $createdReleaseId) {
+              throw "REST endpoint release ID mismatch: expected $createdReleaseId, got $($draftRest.id)"
+          }
+          if ($draftRest.tag_name -ne $env:RELEASE_TAG) {
+              throw "REST draft release tag_name mismatch: expected $env:RELEASE_TAG, got $($draftRest.tag_name)"
+          }
+          if ($draftRest.target_commitish -ne $env:WORKFLOW_SHA) {
+              throw "REST draft release target_commitish mismatch: expected $env:WORKFLOW_SHA, got $($draftRest.target_commitish)"
+          }
+          if ($draftRest.draft -ne $true) {
+              throw "Target release ID $createdReleaseId is no longer in draft state before PATCH!"
+          }
+          if ($draftRest.prerelease -ne $false) {
+              throw "Target release ID $createdReleaseId must not be prerelease!"
+          }
+
+          $expected14ReleaseAssets = @(
+              'manifest-0.0.11.json',
+              'manifest-0.0.11.sig',
+              'delta-0.0.11-to-0.0.12.zip',
+              'manifest-0.0.12-beta.1.json',
+              'manifest-0.0.12-beta.1.sig',
+              'delta-0.0.12-beta.1-to-0.0.12.zip',
+              'manifest.json',
+              'manifest.sig',
+              'delta.zip',
+              'deployment-inventory.json',
+              'release-notes.md',
+              'source-provenance.json',
+              'stable12-delta-acceptance.json',
+              'SHA256SUMS.txt'
+          )
+          if ($draftRest.assets.Count -ne 14) {
+              throw "Draft release ID $createdReleaseId asset count on GitHub is $($draftRest.assets.Count), expected exactly 14!"
+          }
+          $seenRestAssets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($asset in $draftRest.assets) {
+              $aName = [string]$asset.name
+              if (-not $seenRestAssets.Add($aName)) {
+                  throw "Duplicate asset detected on GitHub release ID ${createdReleaseId}: '$aName'"
+              }
+              if ($expected14ReleaseAssets -notcontains $aName) {
+                  throw "Unexpected asset on GitHub release ID ${createdReleaseId}: '$aName'"
+              }
+          }
+          foreach ($exp in $expected14ReleaseAssets) {
+              if (-not $seenRestAssets.Contains($exp)) {
+                  throw "Draft release ID $createdReleaseId is missing expected asset on GitHub: $exp"
+              }
+          }
+
+          Write-Host "Publishing owned draft release (numeric ID: $createdReleaseId, Tag: $env:RELEASE_TAG)..."
+          $publishOut = & gh api "repos/$env:TARGET_REPO/releases/$createdReleaseId" -X PATCH --field draft=false 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to publish draft release ID ${createdReleaseId}: $($publishOut | Out-String)"
+          }
+
+          Write-Host "Verifying live published release status via REST ID $createdReleaseId..."
+          $publishedRestRaw = & gh api "repos/$env:TARGET_REPO/releases/$createdReleaseId" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to query published release via REST ID ${createdReleaseId}: $publishedRestRaw"
+          }
+          $publishedRest = ($publishedRestRaw | Out-String) | ConvertFrom-Json
+          if ([int64]$publishedRest.id -ne $createdReleaseId) {
+              throw "Published release REST ID mismatch ($($publishedRest.id) != $createdReleaseId)"
+          }
+          if ($publishedRest.draft -ne $false) {
+              throw "Release remains in draft state after publication attempt!"
+          }
+          if ($publishedRest.prerelease -ne $false) {
+              throw "Published stable release must not be marked prerelease!"
+          }
+          if ($publishedRest.tag_name -ne $env:RELEASE_TAG) {
+              throw "Published release tag_name mismatch: expected $env:RELEASE_TAG, got $($publishedRest.tag_name)"
+          }
+          if ($publishedRest.target_commitish -ne $env:WORKFLOW_SHA) {
+              throw "Published release target_commitish mismatch: expected $env:WORKFLOW_SHA, got $($publishedRest.target_commitish)"
+          }
+
+          $remoteGitTagRaw = & git ls-remote --tags "https://github.com/$env:TARGET_REPO.git" "refs/tags/$env:RELEASE_TAG*" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed querying published remote Git tag: $remoteGitTagRaw"
+          }
+          $resolvedRemoteSha = $null
+          foreach ($line in ($remoteGitTagRaw -split "`n")) {
+              if ($line -match '^([0-9a-f]{40})\s+refs/tags/' + [regex]::Escape($env:RELEASE_TAG) + '(?:\^\{\})?$') {
+                  $resolvedRemoteSha = $Matches[1]
+              }
+          }
+          if (-not $resolvedRemoteSha) {
+              throw "Published remote Git tag $env:RELEASE_TAG was not found on $env:TARGET_REPO!"
+          }
+          if ($resolvedRemoteSha -ne $env:WORKFLOW_SHA) {
+              throw "Published remote Git tag $env:RELEASE_TAG resolves to $resolvedRemoteSha, not workflow commit $env:WORKFLOW_SHA!"
+          }
+
+          $liveDownloadDir = Join-Path $env:RUNNER_TEMP 'live-published-download'
+          New-Item -ItemType Directory -Path $liveDownloadDir -Force | Out-Null
+          Write-Host "Downloading live published assets for final verification..."
+          gh release download $env:RELEASE_TAG --repo $env:TARGET_REPO --dir $liveDownloadDir
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed downloading live published assets."
+          }
+          $liveFiles = Get-ChildItem -Path $liveDownloadDir -File
+          if ($liveFiles.Count -ne $buildFiles.Count) {
+              throw "Live asset count ($($liveFiles.Count)) does not match build asset count ($($buildFiles.Count))!"
+          }
+          foreach ($bf in $buildFiles) {
+              $lfPath = Join-Path $liveDownloadDir $bf.Name
+              if (-not (Test-Path -LiteralPath $lfPath)) {
+                  throw "Live published release is missing asset: $($bf.Name)"
+              }
+              $bHash = (Get-FileHash -LiteralPath $bf.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              $lHash = (Get-FileHash -LiteralPath $lfPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($bHash -ne $lHash) {
+                  throw "Live published asset hash mismatch for '$($bf.Name)'! Build: $bHash, Live: $lHash"
+              }
+          }
+
+          Write-Host "Verifying ordinary release package views on live published assets..."
+          pwsh scripts/verify-stable12-release.ps1 -ReleaseDir "$liveDownloadDir" -RequireChecksums
+          if ($LASTEXITCODE -ne 0) {
+              throw "Post-publication verification failed on live public assets!"
+          }
+
+          # Mark as latest stable release ONLY after all live verifications pass
+          Write-Host "Marking release $env:RELEASE_TAG as latest stable release..."
+          $latestOut = & gh api "repos/$env:TARGET_REPO/releases/$createdReleaseId" -X PATCH --raw-field make_latest=true 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to mark release as latest: $($latestOut | Out-String)"
+          }
+
+          Write-Host "Publication and live verification completed successfully."

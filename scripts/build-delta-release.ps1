@@ -154,10 +154,14 @@ foreach ($baselineTag in $version.delta_baseline_tags) {
     Copy-SafeAsset -SourcePath "$output/manifest.sig" -DestinationPath $canonicalSig
     Copy-SafeAsset -SourcePath "$output/delta-$baselineVersion-to-$($version.version).zip" -DestinationPath $canonicalZip
     Copy-SafeAsset -SourcePath "$output/deployment-inventory.json" -DestinationPath "release-assets/deployment-inventory.json"
-    Copy-SafeAsset -SourcePath "$output/release-notes.md" -DestinationPath "release-assets/release-notes.md"
 
-    # Emit generic aliases manifest.json/.sig/delta.zip (identical bytes, no clobber inconsistent files) since only 1 baseline
-    if ($version.delta_baseline_tags.Count -eq 1) {
+    # Copy primary release-notes.md for single baseline or primary baseline v0.0.11 (avoid clobbering or failing if notes differ)
+    if ($version.delta_baseline_tags.Count -eq 1 -or $baselineVersion -eq '0.0.11') {
+        Copy-SafeAsset -SourcePath "$output/release-notes.md" -DestinationPath "release-assets/release-notes.md"
+    }
+
+    # Emit generic aliases manifest.json/.sig/delta.zip (identical bytes, no clobber inconsistent files) for single baseline or primary baseline v0.0.11
+    if ($version.delta_baseline_tags.Count -eq 1 -or $baselineVersion -eq '0.0.11') {
         $aliasManifest = 'release-assets/manifest.json'
         $aliasSig = 'release-assets/manifest.sig'
         $aliasZip = 'release-assets/delta.zip'
