@@ -785,6 +785,115 @@ try {
     'backend/certs/update_public_key.pem in fixture source must retain exact source hash'
   );
 
+  // Copy approved tracked database/migrations and database/seeders into freshSourceDir before PHAR compile
+  console.log('      Copying approved tracked database/migrations and database/seeders into fixture source...');
+  safeDeleteInFreshSource('database');
+
+  const trackedDbOutput = execFileSync('git', ['ls-files', '-z', '--', 'database/migrations', 'database/seeders'], {
+    cwd: repoRoot,
+    encoding: 'utf8'
+  });
+  const trackedDbFiles = trackedDbOutput
+    .split('\0')
+    .map(f => f.trim().replace(/\\/g, '/'))
+    .filter(Boolean);
+
+  assert.ok(trackedDbFiles.length > 0, 'No tracked files found under database/migrations or database/seeders');
+
+  const freshDatabaseDir = path.join(freshSourceDir, 'database');
+  const resolvedFreshDb = path.resolve(freshDatabaseDir);
+  const freshDbPrefix = resolvedFreshDb.toLowerCase() + path.sep;
+
+  let copiedMigrationCount = 0;
+  let copiedRollbackCount = 0;
+  let copiedSeederCount = 0;
+
+  for (const rel of trackedDbFiles) {
+    assert.ok(
+      rel.startsWith('database/migrations/') || rel.startsWith('database/seeders/'),
+      `Tracked database file outside approved trees: ${rel}`
+    );
+    assert.ok(rel.endsWith('.sql'), `Tracked file in database tree must end with .sql: ${rel}`);
+    assert.ok(!rel.includes('..'), `Path traversal rejected: ${rel}`);
+
+    const srcFile = path.resolve(repoRoot, rel);
+    assert.ok(
+      srcFile.toLowerCase().startsWith(repoPrefix),
+      `Source file resolves outside repoRoot: ${srcFile}`
+    );
+    assert.ok(fs.existsSync(srcFile), `Source file missing: ${srcFile}`);
+    assertNoReparse(srcFile);
+    assert.ok(fs.statSync(srcFile).isFile(), `Source path must be a file: ${srcFile}`);
+
+    const destFile = path.resolve(freshSourceDir, rel);
+    assert.ok(
+      destFile.toLowerCase().startsWith(freshDbPrefix),
+      `Destination file resolves outside freshSourceDir/database: ${destFile}`
+    );
+
+    const markerPath = path.join(freshSourceDir, '.source-owner.txt');
+    assert.ok(
+      fs.existsSync(markerPath) && fs.readFileSync(markerPath, 'utf8').trim() === runToken,
+      'Ownership token mismatch in freshSourceDir'
+    );
+
+    fs.mkdirSync(path.dirname(destFile), { recursive: true });
+    fs.copyFileSync(srcFile, destFile);
+    assertNoReparse(destFile);
+
+    const srcBytes = fs.readFileSync(srcFile);
+    const destBytes = fs.readFileSync(destFile);
+    assert.equal(destBytes.length, srcBytes.length, `Size mismatch for copied file: ${rel}`);
+    assert.equal(sha256(destBytes), sha256(srcBytes), `SHA256 mismatch for copied file: ${rel}`);
+
+    if (rel.startsWith('database/migrations/')) {
+      copiedMigrationCount++;
+      if (rel.startsWith('database/migrations/rollback/')) {
+        copiedRollbackCount++;
+      }
+    } else if (rel.startsWith('database/seeders/')) {
+      copiedSeederCount++;
+    }
+  }
+
+  assert.ok(copiedMigrationCount > 0, 'database/migrations tree is mandatory and must be non-empty');
+  assert.ok(copiedRollbackCount > 0, 'database/migrations/rollback tree is mandatory and must be non-empty');
+  assert.ok(copiedSeederCount > 0, 'database/seeders tree is mandatory and must be non-empty');
+
+  // Strict sourcewalk check on freshSourceDir/database: reject symlinks/reparse, outside copy, extra files
+  const approvedDbSet = new Set(trackedDbFiles);
+  const scannedFreshDbFiles = [];
+  function walkFreshDb(dir) {
+    assertNoReparse(dir);
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      assertNoReparse(full);
+      if (ent.isSymbolicLink()) {
+        throw new Error(`Symbolic link rejected in freshSourceDir/database: ${full}`);
+      }
+      if (ent.isDirectory()) {
+        walkFreshDb(full);
+      } else if (ent.isFile()) {
+        const rel = path.relative(freshSourceDir, full).replace(/\\/g, '/');
+        if (!approvedDbSet.has(rel)) {
+          throw new Error(`Unapproved or unexpected file in freshSourceDir/database: ${rel}`);
+        }
+        if (!rel.endsWith('.sql')) {
+          throw new Error(`Non-SQL file detected in freshSourceDir/database: ${rel}`);
+        }
+        scannedFreshDbFiles.push(rel);
+      } else {
+        throw new Error(`Unsupported entry type in freshSourceDir/database: ${full}`);
+      }
+    }
+  }
+  walkFreshDb(freshDatabaseDir);
+  assert.equal(
+    scannedFreshDbFiles.length,
+    trackedDbFiles.length,
+    `Scanned DB files count (${scannedFreshDbFiles.length}) must equal tracked DB files count (${trackedDbFiles.length})`
+  );
+
   // Junction vendor and node_modules from repoRoot to save time/space
   const repoVendor = path.join(repoRoot, 'backend/vendor');
   if (fs.existsSync(repoVendor) && !fs.existsSync(path.join(freshSourceDir, 'backend/vendor'))) {
@@ -867,10 +976,25 @@ final class DeltaFixtureMarker0014
   const v14PharHash = sha256File(v14PharPath);
   assert.notEqual(v14PharHash, setup12PharHash, 'v14 backend.phar must have a genuine changed hash');
 
-  // Authoritative token check: exact PHP Phar entry content check
+  // Authoritative token check: exact PHP Phar entry content check + non-empty migrations & seeders trees
+  const expectedDbMap = {};
+  for (const rel of trackedDbFiles) {
+    const srcFile = path.resolve(repoRoot, rel);
+    const buf = fs.readFileSync(srcFile);
+    expectedDbMap[rel] = {
+      sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+      size: buf.length
+    };
+  }
+  const expectedDbMapFile = path.join(freshSourceDir, 'expected-phar-db-entries.json');
+  fs.writeFileSync(expectedDbMapFile, JSON.stringify(expectedDbMap, null, 2), 'utf8');
+  assertNoReparse(expectedDbMapFile);
+
   const verifyPharEntryPhp = `
     $pharPath = '${v14PharPath.replace(/\\/g, '/')}';
     $phar = new Phar($pharPath);
+
+    // 1. Authoritative exact marker token verification
     $entry = 'Services/DeltaFixtureMarker0014.php';
     if (!isset($phar[$entry])) {
       fwrite(STDERR, "Entry {$entry} missing inside rebuilt PHAR\\n");
@@ -881,10 +1005,204 @@ final class DeltaFixtureMarker0014
       fwrite(STDERR, "Exact marker token missing inside PHAR entry {$entry}\\n");
       exit(1);
     }
-    echo "✔ Authoritative check passed: verified exact marker token inside PHAR entry {$entry}.\\n";
+
+    // 2. Resolve and validate isolated metadata file argument inside freshSourceDir
+    $metadataFile = '';
+    for ($i = 1; $i < count($argv); $i++) {
+      if ($argv[$i] !== '--' && is_string($argv[$i]) && strlen($argv[$i]) > 0) {
+        $metadataFile = $argv[$i];
+        break;
+      }
+    }
+    if ($metadataFile === '') {
+      $metadataFile = '${expectedDbMapFile.replace(/\\/g, '/')}';
+    }
+
+    $freshSourceDirReal = realpath('${freshSourceDir.replace(/\\/g, '/')}');
+    if ($freshSourceDirReal === false) {
+      fwrite(STDERR, "freshSourceDir cannot be resolved\\n");
+      exit(1);
+    }
+    $realMetadataFile = realpath($metadataFile);
+    if ($realMetadataFile === false || !is_file($realMetadataFile)) {
+      fwrite(STDERR, "Metadata file missing or cannot be resolved: {$metadataFile}\\n");
+      exit(1);
+    }
+    $sourceDirPrefix = rtrim(str_replace(DIRECTORY_SEPARATOR, '/', $freshSourceDirReal), '/') . '/';
+    $normalizedMetadata = str_replace(DIRECTORY_SEPARATOR, '/', $realMetadataFile);
+    if (!str_starts_with(strtolower($normalizedMetadata), strtolower($sourceDirPrefix))) {
+      fwrite(STDERR, "Metadata file {$realMetadataFile} is outside freshSourceDir {$freshSourceDirReal}\\n");
+      exit(1);
+    }
+
+    $metadataRaw = file_get_contents($realMetadataFile);
+    if ($metadataRaw === false) {
+      fwrite(STDERR, "Failed to read metadata file: {$realMetadataFile}\\n");
+      exit(1);
+    }
+    $expectedMap = json_decode($metadataRaw, true);
+    if (!is_array($expectedMap)) {
+      fwrite(STDERR, "Metadata file is not valid JSON object\\n");
+      exit(1);
+    }
+
+    $expectedMigrations = [];
+    $expectedSeeders = [];
+    foreach ($expectedMap as $relPath => $info) {
+      if (!is_string($relPath) || !is_array($info) || !isset($info['sha256'], $info['size'])) {
+        fwrite(STDERR, "Invalid metadata entry for: {$relPath}\\n");
+        exit(1);
+      }
+      $cleanRel = ltrim(str_replace(DIRECTORY_SEPARATOR, '/', $relPath), '/');
+      if (str_starts_with($cleanRel, 'database/migrations/')) {
+        $expectedMigrations[$cleanRel] = $info;
+      } elseif (str_starts_with($cleanRel, 'database/seeders/')) {
+        $expectedSeeders[$cleanRel] = $info;
+      } else {
+        fwrite(STDERR, "Metadata entry outside approved scopes: {$cleanRel}\\n");
+        exit(1);
+      }
+    }
+
+    if (count($expectedMigrations) === 0) {
+      fwrite(STDERR, "Mandatory database/migrations tree is empty in expected metadata\\n");
+      exit(1);
+    }
+    if (count($expectedSeeders) === 0) {
+      fwrite(STDERR, "Mandatory database/seeders tree is empty in expected metadata\\n");
+      exit(1);
+    }
+
+    // 3. Scan generated PHAR for all entries in database/migrations and database/seeders
+    $actualMigrations = [];
+    $actualSeeders = [];
+    $iterator = new RecursiveIteratorIterator($phar);
+    foreach ($iterator as $item) {
+      if ($item->isDir()) {
+        continue;
+      }
+      $rawPath = $item->getPathname();
+      $normalized = str_replace(DIRECTORY_SEPARATOR, '/', $rawPath);
+      $subRel = '';
+      $pharMarkerPos = stripos($normalized, '.phar/');
+      if ($pharMarkerPos !== false) {
+        $subRel = substr($normalized, $pharMarkerPos + strlen('.phar/'));
+      } else {
+        $subRel = str_replace(DIRECTORY_SEPARATOR, '/', $iterator->getSubPathName());
+      }
+      $subRel = ltrim($subRel, '/');
+
+      if (str_starts_with($subRel, 'database/migrations/')) {
+        $actualMigrations[$subRel] = true;
+      } elseif (str_starts_with($subRel, 'database/seeders/')) {
+        $actualSeeders[$subRel] = true;
+      }
+    }
+
+    // 4. Verify ZERO MISSING in both scopes
+    $missingMigrations = [];
+    foreach (array_keys($expectedMigrations) as $expMig) {
+      if (!isset($actualMigrations[$expMig])) {
+        $missingMigrations[] = $expMig;
+      }
+    }
+    if (count($missingMigrations) > 0) {
+      fwrite(STDERR, "Missing migration entries inside PHAR (" . count($missingMigrations) . "): " . implode(', ', $missingMigrations) . "\\n");
+      exit(1);
+    }
+
+    $missingSeeders = [];
+    foreach (array_keys($expectedSeeders) as $expSeed) {
+      if (!isset($actualSeeders[$expSeed])) {
+        $missingSeeders[] = $expSeed;
+      }
+    }
+    if (count($missingSeeders) > 0) {
+      fwrite(STDERR, "Missing seeder entries inside PHAR (" . count($missingSeeders) . "): " . implode(', ', $missingSeeders) . "\\n");
+      exit(1);
+    }
+
+    // 5. Verify ZERO EXTRA in both scopes
+    $extraMigrations = [];
+    foreach (array_keys($actualMigrations) as $actMig) {
+      if (!isset($expectedMigrations[$actMig])) {
+        $extraMigrations[] = $actMig;
+      }
+    }
+    if (count($extraMigrations) > 0) {
+      fwrite(STDERR, "Extra migration entries inside PHAR (" . count($extraMigrations) . "): " . implode(', ', $extraMigrations) . "\\n");
+      exit(1);
+    }
+
+    $extraSeeders = [];
+    foreach (array_keys($actualSeeders) as $actSeed) {
+      if (!isset($expectedSeeders[$actSeed])) {
+        $extraSeeders[] = $actSeed;
+      }
+    }
+    if (count($extraSeeders) > 0) {
+      fwrite(STDERR, "Extra seeder entries inside PHAR (" . count($extraSeeders) . "): " . implode(', ', $extraSeeders) . "\\n");
+      exit(1);
+    }
+
+    // 6. Verify exact byte/hash contents of each entry inside PHAR
+    foreach ($expectedMigrations as $expMig => $meta) {
+      if (!isset($phar[$expMig])) {
+        fwrite(STDERR, "Entry {$expMig} not accessible via Phar ArrayAccess\\n");
+        exit(1);
+      }
+      $bytes = $phar[$expMig]->getContent();
+      if (strlen($bytes) !== (int)$meta['size']) {
+        fwrite(STDERR, "Byte size mismatch for PHAR entry {$expMig}\\n");
+        exit(1);
+      }
+      $entrySha = hash('sha256', $bytes);
+      if (!hash_equals($meta['sha256'], $entrySha)) {
+        fwrite(STDERR, "Hash mismatch for PHAR entry {$expMig}\\n");
+        exit(1);
+      }
+    }
+
+    foreach ($expectedSeeders as $expSeed => $meta) {
+      if (!isset($phar[$expSeed])) {
+        fwrite(STDERR, "Entry {$expSeed} not accessible via Phar ArrayAccess\\n");
+        exit(1);
+      }
+      $bytes = $phar[$expSeed]->getContent();
+      if (strlen($bytes) !== (int)$meta['size']) {
+        fwrite(STDERR, "Byte size mismatch for PHAR entry {$expSeed}\\n");
+        exit(1);
+      }
+      $entrySha = hash('sha256', $bytes);
+      if (!hash_equals($meta['sha256'], $entrySha)) {
+        fwrite(STDERR, "Hash mismatch for PHAR entry {$expSeed}\\n");
+        exit(1);
+      }
+    }
+
+    // 7. Verify rollback files specifically present
+    $rollbackFiles = array_filter(array_keys($expectedMigrations), static function ($k) {
+      return str_starts_with($k, 'database/migrations/rollback/');
+    });
+    if (count($rollbackFiles) === 0) {
+      fwrite(STDERR, "Expected migrations rollback directory must contain files\\n");
+      exit(1);
+    }
+    foreach ($rollbackFiles as $rollbackEntry) {
+      if (!isset($actualMigrations[$rollbackEntry])) {
+        fwrite(STDERR, "Missing rollback migration entry inside PHAR: {$rollbackEntry}\\n");
+        exit(1);
+      }
+    }
+
+    // 8. Report source-only counts (not private hashes)
+    $migCount = count($expectedMigrations);
+    $rollbackCount = count($rollbackFiles);
+    $seedCount = count($expectedSeeders);
+    echo "✔ Authoritative check passed: verified exact marker token, {$migCount} migration entries (including {$rollbackCount} rollback), and {$seedCount} seeder entries inside PHAR (zero missing, zero extra).\\n";
   `;
-  execFileSync(php, ['-r', verifyPharEntryPhp], { stdio: 'inherit' });
-  console.log(`      PASS: v14 backend.phar built (hash: ${v14PharHash.slice(0, 16)}..., marker verified).`);
+  execFileSync(php, ['-d', 'phar.readonly=0', '-r', verifyPharEntryPhp, '--', expectedDbMapFile], { stdio: 'inherit' });
+  console.log(`      PASS: v14 backend.phar built (${copiedMigrationCount} migrations incl ${copiedRollbackCount} rollback, ${copiedSeederCount} seeders, marker verified).`);
 
   // Build genuine v14 frontend payload using supported cmd.exe interface on Windows
   console.log('      Building genuine v14 frontend payload...');
