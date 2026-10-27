@@ -1,14 +1,16 @@
 <#
 .SYNOPSIS
-    Verify true end-to-end upgrade preservation from original POS-Desktop-Setup-0.0.1.exe
-    to the newly built Setup 0.0.11 on an ephemeral GitHub Actions runner.
+    Verify true end-to-end upgrade preservation from a baseline POS-Desktop-Setup EXE
+    (0.0.1 or 0.0.11) to the newly built Setup 0.0.12 on an ephemeral GitHub Actions runner.
 .DESCRIPTION
     1. Enforces GITHUB_ACTIONS and RUNNER_TEMP guards; verifies no pre-existing POS data.
     2. Validates runner temp install/evidence paths are safe and free of reparse points.
-    3. Downloads original POS-Desktop-Setup-0.0.1.exe and asserts SHA256 matches:
-       2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a
-    4. Silently installs original 0.0.1 to an owned runner temp directory.
-    5. Launches 0.0.1 UI to initialize admin credentials and printing trust, and while alive
+       EvidenceName must be a leaf directory name bound to RUNNER_TEMP with no path traversal.
+    3. Downloads baseline installer (0.0.1 or 0.0.11) and asserts pinned SHA256:
+       - 0.0.1:  2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a
+       - 0.0.11: 4abfbd98898bf314d1531834166ec8f682710b90386920e7d71924e7fc92357d
+    4. Silently installs baseline to an owned runner temp directory.
+    5. Launches baseline UI to initialize admin credentials and printing trust, and while alive
        executes scripts/fixtures/channel-transition-capability.php 'prepare-compatibility' and 'seed'
        to prepare migration 059, insert business rows (customer, settings), and record baseline ledger/schema.
     6. Snapshots quiesced baseline state:
@@ -22,8 +24,8 @@
        - Required runtime userData/qz-certs/private-key.pem and digital-certificate.pem pair,
          plus LAN HTTPS server key/cert pair when enabled (disallowing zero-private-key passes)
        - Custom business sentinel
-    7. Upgrades in-place using new Setup 0.0.11.
-    8. Launches upgraded UI (asserts version 0.0.11, existing admin identity retained, no credentials modal),
+    7. Upgrades in-place using new Setup 0.0.12.
+    8. Launches upgraded UI (asserts version 0.0.12, existing admin identity retained, no credentials modal),
        and while alive executes scripts/fixtures/channel-transition-capability.php 'inspect-compatibility'
        and 'inspect' to read live SQL business rows, settings, admin digest, ledger, and schema.
     9. Asserts complete preservation:
@@ -31,16 +33,20 @@
        - Raw database schema_sha256 and raw migration ledger strictly preserved
        - Admin user identity digest strictly preserved
        - Customer rows and settings strictly retained after canonical JSON normalization
-       - db_credentials.json hash and .env hash unchanged
+       - db_credentials.json hash and .env hash unchanged (reported as 'not_exercised' if absent)
        - Device SSL/key file hashes strictly unchanged (using absolute canonical path keys)
        - QZ ownership receipt, Enterprise trust certificate, and owned printing files unchanged
        - Business sentinel file unchanged
     10. Writes upgrade-acceptance.json evidence ONLY AFTER all assertions pass.
-    11. Uninstalls cleanly; fails if uninstaller missing, verifies managed data wiped.
+    11. Stops owned lab processes and uninstalls cleanly; fails if uninstaller missing, verifies managed data wiped.
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('0.0.1', '0.0.11')]
+    [string]$BaselineVersion = '0.0.1',
+    [string]$EvidenceName = 'pos-upgrade-evidence'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -50,11 +56,19 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
     throw 'Upgrade verification is strictly restricted to an ephemeral GitHub Actions runner'
 }
 
+# Validate EvidenceName is a safe leaf name without separators or traversal
+if ([string]::IsNullOrWhiteSpace($EvidenceName)) {
+    throw 'EvidenceName parameter cannot be empty'
+}
+if ($EvidenceName -match '[/\\:]' -or $EvidenceName -match '\.\.') {
+    throw "EvidenceName must be a leaf directory name without path separators or traversal: '$EvidenceName'"
+}
+
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $repo 'build/uninstall-data.ps1')
 
-$install = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'POS Upgrade Acceptance'))
-$evidence = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pos-upgrade-evidence'))
+$install = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP ("POS Upgrade Acceptance-$BaselineVersion")))
+$evidence = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP $EvidenceName))
 $runnerTempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 
 # Ensure install and evidence paths are strictly within RUNNER_TEMP boundary
@@ -62,6 +76,12 @@ foreach ($checkPath in @($install, $evidence)) {
     if (-not ($checkPath + [IO.Path]::DirectorySeparatorChar).StartsWith($runnerTempRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Target path escapes RUNNER_TEMP boundary: $checkPath"
     }
+}
+if ($evidence.Equals($install, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Evidence path cannot collide with install path: $evidence"
+}
+if ($evidence.TrimEnd('\', '/').Equals($runnerTempRoot.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Evidence path must be a leaf directory within RUNNER_TEMP, cannot be RUNNER_TEMP root itself"
 }
 
 New-Item -ItemType Directory -Path $evidence -Force | Out-Null
@@ -81,28 +101,35 @@ if (-not (Test-Path -LiteralPath $newInstaller)) {
     throw "New installer executable missing: $newInstaller"
 }
 
-$originalInstaller = Join-Path $env:RUNNER_TEMP 'POS-Desktop-Setup-0.0.1.exe'
-$expectedSha256 = '2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a'
-$downloadUrl = 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.1/POS-Desktop-Setup-0.0.1.exe'
+$originalInstaller = Join-Path $env:RUNNER_TEMP "POS-Desktop-Setup-$BaselineVersion.exe"
+if ($BaselineVersion -eq '0.0.1') {
+    $expectedSha256 = '2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a'
+    $downloadUrl = 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.1/POS-Desktop-Setup-0.0.1.exe'
+} elseif ($BaselineVersion -eq '0.0.11') {
+    $expectedSha256 = '4abfbd98898bf314d1531834166ec8f682710b90386920e7d71924e7fc92357d'
+    $downloadUrl = 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.11/POS-Desktop-Setup-0.0.11.exe'
+} else {
+    throw "Unsupported baseline version: $BaselineVersion"
+}
 
-Write-Host "Downloading original 0.0.1 installer from $downloadUrl..."
+Write-Host "Downloading baseline $BaselineVersion installer from $downloadUrl..."
 Invoke-WebRequest -Uri $downloadUrl -OutFile $originalInstaller
 if (-not (Test-Path -LiteralPath $originalInstaller)) {
-    throw "Failed to download original 0.0.1 installer to $originalInstaller"
+    throw "Failed to download baseline $BaselineVersion installer to $originalInstaller"
 }
 
 $actualSha256 = (Get-FileHash -LiteralPath $originalInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualSha256 -ne $expectedSha256) {
-    throw "Original 0.0.1 installer SHA256 mismatch! Expected: $expectedSha256"
+    throw "Baseline $BaselineVersion installer SHA256 mismatch! Expected: $expectedSha256, got: $actualSha256"
 }
-Write-Host "Original 0.0.1 installer SHA256 verified: $actualSha256"
+Write-Host "Baseline $BaselineVersion installer SHA256 verified: $actualSha256"
 
 function Install-OriginalPos {
-    Write-Host "Installing original 0.0.1 silently to $install..."
+    Write-Host "Installing baseline $BaselineVersion silently to $install..."
     $process = Start-Process -FilePath $originalInstaller -ArgumentList @('/S', '/currentuser', "/D=$install") -WindowStyle Hidden -PassThru
-    if (-not $process.WaitForExit(180000)) { throw 'Silent Setup of original 0.0.1 timed out' }
-    if ($process.ExitCode -ne 0) { throw "Setup of original 0.0.1 failed with exit code: $($process.ExitCode)" }
-    if (-not (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))) { throw 'Installed 0.0.1 executable missing' }
+    if (-not $process.WaitForExit(180000)) { throw "Silent Setup of baseline $BaselineVersion timed out" }
+    if ($process.ExitCode -ne 0) { throw "Setup of baseline $BaselineVersion failed with exit code: $($process.ExitCode)" }
+    if (-not (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))) { throw "Installed $BaselineVersion executable missing" }
     Assert-PosTreeSafe $install
 }
 
@@ -140,6 +167,21 @@ function Test-InstalledUiWithFixture {
     if ($children.Count) { throw "Owned runtime processes survived normal application shutdown ($Name)" }
 }
 
+function Stop-OwnedLabProcesses {
+    param([string]$InstallPath)
+    if (-not $InstallPath) { return }
+    try {
+        $owned = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallPath + '\', [StringComparison]::OrdinalIgnoreCase)
+        })
+        foreach ($p in $owned) {
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            } catch {}
+        }
+    } catch {}
+}
+
 function Uninstall-Pos {
     $uninstaller = Join-Path $install 'Uninstall POS Desktop.exe'
     if (-not (Test-Path -LiteralPath $uninstaller)) {
@@ -163,13 +205,13 @@ function Uninstall-Pos {
 }
 
 try {
-    # 1. Install original baseline 0.0.1
+    # 1. Install baseline
     Install-OriginalPos
 
-    # 2. Launch 0.0.1 UI and while runtime is alive, execute fixture 'prepare-compatibility,seed'
+    # 2. Launch baseline UI and while runtime is alive, execute fixture 'prepare-compatibility,seed'
     $baselineCompatFile = Join-Path $evidence 'baseline-compat.json'
     $baselineDbFile = Join-Path $evidence 'baseline-db.json'
-    Test-InstalledUiWithFixture -Name 'baseline-0.0.1-run' -Expectation 'fresh' -Port 19231 -ExpectedVersion '0.0.1' -FixtureAction 'prepare-compatibility,seed' -FixtureOutput "$baselineCompatFile,$baselineDbFile"
+    Test-InstalledUiWithFixture -Name "baseline-$BaselineVersion-run" -Expectation 'fresh' -Port 19231 -ExpectedVersion $BaselineVersion -FixtureAction 'prepare-compatibility,seed' -FixtureOutput "$baselineCompatFile,$baselineDbFile"
 
     # 3. Snapshot quiesced baseline state
     if (-not (Test-Path -LiteralPath $baselineCompatFile)) {
@@ -198,7 +240,7 @@ try {
     # Snapshot credentials and .env hashes
     $credsPath = Join-Path $env:APPDATA 'POS System/db_credentials.json'
     if (-not (Test-Path -LiteralPath $credsPath)) {
-        throw "Original baseline did not create credentials at $credsPath"
+        throw "Baseline did not create credentials at $credsPath"
     }
     $baselineCredsHash = (Get-FileHash -LiteralPath $credsPath -Algorithm SHA256).Hash
 
@@ -208,7 +250,7 @@ try {
     # Snapshot printing ownership receipt (discovered across POS targets)
     $receipts = @($targets | ForEach-Object { Join-Path $_ 'qz-shared-install.json' } | Where-Object { Test-Path -LiteralPath $_ })
     if ($receipts.Count -ne 1) {
-        throw "Original baseline did not record ownership of QZ printing trust in POS data targets (found $($receipts.Count))"
+        throw "Baseline did not record ownership of QZ printing trust in POS data targets (found $($receipts.Count))"
     }
     $receiptPath = $receipts[0]
     $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash
@@ -298,16 +340,16 @@ try {
     $sentinelGuid = [guid]::NewGuid().ToString('N')
     Set-Content -LiteralPath $sentinelFile -Value $sentinelGuid
 
-    # 4. In-place upgrade with Setup 0.0.11
+    # 4. In-place upgrade with Setup 0.0.12
     Upgrade-Pos
 
     # 5. Launch upgraded UI and while runtime is alive, execute fixture 'inspect-compatibility,inspect'
     $upgradedCompatFile = Join-Path $evidence 'upgraded-compat.json'
     $upgradedDbFile = Join-Path $evidence 'upgraded-db.json'
-    Test-InstalledUiWithFixture -Name 'upgraded-0.0.11-run' -Expectation 'existing' -Port 19232 -ExpectedVersion $installerVersion -FixtureAction 'inspect-compatibility,inspect' -FixtureOutput "$upgradedCompatFile,$upgradedDbFile"
+    Test-InstalledUiWithFixture -Name "upgraded-$installerVersion-run" -Expectation 'existing' -Port 19232 -ExpectedVersion $installerVersion -FixtureAction 'inspect-compatibility,inspect' -FixtureOutput "$upgradedCompatFile,$upgradedDbFile"
 
     # 6. Verify upgraded UI asserted retained admin
-    $upgradedUiReceipt = Get-Content -LiteralPath (Join-Path $evidence 'upgraded-0.0.11-run.json') -Raw | ConvertFrom-Json
+    $upgradedUiReceipt = Get-Content -LiteralPath (Join-Path $evidence "upgraded-$installerVersion-run.json") -Raw | ConvertFrom-Json
     if ($upgradedUiReceipt.version -ne $installerVersion) {
         throw "Upgraded UI version mismatch: expected $installerVersion"
     }
@@ -453,7 +495,7 @@ try {
 
     # 13. Acceptance Evidence Recorded ONLY AFTER ALL Assertions Pass
     @{
-        originalBaseline = '0.0.1'
+        originalBaseline = $BaselineVersion
         targetVersion = $installerVersion
         installerSha256 = $actualSha256
         businessRowsPreserved = $true
@@ -464,6 +506,7 @@ try {
         normalizedLedgerPreserved = $true
         adminIdentityPreserved = $true
         credentialsPreserved = $true
+        envPreserved = if ($baselineEnvHash) { $true } else { 'not_exercised' }
         deviceKeysPreserved = $true
         printingTrustPreserved = $true
         sentinelPreserved = $true
@@ -472,11 +515,18 @@ try {
         upgradedMigrationsCount = $upgradedDb.ledger.Count
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'upgrade-acceptance.json')
 
-    Write-Host "PASS: True end-to-end upgrade from 0.0.1 to $installerVersion verified. All business SQL rows, settings, ledger, credentials, device keys, and printing trust preserved."
+    Write-Host "PASS: True end-to-end upgrade from $BaselineVersion to $installerVersion verified. All business SQL rows, settings, ledger, credentials, device keys, and printing trust preserved."
 } finally {
     # 14. Clean up owned fixture safely via full uninstallation
-    Write-Host "Cleaning up test fixture via uninstallation..."
-    Uninstall-Pos
+    Stop-OwnedLabProcesses -InstallPath $install
+    $hasApp = (Test-Path -LiteralPath $install) -and (Test-Path -LiteralPath (Join-Path $install 'POS Desktop.exe'))
+    $uninstallerPath = Join-Path $install 'Uninstall POS Desktop.exe'
+    if (Test-Path -LiteralPath $uninstallerPath) {
+        Write-Host "Cleaning up test fixture via uninstallation..."
+        Uninstall-Pos
+    } elseif ($hasApp) {
+        throw "Uninstaller executable missing at $uninstallerPath; cleanup cannot safely proceed"
+    }
 }
 
 Write-Host "PASS: verify-original-setup-upgrade completed cleanly."

@@ -67,7 +67,7 @@ jobs:
       - name: Validate release readiness and source
         shell: pwsh
         run: |
-          node scripts/verify-setup-release-readiness.mjs
+          node scripts/verify-setup12-release-readiness.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/validate-release-source.mjs --mode working-tree --root .
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -148,9 +148,39 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
           ./scripts/verify-desktop-release.ps1 -ReleaseDirectory dist-electron -Tag $tag
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Record exact installed artifact inventory
+        shell: pwsh
+        run: |
+          php scripts/build-deployment-inventory.php --root=dist-electron/win-unpacked/resources/app.asar.unpacked --source-root=. --output=dist-electron/deployment-inventory.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Finalize SHA256SUMS.txt covering all release assets
+        shell: pwsh
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const out = path.join(process.cwd(), 'dist-electron');
+            const v = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+            const setup = 'POS-Desktop-Setup-' + v + '.exe';
+            const metadata = v.includes('-beta.') ? 'beta.yml' : 'latest.yml';
+            const files = [setup, setup + '.blockmap', metadata, 'deployment-inventory.json'];
+            for (const f of files) {
+              if (!fs.existsSync(path.join(out, f))) throw new Error('Missing release artifact before checksums: ' + f);
+            }
+            const checksums = files.map(f => {
+              const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(out, f))).digest('hex');
+              return hash + '  ' + f;
+            }).join('\n') + '\n';
+            fs.writeFileSync(path.join(out, 'SHA256SUMS.txt'), checksums);
+            console.log('Finalized SHA256SUMS.txt covering all 4 release artifacts.');
+          "
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify actual Setup install, upgrade, uninstall and fresh reinstall
         shell: pwsh
-        run: ./scripts/verify-installer-lifecycle.ps1
+        run: |
+          ./scripts/verify-installer-lifecycle.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Save installer acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -161,21 +191,50 @@ jobs:
           retention-days: 14
       - name: Verify true upgrade from original 0.0.1 baseline to new Setup
         shell: pwsh
-        run: ./scripts/verify-original-setup-upgrade.ps1
-      - name: Save upgrade acceptance evidence
+        run: |
+          ./scripts/verify-original-setup-upgrade.ps1 -BaselineVersion 0.0.1 -EvidenceName pos-upgrade-evidence-0.0.1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Save 0.0.1 upgrade acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: upgrade-acceptance
-          path: ${{ runner.temp }}/pos-upgrade-evidence
+          name: upgrade-acceptance-0.0.1
+          path: ${{ runner.temp }}/pos-upgrade-evidence-0.0.1
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Verify true upgrade from original 0.0.11 baseline to new Setup
+        shell: pwsh
+        run: |
+          ./scripts/verify-original-setup-upgrade.ps1 -BaselineVersion 0.0.11 -EvidenceName pos-upgrade-evidence-0.0.11
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Save 0.0.11 upgrade acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-acceptance-0.0.11
+          path: ${{ runner.temp }}/pos-upgrade-evidence-0.0.11
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Verify future delta upgrade smoke on packaged Setup 12
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+        run: |
+          node scripts/verify-setup12-delta-upgrade.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Save delta smoke acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delta-smoke-acceptance
+          path: ${{ runner.temp }}/setup12-delta-upgrade-lab/evidence
           if-no-files-found: ignore
           retention-days: 14
       - name: Start packaged app on the clean runner
         shell: pwsh
-        run: ./scripts/smoke-packaged-app.ps1
-      - name: Record exact installed artifact inventory
-        shell: pwsh
-        run: php scripts/build-deployment-inventory.php --root=dist-electron/win-unpacked/resources/app.asar.unpacked --source-root=. --output=dist-electron/deployment-inventory.json
+        run: |
+          ./scripts/smoke-packaged-app.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Upload verified installer assets
         uses: actions/upload-artifact@v4
         with:
@@ -207,10 +266,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
           PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
         run: |
           set -euo pipefail
           node scripts/write-setup-release-notes.mjs > release-notes.md
-          flags=()
-          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
-          gh release create "$RELEASE_TAG" release-assets/* --repo "$REPOSITORY" --verify-tag --title "POS Desktop $RELEASE_TAG" --notes-file release-notes.md "${flags[@]}"
+          node scripts/publish-setup-release.mjs release-assets
