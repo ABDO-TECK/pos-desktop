@@ -16,6 +16,8 @@ declare(strict_types=1);
  *  - inspect-db: Inspects schema, ledger, business records, and admin credentials.
  *  - mutate-db: Modifies sentinel business row to test restore reversion.
  *  - verify-restore-sql-preservation: Verifies byte-level SQL preservation in BackupService::validateUploadedSqlFile.
+ *  - prepare-legacy-v025-backup: Prepares synthetic legacy v0.25 SQL backup injecting dynamic admin auth.
+ *  - verify-legacy-v025-upgrade: Verifies post-restore migration reconciliation from legacy v0.25 to candidate 13.
  */
 
 require_once __DIR__ . '/../../backend/vendor/autoload.php';
@@ -1089,13 +1091,357 @@ final class Setup12RegressionsHelper
         ];
     }
 
-    private function connectDatabase(string $configDir): PDO
+    public function prepareLegacyV025Backup(string $authPath, string $outputPath): array
     {
-        if (getenv('GITHUB_ACTIONS') !== 'true') {
-            throw new RuntimeException('Database operations strictly require ephemeral GITHUB_ACTIONS environment.');
+        $receipt = $this->assertOwnershipReceipt();
+
+        $canonicalLab = str_replace('\\', '/', $this->runnerTemp) . '/setup12-regression-lab';
+        $receiptLab = rtrim(str_replace('\\', '/', (string)($receipt['lab'] ?? '')), '/');
+        if (strtolower($receiptLab) !== strtolower($canonicalLab)) {
+            throw new RuntimeException('Ownership receipt lab is not canonical runnerTemp/setup12-regression-lab');
         }
 
-        // 1. Guard connection by early ownership receipt
+        $safeAuth = $this->assertSafeRunnerTempPath($authPath, true);
+        $canonicalAuth = $canonicalLab . '/fixture-auth.json';
+        if (strtolower(str_replace('\\', '/', $safeAuth)) !== strtolower($canonicalAuth)) {
+            throw new RuntimeException('Fixture auth path must be EXACT canonical lab fixture-auth.json');
+        }
+
+        $safeOutput = $this->assertSafeRunnerTempPath($outputPath, false);
+        $canonicalOutput = $canonicalLab . '/legacy-v025-backup.sql';
+        if (strtolower(str_replace('\\', '/', $safeOutput)) !== strtolower($canonicalOutput)) {
+            throw new RuntimeException('Output path must be EXACT canonical lab legacy-v025-backup.sql');
+        }
+
+        if (file_exists($safeOutput) || is_link($safeOutput)) {
+            throw new RuntimeException('Output path already exists; fresh output required');
+        }
+
+        $authRaw = (string)file_get_contents($safeAuth);
+        $auth = json_decode($authRaw, true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($auth) || empty($auth['email']) || empty($auth['password'])) {
+            throw new RuntimeException('Invalid fixture auth credentials');
+        }
+
+        $fixturePath = realpath(__DIR__ . '/legacy-v025-schema.sql');
+        if ($fixturePath === false || !is_file($fixturePath)) {
+            throw new RuntimeException('Missing legacy-v025-schema.sql template');
+        }
+
+        $sql = (string)file_get_contents($fixturePath);
+
+        if (substr_count($sql, "'__ADMIN_EMAIL__'") !== 1 || substr_count($sql, "'__ADMIN_PASSWORD_HASH__'") !== 1) {
+            throw new RuntimeException('Template must contain exactly one quoted admin email and password placeholder');
+        }
+        if (preg_match('/AUTO_INCREMENT=\d+/i', $sql)) {
+            throw new RuntimeException('Template must not contain table AUTO_INCREMENT=N options');
+        }
+        $ddlMatches = [];
+        preg_match_all('/CREATE TABLE `([a-zA-Z0-9_]+)`/i', $sql, $ddlMatches);
+        $tableCount = count($ddlMatches[1] ?? []);
+        if ($tableCount !== 27) {
+            throw new RuntimeException("Template must contain exactly 27 CREATE TABLE statements, found {$tableCount}");
+        }
+        if (preg_match('/0(?:2[6-9]|[3-9][0-9])_[a-zA-Z0-9_\-]+\.sql/i', $sql)) {
+            throw new RuntimeException('Template must not contain migrations 026 or above');
+        }
+
+        // Isolate exact INSERT INTO `schema_versions` block with unique one guard
+        $schemaInsertMatches = [];
+        if (preg_match_all('/INSERT INTO `schema_versions`\s*\([^)]+\)\s*VALUES\s*([\s\S]+?);/i', $sql, $schemaInsertMatches) !== 1) {
+            throw new RuntimeException('Template must contain exactly one INSERT INTO `schema_versions` block');
+        }
+        $schemaValuesBlock = $schemaInsertMatches[1][0];
+
+        $versionRowMatches = [];
+        preg_match_all("/\(\s*(\d+)\s*,\s*'([0-9a-zA-Z_\.\-]+)'\s*,\s*'([^']+)'\s*\)/", $schemaValuesBlock, $versionRowMatches, PREG_SET_ORDER);
+        $versionCount = count($versionRowMatches);
+        if ($versionCount !== 25) {
+            throw new RuntimeException("Template must contain exactly 25 seed version rows in schema_versions, found {$versionCount}");
+        }
+
+        $migrationsDir = realpath(__DIR__ . '/../../database/migrations');
+        if ($migrationsDir === false || !is_dir($migrationsDir)) {
+            throw new RuntimeException('Migrations directory missing');
+        }
+        $expectedFiles = [];
+        foreach (scandir($migrationsDir) ?: [] as $file) {
+            if (str_ends_with($file, '.sql') && preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $file)) {
+                $num = (int)substr($file, 0, 3);
+                if ($num >= 2 && $num <= 25) {
+                    $expectedFiles[] = $file;
+                }
+            }
+        }
+        sort($expectedFiles);
+        if (count($expectedFiles) !== 24) {
+            throw new RuntimeException('Expected 24 trusted migration files 002..025, found ' . count($expectedFiles));
+        }
+        $expectedLegacySet = array_merge($expectedFiles, ['016_add_refresh_tokens']);
+        sort($expectedLegacySet);
+
+        $actualVersionNames = [];
+        foreach ($versionRowMatches as $match) {
+            $vName = $match[2];
+            $vTime = $match[3];
+            if ($vTime !== '2000-01-01 00:00:00') {
+                throw new RuntimeException("Seed version {$vName} has invalid timestamp '{$vTime}', expected '2000-01-01 00:00:00'");
+            }
+            $actualVersionNames[] = $vName;
+        }
+        sort($actualVersionNames);
+
+        if ($actualVersionNames !== $expectedLegacySet) {
+            throw new RuntimeException('Seed versions in schema_versions block do not match trusted 002..025 + extensionless 016');
+        }
+
+        $passwordHash = password_hash((string)$auth['password'], PASSWORD_DEFAULT);
+
+        $escapedEmail = str_replace(["\\", "'", "\0", "\r", "\n"], ["\\\\", "\\'", '', '', ''], (string)$auth['email']);
+        $escapedHash = str_replace(["\\", "'", "\0", "\r", "\n"], ["\\\\", "\\'", '', '', ''], $passwordHash);
+
+        $sql = str_replace('__ADMIN_EMAIL__', $escapedEmail, $sql);
+        $sql = str_replace('__ADMIN_PASSWORD_HASH__', $escapedHash, $sql);
+
+        if (str_contains($sql, '__ADMIN_EMAIL__') || str_contains($sql, '__ADMIN_PASSWORD_HASH__')) {
+            throw new RuntimeException('Unsubstituted admin placeholders detected');
+        }
+
+        $fh = @fopen($safeOutput, 'xb');
+        if ($fh === false) {
+            throw new RuntimeException('Failed to create output file exclusively');
+        }
+        $written = fwrite($fh, $sql);
+        fclose($fh);
+        if ($written !== strlen($sql)) {
+            throw new RuntimeException('Failed to write complete SQL backup');
+        }
+
+        return [
+            'ok' => true,
+            'bytes' => strlen($sql),
+            'table_count' => $tableCount,
+            'version_count' => $versionCount,
+        ];
+    }
+
+    public function verifyLegacyV025Upgrade(string $configDir, string $authPath, string $contractPath): array
+    {
+        $safeAuth = $this->assertSafeRunnerTempPath($authPath, true);
+        if (basename($safeAuth) !== 'fixture-auth.json') {
+            throw new RuntimeException('Fixture auth path must be fixture-auth.json');
+        }
+        $safeContract = $this->assertSafeRunnerTempPath($contractPath, true);
+
+        $authRaw = (string)file_get_contents($safeAuth);
+        $auth = json_decode($authRaw, true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($auth) || empty($auth['email']) || empty($auth['password'])) {
+            throw new RuntimeException('Invalid fixture auth credentials');
+        }
+
+        $contractData = json_decode((string)file_get_contents($safeContract), true, 32, JSON_THROW_ON_ERROR);
+        $expectedSchemaSha = (string)($contractData['schema_sha256'] ?? $contractData['contract']['schema_sha256'] ?? '');
+        $expectedLedgerSha = (string)($contractData['ledger_sha256'] ?? $contractData['contract']['ledger_sha256'] ?? '');
+        if ($expectedSchemaSha === '' || $expectedLedgerSha === '') {
+            throw new RuntimeException('Contract file missing required schema_sha256 or ledger_sha256');
+        }
+
+        $db = $this->connectDatabase($configDir);
+
+        $migrationsDir = realpath(__DIR__ . '/../../database/migrations/');
+        if ($migrationsDir === false || !is_dir($migrationsDir)) {
+            throw new RuntimeException('Migrations directory missing');
+        }
+        $expectedAll = [];
+        foreach (scandir($migrationsDir) ?: [] as $file) {
+            if (str_ends_with($file, '.sql') && preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $file)) {
+                $expectedAll[] = $file;
+            }
+        }
+        sort($expectedAll);
+        if (count($expectedAll) !== 58) {
+            throw new RuntimeException('Expected exactly 58 migration files in repo, found ' . count($expectedAll));
+        }
+
+        $expectedLegacy = array_values(array_filter($expectedAll, static fn(string $f): bool => (int)substr($f, 0, 3) <= 25));
+        $expectedPending = array_values(array_filter($expectedAll, static fn(string $f): bool => (int)substr($f, 0, 3) >= 26));
+
+        $stmt = $db->query('SELECT id, version, executed_at FROM schema_versions ORDER BY version ASC');
+        $ledgerRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        $actualVersions = array_column($ledgerRows, 'version');
+        sort($actualVersions);
+
+        $exactAll58Match = ($actualVersions === $expectedAll);
+
+        $legacyTimestampsPreserved = true;
+        $pendingTimestampsNew = true;
+        $actualVersionMap = [];
+        $legacyRetainedCount = 0;
+        $pendingAppliedCount = 0;
+        foreach ($ledgerRows as $r) {
+            $v = (string)$r['version'];
+            $ts = (string)($r['executed_at'] ?? '');
+            $actualVersionMap[$v] = $ts;
+            if (str_starts_with($ts, '2000-01-01')) {
+                $legacyRetainedCount++;
+            } else {
+                $pendingAppliedCount++;
+            }
+        }
+
+        foreach ($expectedLegacy as $lf) {
+            $ts = $actualVersionMap[$lf] ?? '';
+            if (!str_starts_with($ts, '2000-01-01')) {
+                $legacyTimestampsPreserved = false;
+                break;
+            }
+        }
+
+        foreach ($expectedPending as $pf) {
+            $ts = $actualVersionMap[$pf] ?? '';
+            if ($ts === '' || str_starts_with($ts, '2000-01-01')) {
+                $pendingTimestampsNew = false;
+                break;
+            }
+        }
+
+        $duplicate016Gone = !in_array('016_add_refresh_tokens', $actualVersions, true) && in_array('016_add_refresh_tokens.sql', $actualVersions, true);
+
+        $checkMigrations = $db->query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'migrations'")->fetchColumn();
+        $legacyMigrationsTableDropped = ($checkMigrations === false || $checkMigrations === null);
+
+        $viewCheck = $db->query("SELECT 1 FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'product_catalog_trigger_metadata'")->fetchColumn();
+        $catalogViewPresent = ($viewCheck !== false && $viewCheck !== null);
+
+        $requiredTriggers = ['trg_products_catalog_insert', 'trg_products_catalog_update', 'trg_products_catalog_delete'];
+        $actualTriggers = [];
+        if ($catalogViewPresent) {
+            $trgStmt = $db->query('SELECT TRIGGER_NAME FROM product_catalog_trigger_metadata WHERE TRIGGER_NAME IS NOT NULL');
+            $actualTriggers = $trgStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        }
+        $catalogTriggersPresent = (count(array_intersect($requiredTriggers, $actualTriggers)) === 3);
+
+        $hasUnitType = false;
+        $colStmt = $db->query("SHOW COLUMNS FROM products LIKE 'unit_type'");
+        if ($colStmt && $colStmt->fetch()) {
+            $hasUnitType = true;
+        }
+
+        $hasFractional = false;
+        $invCol = $db->query("SHOW COLUMNS FROM inventory_events LIKE 'delta'")->fetch(PDO::FETCH_ASSOC);
+        if ($invCol && str_contains(strtolower((string)($invCol['Type'] ?? '')), 'decimal')) {
+            $hasFractional = true;
+        }
+
+        $custBranch = $db->query("SHOW COLUMNS FROM customers LIKE 'branch_id'")->fetch(PDO::FETCH_ASSOC);
+        $customerBranchInferred = ($custBranch !== false);
+
+        $suppBranch = $db->query("SHOW COLUMNS FROM suppliers LIKE 'branch_id'")->fetch(PDO::FETCH_ASSOC);
+        $supplierBranchInferred = ($suppBranch !== false);
+
+        $hasCatalogChanges = (bool)$db->query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'product_catalog_changes'")->fetchColumn();
+
+        $adminRow = $db->query("SELECT id, name, email, password, role, is_active FROM users WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $adminVerified = (
+            $adminRow !== false &&
+            (int)$adminRow['id'] === 1 &&
+            $adminRow['role'] === 'admin' &&
+            (int)$adminRow['is_active'] === 1 &&
+            $adminRow['email'] === (string)$auth['email'] &&
+            password_verify((string)$auth['password'], (string)$adminRow['password'])
+        );
+
+        $catRow = $db->query("SELECT id, name FROM categories WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $catOk = ($catRow !== false && $catRow['name'] === 'codex_legacy_v025_category');
+
+        $custRow = $db->query("SELECT id, name, phone, initial_balance, branch_id FROM customers WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $custOk = ($custRow !== false && $custRow['name'] === 'codex_legacy_v025_customer' && $custRow['phone'] === null && (float)$custRow['initial_balance'] == 0.00 && (int)$custRow['branch_id'] === 1);
+
+        $suppRow = $db->query("SELECT id, name, phone, email, initial_balance, branch_id FROM suppliers WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $suppOk = ($suppRow !== false && $suppRow['name'] === 'codex_legacy_v025_supplier' && $suppRow['phone'] === null && $suppRow['email'] === 'codex_supplier@example.invalid' && (float)$suppRow['initial_balance'] == 0.00 && (int)$suppRow['branch_id'] === 1);
+
+        $prodRow = $db->query("SELECT id, name, barcode, price, cost, quantity, unit_type, branch_id FROM products WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $prodOk = ($prodRow !== false && $prodRow['name'] === 'codex_legacy_v025_product' && $prodRow['barcode'] === '6220000000001' && (float)$prodRow['price'] == 10.00 && (float)$prodRow['cost'] == 5.00 && (int)$prodRow['quantity'] === 50 && $prodRow['unit_type'] === 'piece' && (int)$prodRow['branch_id'] === 1);
+
+        $barRow = $db->query("SELECT id, product_id, barcode FROM product_barcodes WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $barcodeOk = ($barRow !== false && (int)$barRow['product_id'] === 1 && $barRow['barcode'] === '6220000000002');
+
+        $phRow = $db->query("SELECT id, product_id, old_price, new_price, old_cost, new_cost FROM price_history WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $priceHistOk = ($phRow !== false && (int)$phRow['product_id'] === 1 && (float)$phRow['old_price'] == 8.00 && (float)$phRow['new_price'] == 10.00 && (float)$phRow['old_cost'] == 4.00 && (float)$phRow['new_cost'] == 5.00);
+
+        $invRow = $db->query("SELECT id, user_id, customer_id, total, status, branch_id FROM invoices WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $invOk = ($invRow !== false && (int)$invRow['customer_id'] === 1 && (float)$invRow['total'] == 10.00 && $invRow['status'] === 'completed' && (int)$invRow['branch_id'] === 1);
+
+        $itemRow = $db->query("SELECT id, invoice_id, product_id, quantity, price, subtotal FROM invoice_items WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $invItemOk = ($itemRow !== false && (int)$itemRow['invoice_id'] === 1 && (int)$itemRow['product_id'] === 1 && (int)$itemRow['quantity'] === 1 && (float)$itemRow['price'] == 10.00 && (float)$itemRow['subtotal'] == 10.00);
+
+        $clRow = $db->query("SELECT id, customer_id, type, amount, description, invoice_id, branch_id FROM customer_ledger WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $custLedgerOk = ($clRow !== false && (int)$clRow['customer_id'] === 1 && $clRow['type'] === 'debit' && (float)$clRow['amount'] == 10.00 && (int)$clRow['invoice_id'] === 1 && (int)$clRow['branch_id'] === 1);
+
+        $piRow = $db->query("SELECT id, supplier_id, total, items_count, branch_id FROM purchase_invoices WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $purInvOk = ($piRow !== false && (int)$piRow['supplier_id'] === 1 && (float)$piRow['total'] == 50.00 && (int)$piRow['items_count'] === 1 && (int)$piRow['branch_id'] === 1);
+
+        $purRow = $db->query("SELECT id, purchase_invoice_id, supplier_id, product_id, quantity, cost, total FROM purchases WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $purOk = ($purRow !== false && (int)$purRow['purchase_invoice_id'] === 1 && (int)$purRow['supplier_id'] === 1 && (int)$purRow['product_id'] === 1 && (int)$purRow['quantity'] === 10 && (float)$purRow['cost'] == 5.00 && (float)$purRow['total'] == 50.00);
+
+        $slRow = $db->query("SELECT id, supplier_id, type, amount, description, purchase_invoice_id, branch_id FROM supplier_ledger WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $suppLedgerOk = ($slRow !== false && (int)$slRow['supplier_id'] === 1 && $slRow['type'] === 'credit' && (float)$slRow['amount'] == 50.00 && (int)$slRow['purchase_invoice_id'] === 1 && (int)$slRow['branch_id'] === 1);
+
+        $ieRow = $db->query("SELECT id, product_id, action, delta, branch_id FROM inventory_events WHERE id = 1")->fetch(PDO::FETCH_ASSOC);
+        $invEventOk = ($ieRow !== false && (int)$ieRow['product_id'] === 1 && $ieRow['action'] === 'sale' && (float)$ieRow['delta'] == -1.000 && (int)$ieRow['branch_id'] === 1);
+
+        $setStmt = $db->query("SELECT `key`, `value` FROM settings WHERE `key` IN ('store_name', 'tax_enabled', 'tax_rate', 'loyalty_enabled', 'prevent_negative_stock')");
+        $settingsMap = [];
+        foreach ($setStmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $s) {
+            $settingsMap[$s['key']] = $s['value'];
+        }
+        $settingsOk = (
+            ($settingsMap['store_name'] ?? null) === 'codex_legacy_v025_store' &&
+            ($settingsMap['tax_enabled'] ?? null) === '0' &&
+            ($settingsMap['tax_rate'] ?? null) === '15' &&
+            ($settingsMap['loyalty_enabled'] ?? null) === '0' &&
+            array_key_exists('prevent_negative_stock', $settingsMap)
+        );
+
+        $dataPreserved = (
+            $catOk && $custOk && $suppOk && $prodOk && $barcodeOk &&
+            $priceHistOk && $invOk && $invItemOk && $custLedgerOk &&
+            $purInvOk && $purOk && $suppLedgerOk && $invEventOk && $settingsOk
+        );
+
+        $service = new UpdateDataCompatibilityService();
+        $description = $service->describe($db);
+
+        $schemaMatchesContract = ($description['schema_sha256'] === $expectedSchemaSha);
+        $ledgerMatchesContract = ($description['ledger_sha256'] === $expectedLedgerSha);
+
+        return [
+            'ok' => true,
+            'ledger_count' => count($actualVersions),
+            'legacy_retained_count' => $legacyRetainedCount,
+            'pending_applied_count' => $pendingAppliedCount,
+            'exact_all_58_match' => $exactAll58Match,
+            'latest_migration_present' => in_array('059_add_update_compatibility_metadata.sql', $actualVersions, true),
+            'legacy_timestamps_preserved' => $legacyTimestampsPreserved,
+            'pending_timestamps_new' => $pendingTimestampsNew,
+            'duplicate_016_gone' => $duplicate016Gone,
+            'legacy_migrations_table_dropped' => $legacyMigrationsTableDropped,
+            'catalog_view_present' => $catalogViewPresent,
+            'catalog_triggers_present' => $catalogTriggersPresent,
+            'customer_branch_inferred' => $customerBranchInferred,
+            'supplier_branch_inferred' => $supplierBranchInferred,
+            'products_unit_type_applied' => $hasUnitType,
+            'inventory_fractional_applied' => $hasFractional,
+            'catalog_changes_present' => $hasCatalogChanges,
+            'admin_verified' => $adminVerified,
+            'data_preserved' => $dataPreserved,
+            'schema_matches_contract' => $schemaMatchesContract,
+            'ledger_matches_contract' => $ledgerMatchesContract,
+        ];
+    }
+
+    private function assertOwnershipReceipt(): array
+    {
         $receiptPath = $this->runnerTemp . '/setup12-ownership-receipt.json';
         if (!is_file($receiptPath)) {
             throw new RuntimeException("Ownership receipt missing: {$receiptPath}");
@@ -1180,6 +1526,19 @@ final class Setup12RegressionsHelper
                 throw new RuntimeException("Ownership receipt POS target at [{$i}] mismatch: '{$receiptTargets[$i]}' vs '{$canonicalNorm[$i]}'");
             }
         }
+
+        return $receipt;
+    }
+
+    private function connectDatabase(string $configDir): PDO
+    {
+        if (getenv('GITHUB_ACTIONS') !== 'true') {
+            throw new RuntimeException('Database operations strictly require ephemeral GITHUB_ACTIONS environment.');
+        }
+
+        // 1. Guard connection by early ownership receipt
+        $receipt = $this->assertOwnershipReceipt();
+        $appData = (string)getenv('APPDATA');
 
         // 2. Validate config directory and runtime files
         $configReal = realpath($configDir);
@@ -1649,6 +2008,9 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'sentinel:',
         'mutated-name:',
         'setting-key:',
+        'auth-path:',
+        'output-path:',
+        'contract-path:',
     ]);
 
     $action = (string)($options['action'] ?? '');
@@ -1768,6 +2130,23 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
             case 'verify-restore-sql-preservation':
                 $result = $helper->verifyRestoreSqlPreservation(
                     (string)($options['lab-dir'] ?? $options['lab'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'prepare-legacy-v025-backup':
+                $result = $helper->prepareLegacyV025Backup(
+                    (string)($options['auth-path'] ?? ''),
+                    (string)($options['output-path'] ?? $options['output'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'verify-legacy-v025-upgrade':
+                $result = $helper->verifyLegacyV025Upgrade(
+                    (string)($options['config-dir'] ?? ''),
+                    (string)($options['auth-path'] ?? ''),
+                    (string)($options['contract-path'] ?? $options['contract'] ?? '')
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

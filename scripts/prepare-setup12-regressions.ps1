@@ -1374,7 +1374,8 @@ if ($Phase -eq 'cleanup') {
         'session_preservation_on_error_verified',
         'indexeddb_offline_preserved',
         'protected_state_preserved',
-        'repeated_channel_roundtrip_verified'
+        'repeated_channel_roundtrip_verified',
+        'legacy_v025_restore_migrations_verified'
     )
 
     foreach ($b in $reqBools) {

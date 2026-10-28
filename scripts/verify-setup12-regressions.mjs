@@ -1196,6 +1196,7 @@ const results = {
     session_preservation_on_error_verified: false,
     indexeddb_offline_preserved: false,
     protected_state_preserved: false,
+    legacy_v025_restore_migrations_verified: false,
   },
   details: {},
 };
@@ -1205,6 +1206,80 @@ let dbAfterRestore = null;
 let dbAfterUpgrade = null;
 let dbPreTransition = null;
 let setup12BackupSha256 = null;
+
+const ALLOWED_LEGACY_PHASES = new Set([
+  'prepare',
+  'nativeLegacy',
+  'legacyVerify',
+  'baselineBack',
+  'finalVerify',
+  'completed',
+]);
+
+const ALLOWED_LEGACY_RESULTS = new Set([
+  'pass',
+  'fail',
+  'in_progress',
+]);
+
+const ALLOWED_RESTORE_STAGES = new Set([
+  'restore_validate',
+  'restore_snapshot',
+  'restore_import',
+  'restore_migrations',
+  'restore_verify',
+  'restore_rollback',
+  'restore_restart',
+  'restore_finalize',
+]);
+
+const ALLOWED_LEGACY_STAGES = new Set([
+  ...ALLOWED_RESTORE_STAGES,
+  'completed',
+  'prepare',
+  'nativeLegacy',
+  'legacyVerify',
+  'baselineBack',
+  'finalVerify',
+]);
+
+const KNOWN_MIGRATION_FILENAMES = new Set(
+  fs.existsSync(path.join(root, 'database/migrations'))
+    ? fs.readdirSync(path.join(root, 'database/migrations')).filter((f) => f.endsWith('.sql'))
+    : []
+);
+
+let legacyDiagnostic = null;
+
+function persistLegacyDiagnostic(patch = {}) {
+  if (!legacyDiagnostic) return;
+  Object.assign(legacyDiagnostic, patch);
+
+  let safeCode = null;
+  if (legacyDiagnostic.code === 0 || legacyDiagnostic.code === 1) {
+    safeCode = legacyDiagnostic.code;
+  } else if (legacyDiagnostic.result === 'pass') {
+    safeCode = 0;
+  } else if (legacyDiagnostic.result === 'fail') {
+    safeCode = 1;
+  }
+
+  const safe = {
+    phase: typeof legacyDiagnostic.phase === 'string' && ALLOWED_LEGACY_PHASES.has(legacyDiagnostic.phase) ? legacyDiagnostic.phase : null,
+    result: typeof legacyDiagnostic.result === 'string' && ALLOWED_LEGACY_RESULTS.has(legacyDiagnostic.result) ? legacyDiagnostic.result : null,
+    code: safeCode,
+    stage: typeof legacyDiagnostic.stage === 'string' && ALLOWED_LEGACY_STAGES.has(legacyDiagnostic.stage) ? legacyDiagnostic.stage : null,
+    has_reference: Boolean(legacyDiagnostic.has_reference),
+    recovered: typeof legacyDiagnostic.recovered === 'boolean' ? legacyDiagnostic.recovered : null,
+    legacy_migrations_count: typeof legacyDiagnostic.legacy_migrations_count === 'number' && Number.isInteger(legacyDiagnostic.legacy_migrations_count) && legacyDiagnostic.legacy_migrations_count >= 0 && legacyDiagnostic.legacy_migrations_count <= 100 ? legacyDiagnostic.legacy_migrations_count : null,
+    completed_migrations_count: typeof legacyDiagnostic.completed_migrations_count === 'number' && Number.isInteger(legacyDiagnostic.completed_migrations_count) && legacyDiagnostic.completed_migrations_count >= 0 && legacyDiagnostic.completed_migrations_count <= 100 ? legacyDiagnostic.completed_migrations_count : null,
+    latest_migration_present: typeof legacyDiagnostic.latest_migration_present === 'boolean' ? legacyDiagnostic.latest_migration_present : null,
+    protected_preserved: typeof legacyDiagnostic.protected_preserved === 'boolean' ? legacyDiagnostic.protected_preserved : null,
+    failing_migration: typeof legacyDiagnostic.failing_migration === 'string' && KNOWN_MIGRATION_FILENAMES.has(legacyDiagnostic.failing_migration) ? legacyDiagnostic.failing_migration : null,
+    driver_errno: typeof legacyDiagnostic.driver_errno === 'number' && Number.isInteger(legacyDiagnostic.driver_errno) && legacyDiagnostic.driver_errno > 0 && legacyDiagnostic.driver_errno < 100000 ? legacyDiagnostic.driver_errno : null,
+  };
+  fs.writeFileSync(path.join(evidence, 'diagnostic-legacy-v025-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
+}
 
 try {
   // ── TEST 1: Reproduce Bug 1 on Published Setup 12 ──────────────────────────
@@ -2402,6 +2477,275 @@ try {
       },
     };
     console.log('PASS [Test 4D] Desktop SQL restore error classification, reference propagation, and rollback verified.');
+
+    // ── TEST 5: Legacy v0.25 Database Backup Restore & Full Migration Upgrade ───
+    console.log('\n[Test 5] Testing native desktop restore of legacy v0.25 backup and full migration upgrade...');
+
+    legacyDiagnostic = {
+      phase: 'prepare',
+      result: 'in_progress',
+      code: null,
+      stage: null,
+      has_reference: false,
+      recovered: null,
+      legacy_migrations_count: null,
+      completed_migrations_count: null,
+      latest_migration_present: null,
+      protected_preserved: null,
+      failing_migration: null,
+      driver_errno: null,
+    };
+    persistLegacyDiagnostic({ phase: 'prepare' });
+
+    // Close mock transport if open to ensure pure native desktop restore flow
+    if (transitionTransport) {
+      await transitionTransport.close().catch(() => {});
+      transitionTransport = null;
+    }
+
+    // Capture fresh production backup endpoint SQL of exact pre-Test5 state for baseline reversion
+    console.log('[Test 5 Baseline Capture] Capturing fresh production backup of pre-Test5 database state...');
+    const pre5Sql = await transitionLab.evaluate(`(async () => {
+      const base = (await window.posRuntime?.getApiBaseUrl?.()) || '';
+      const res = await fetch(base + '/api/v1/backup', { credentials: 'include' });
+      if (!res.ok) throw new Error('Backup download failed: ' + res.status);
+      return await res.text();
+    })()`);
+    assert.ok(pre5Sql.length > 50, 'Pre-Test5 backup SQL too small');
+    const pre5BackupPath = path.join(lab, 'pre-legacy-v025-baseline.sql');
+    fs.writeFileSync(pre5BackupPath, pre5Sql, 'utf8');
+
+    // Capture exact pre-Test5 database, protected, binary, and inventory state
+    const pre5Db = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+      'setting-key': baselineDb.setting?.key,
+    });
+    assert.equal(pre5Db.ok, true, 'Pre-Test5 inspect-db failed');
+    const pre5Protected = await getSystemProtectedState(transitionLab);
+    const installedExePath = path.join(application, 'POS Desktop.exe');
+    const installedAsarPath = path.join(application, 'resources/app.asar');
+    assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'Pre-Test5 POS Desktop.exe altered');
+    assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'Pre-Test5 app.asar altered');
+    verifyInventoryFiles(candidate13DeltaInv);
+
+    // Prepare legacy backup template with ephemeral fixture auth credentials
+    const legacyBackupPath = path.join(lab, 'legacy-v025-backup.sql');
+    const prepRes = runPhpFixture('prepare-legacy-v025-backup', {
+      'auth-path': authPath,
+      'output-path': legacyBackupPath,
+    });
+    assert.equal(prepRes.ok, true, 'prepare-legacy-v025-backup failed');
+    assert.equal(prepRes.table_count, 27, 'Legacy template must have 27 tables');
+    assert.equal(prepRes.version_count, 25, 'Legacy template must have 25 seed versions');
+    assert.ok(fs.existsSync(legacyBackupPath), 'legacy-v025-backup.sql missing');
+    persistLegacyDiagnostic({ legacy_migrations_count: prepRes.version_count });
+
+    const safetyDir5 = path.join(storageDir, 'update-backups', 'migration-safety');
+    fs.mkdirSync(safetyDir5, { recursive: true });
+
+    async function executeTest5NativeRestore(label, backupPath, isLegacy = false) {
+      console.log(`[Test 5 Native Restore] Seeding offline sale and setting pageRunId for ${label}...`);
+      await seedOfflinePendingSale(transitionLab);
+
+      const preExistingSafety = new Set(fs.readdirSync(safetyDir5));
+      const pageRunIdBefore = `${label}_${Date.now()}`;
+      await transitionLab.evaluate(`window.__pageRunId = ${JSON.stringify(pageRunIdBefore)}`);
+
+      await transitionLab.mockOpenDialog(backupPath);
+
+      let restoreContextLost = false;
+      let restoreSettled = null;
+      let failureSignalReject = null;
+      const failureSignal = new Promise((_, reject) => {
+        failureSignalReject = reject;
+      });
+
+      const restorePromise = transitionLab.evaluate('window.electronAPI.backup.restore()')
+        .then((res) => {
+          restoreSettled = res;
+          if (res && res.success !== true) {
+            const rawStage = typeof res.stage === 'string' ? res.stage : null;
+            const boundedStage = ALLOWED_RESTORE_STAGES.has(rawStage) ? rawStage : null;
+            const hasRef = Boolean(typeof res.reference === 'string' && /^[0-9a-f]{16}$/i.test(res.reference));
+            const recovered = typeof res.recovered === 'boolean' ? res.recovered : null;
+            persistLegacyDiagnostic({
+              result: 'fail',
+              code: 1,
+              stage: boundedStage,
+              has_reference: hasRef,
+              recovered: recovered,
+            });
+            const errStage = boundedStage || 'unknown_stage';
+            const rawCode = typeof res.code === 'string' && /^[A-Z0-9_\-]+$/.test(res.code) ? res.code : 'RESTORE_FAILED';
+            const failErr = new Error(`${label} restore failed at stage [${errStage}] with code [${rawCode}]`);
+            failErr.restoreResult = { code: rawCode, stage: errStage, has_reference: hasRef, recovered };
+            if (failureSignalReject) failureSignalReject(failErr);
+            return res;
+          }
+          return res;
+        })
+        .catch((err) => {
+          restoreContextLost = /destroyed|cannot find context|navigated|target closed|session closed|protocol error/i.test(err?.message || '');
+          if (!restoreContextLost) {
+            if (failureSignalReject) failureSignalReject(err);
+            throw err;
+          }
+          restoreSettled = { context_lost: true, error: true };
+          return restoreSettled;
+        });
+
+      restorePromise.catch(() => {});
+
+      const snapshot = await Promise.race([
+        observeMigrationSafetySnapshot(safetyDir5, preExistingSafety),
+        failureSignal,
+      ]);
+
+      await Promise.race([
+        transitionLab.until('Boolean(document.querySelector("input[type=email]"))', `login form after ${label} reload`, 90000),
+        failureSignal,
+      ]);
+
+      await restorePromise;
+
+      if (restoreSettled && !restoreSettled.context_lost && restoreSettled.success !== true) {
+        const rawStage = typeof restoreSettled.stage === 'string' ? restoreSettled.stage : null;
+        const boundedStage = ALLOWED_RESTORE_STAGES.has(rawStage) ? rawStage : 'unknown_stage';
+        const rawCode = typeof restoreSettled.code === 'string' && /^[A-Z0-9_\-]+$/.test(restoreSettled.code) ? restoreSettled.code : 'RESTORE_FAILED';
+        assert.fail(`${label} restore failed at stage [${boundedStage}] with code [${rawCode}]`);
+      }
+
+      const pageRunIdAfter = await transitionLab.evaluate('window.__pageRunId');
+      assert.notEqual(pageRunIdAfter, pageRunIdBefore, `window.__pageRunId must change post-reload after ${label}`);
+
+      const emailInputPresent = await transitionLab.evaluate('Boolean(document.querySelector("input[type=email]"))');
+      assert.equal(emailInputPresent, true, `Login email input must be present after ${label}`);
+      const settingsLinkPresent = await transitionLab.evaluate("Boolean(document.querySelector(\"a[href='/settings']\"))");
+      assert.equal(settingsLinkPresent, false, `Authenticated settings link must not be present after ${label}`);
+
+      const offlineAfter = await pendingSale(transitionLab, 'get');
+      assert.ok(offlineAfter === undefined || offlineAfter === null, `Restore must clear actor offline IndexedDB pending sales after ${label}`);
+
+      assert.equal(fs.existsSync(snapshot.sqlPath), false, `Safety snapshot .sql must be deleted after successful ${label}`);
+      assert.equal(fs.existsSync(snapshot.jsonPath), false, `Safety snapshot .sql.json must be deleted after successful ${label}`);
+
+      for (const f of preExistingSafety) {
+        assert.ok(fs.existsSync(path.join(safetyDir5, f)), `Preexisting safety snapshot ${f} must be preserved across ${label}`);
+      }
+
+      return { snapshot, contextLost: restoreContextLost, settled: restoreSettled };
+    }
+
+    // Execute legacy restore
+    persistLegacyDiagnostic({ phase: 'nativeLegacy' });
+    const legacyRestoreResult = await executeTest5NativeRestore('legacy_v025', legacyBackupPath, true);
+    console.log('[Test 5] Legacy restore completed; context lost:', legacyRestoreResult.contextLost);
+
+    // Verify protected state, binaries, and inventory unchanged across legacy restore
+    const protectedAfterLegacy = await getSystemProtectedState(transitionLab);
+    assertProtectedStatePreserved(pre5Protected, protectedAfterLegacy, 'Legacy v0.25 Restore');
+    persistLegacyDiagnostic({ protected_preserved: true });
+    assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'POS Desktop.exe altered during legacy restore');
+    assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'app.asar altered during legacy restore');
+    verifyInventoryFiles(candidate13DeltaInv);
+
+    // Verify upgraded database state and migration reconciliation via PHP helper
+    persistLegacyDiagnostic({ phase: 'legacyVerify' });
+    console.log('[Test 5] Verifying upgraded database state and migration reconciliation...');
+    const upgradeRes = runPhpFixture('verify-legacy-v025-upgrade', {
+      'config-dir': configDir,
+      'auth-path': authPath,
+      'contract-path': path.join(lab, 'data-contract.json'),
+    });
+    assert.equal(upgradeRes.ok, true, 'verify-legacy-v025-upgrade failed');
+
+    // Record probe counts and latest migration present before subsequent assertions may fail
+    persistLegacyDiagnostic({
+      completed_migrations_count: typeof upgradeRes.ledger_count === 'number' ? upgradeRes.ledger_count : null,
+      latest_migration_present: upgradeRes.latest_migration_present === true || upgradeRes.exact_all_58_match === true,
+    });
+
+    assert.equal(upgradeRes.ledger_count, 58, 'Upgraded ledger count must be 58');
+    assert.equal(upgradeRes.legacy_retained_count, 24, 'Legacy retained versions count must be 24');
+    assert.equal(upgradeRes.pending_applied_count, 34, 'Pending applied migrations count must be 34');
+    assert.equal(upgradeRes.exact_all_58_match, true, 'All 58 migration filenames must match database/migrations/*.sql');
+    assert.equal(upgradeRes.latest_migration_present, true, 'Latest migration 059 must be present in ledger');
+    assert.equal(upgradeRes.legacy_timestamps_preserved, true, 'Legacy 24 versions must retain 2000-01-01 timestamps');
+    assert.equal(upgradeRes.pending_timestamps_new, true, 'Pending 34 versions must have new timestamps');
+    assert.equal(upgradeRes.duplicate_016_gone, true, 'Duplicate 016_add_refresh_tokens must be reconciled');
+    assert.equal(upgradeRes.legacy_migrations_table_dropped, true, 'Legacy migrations table must be dropped');
+    assert.equal(upgradeRes.catalog_view_present, true, 'product_catalog_trigger_metadata view must be present');
+    assert.equal(upgradeRes.catalog_triggers_present, true, 'All 3 required catalog triggers must be present');
+    assert.equal(upgradeRes.customer_branch_inferred, true, 'Customer branch_id must be inferred');
+    assert.equal(upgradeRes.supplier_branch_inferred, true, 'Supplier branch_id must be inferred');
+    assert.equal(upgradeRes.products_unit_type_applied, true, 'Product unit_type must be applied');
+    assert.equal(upgradeRes.inventory_fractional_applied, true, 'Inventory events fractional decimal must be applied');
+    assert.equal(upgradeRes.catalog_changes_present, true, 'Product catalog changes table must be present');
+    assert.equal(upgradeRes.admin_verified, true, 'Admin user credentials and password must be verified against fixture-auth.json');
+    assert.equal(upgradeRes.data_preserved, true, 'Representative business data and relations must be preserved');
+    assert.equal(upgradeRes.schema_matches_contract, true, 'Upgraded schema SHA256 must match contract');
+    assert.equal(upgradeRes.ledger_matches_contract, true, 'Upgraded ledger SHA256 must match contract');
+
+    // Login with auth credentials on upgraded database
+    console.log('[Test 5] Logging into desktop app after legacy restore and upgrade...');
+    await transitionLab.login(auth.email, auth.password);
+    await transitionLab.until("Boolean(document.querySelector(\"a[href='/settings']\"))", 'authenticated navigation after legacy restore', 60000);
+    await transitionLab.screenshot('legacy-v025-upgraded');
+
+    // Clean up: Restore fresh baseline backup using same strict patterns to revert database
+    persistLegacyDiagnostic({ phase: 'baselineBack' });
+    console.log('[Test 5 Baseline Reversion] Restoring fresh pre-Test5 baseline backup to revert database...');
+    const baselineRestoreResult = await executeTest5NativeRestore('baseline_cleanup', pre5BackupPath, false);
+    console.log('[Test 5 Baseline Reversion] Baseline restore completed; context lost:', baselineRestoreResult.contextLost);
+
+    persistLegacyDiagnostic({ phase: 'finalVerify' });
+    await transitionLab.login(auth.email, auth.password);
+    await transitionLab.until("Boolean(document.querySelector(\"a[href='/settings']\"))", 'authenticated navigation after baseline cleanup', 60000);
+
+    const dbPostTest5 = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+      'setting-key': baselineDb.setting?.key,
+    });
+    assert.equal(dbPostTest5.ok, true, 'inspect-db after baseline recovery failed');
+    assert.equal(dbPostTest5.customer?.name, SENTINEL, 'Baseline sentinel customer row must match pre5');
+    assert.equal(dbPostTest5.setting?.value, pre5Db.setting?.value, 'Baseline setting value must match pre5');
+    assert.equal(dbPostTest5.admin_digest, pre5Db.admin_digest, 'Admin digest must match pre5');
+    assert.deepEqual(dbPostTest5.ledger_rows, pre5Db.ledger_rows, 'Raw ledger rows must match pre5');
+    assert.equal(dbPostTest5.schema_sha256, pre5Db.schema_sha256, 'Canonical schema SHA256 must match pre5');
+    assert.equal(dbPostTest5.raw_schema_sha256, pre5Db.raw_schema_sha256, 'Raw schema SHA256 must match pre5');
+    assert.equal(dbPostTest5.ledger_sha256, pre5Db.ledger_sha256, 'Ledger SHA256 must match pre5');
+
+    const protectedPostTest5 = await getSystemProtectedState(transitionLab);
+    assertProtectedStatePreserved(pre5Protected, protectedPostTest5, 'Post-Test5 Baseline Recovery');
+    assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'POS Desktop.exe altered during baseline recovery');
+    assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'app.asar altered during baseline recovery');
+    verifyInventoryFiles(candidate13DeltaInv);
+
+    persistLegacyDiagnostic({
+      phase: 'completed',
+      result: 'pass',
+      code: 0,
+      stage: 'completed',
+      recovered: null,
+      has_reference: false,
+    });
+
+    results.verifications.legacy_v025_restore_migrations_verified = true;
+    results.details.legacy_v025_restore = {
+      outcome: 'SUCCESS',
+      legacy_retained_count: upgradeRes.legacy_retained_count,
+      pending_applied_count: upgradeRes.pending_applied_count,
+      total_ledger_count: upgradeRes.ledger_count,
+      exact_all_58_match: upgradeRes.exact_all_58_match,
+      latest_migration_present: upgradeRes.latest_migration_present,
+      duplicate_reconciled: upgradeRes.duplicate_reconciled,
+      migrations_table_dropped: upgradeRes.legacy_migrations_table_dropped,
+      schema_matches_contract: upgradeRes.schema_matches_contract,
+      ledger_matches_contract: upgradeRes.ledger_matches_contract,
+    };
+    console.log('PASS [Test 5] Legacy v0.25 database backup restore and full migration upgrade verified.');
   } finally {
     if (transitionTransport) {
       await transitionTransport.close().catch(() => {});
@@ -2474,6 +2818,35 @@ try {
         }
         fs.writeFileSync(path.join(evidence, 'diagnostic-receipts.json'), JSON.stringify(safeReceipts, null, 2), 'utf8');
       } catch {}
+    }
+
+    if (legacyDiagnostic && legacyDiagnostic.result !== 'pass') {
+      let failMig = legacyDiagnostic.failing_migration;
+      let failErrno = legacyDiagnostic.driver_errno;
+      if (!failMig && typeof error?.message === 'string') {
+        const migMatch = error.message.match(/0[0-9]{2}_[a-zA-Z0-9_\-]+\.sql/);
+        if (migMatch && KNOWN_MIGRATION_FILENAMES.has(migMatch[0])) {
+          failMig = migMatch[0];
+        }
+      }
+      if (!failErrno && typeof error?.message === 'string') {
+        const errMatch = error.message.match(/(?:errno|error):\s*([0-9]{4,5})/i) ||
+                         error.message.match(/SQLSTATE\[[A-Z0-9]+\]:\s*(?:General error:\s*)?([0-9]{4,5})/i);
+        if (errMatch) {
+          const parsed = parseInt(errMatch[1], 10);
+          if (parsed > 0 && parsed < 100000) failErrno = parsed;
+        }
+      }
+      const failStage = ALLOWED_LEGACY_STAGES.has(legacyDiagnostic.stage)
+        ? legacyDiagnostic.stage
+        : (ALLOWED_LEGACY_PHASES.has(legacyDiagnostic.phase) ? legacyDiagnostic.phase : null);
+      persistLegacyDiagnostic({
+        result: 'fail',
+        code: 1,
+        stage: failStage,
+        failing_migration: failMig,
+        driver_errno: failErrno,
+      });
     }
   } catch (diagErr) {
     console.error('Failed to capture diagnostics:', diagErr.message);
