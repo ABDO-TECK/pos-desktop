@@ -608,6 +608,72 @@ if ($Phase -eq 'prepare') {
     New-Item -ItemType Junction -Path (Join-Path $candidateSource 'backend/vendor') -Target (Join-Path $repo 'backend/vendor') | Out-Null
     New-Item -ItemType Junction -Path (Join-Path $candidateSource 'portable') -Target (Join-Path $repo 'portable') | Out-Null
 
+    # Copy prepared original repository NSIS build prerequisites into private candidate source
+    $desktopManifestPath = Join-Path $repo 'scripts/desktop-runtime.json'
+    if (-not (Test-Path -LiteralPath $desktopManifestPath -PathType Leaf)) {
+        throw "Desktop runtime manifest missing: $desktopManifestPath"
+    }
+    $desktopManifest = Get-Content -LiteralPath $desktopManifestPath -Raw | ConvertFrom-Json
+    $expectedPrereqName = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.archiveName) { [string]$desktopManifest.vcredist.archiveName } else { 'vc_redist.x64.exe' }
+    $expectedPrereqHash = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.sha256) { ([string]$desktopManifest.vcredist.sha256).ToLowerInvariant() } else { $null }
+
+    $sourcePrereqDir = [IO.Path]::GetFullPath((Join-Path $repo 'build/prerequisites'))
+    $expectedSourcePrereq = [IO.Path]::GetFullPath((Join-Path $sourcePrereqDir $expectedPrereqName))
+    if (-not (Test-Path -LiteralPath $expectedSourcePrereq -PathType Leaf)) {
+        throw "Prepared NSIS prerequisite missing in source repository: $expectedSourcePrereq"
+    }
+    if ($expectedPrereqHash) {
+        $sourcePrereqHash = (Get-FileHash -LiteralPath $expectedSourcePrereq -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($sourcePrereqHash -ne $expectedPrereqHash) {
+            throw "Source prerequisite SHA-256 mismatch against pinned manifest ($sourcePrereqHash vs $expectedPrereqHash)"
+        }
+    }
+
+    $targetPrereqDir = [IO.Path]::GetFullPath((Join-Path $candidateSource 'build/prerequisites'))
+    if (-not $targetPrereqDir.StartsWith($candidateSource.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Candidate prerequisite target directory outside candidate source: $targetPrereqDir"
+    }
+    Assert-SafeDirectory $targetPrereqDir | Out-Null
+    New-Item -ItemType Directory -Path $targetPrereqDir -Force | Out-Null
+    Assert-SafeDirectory $targetPrereqDir | Out-Null
+    if ((Get-Item -LiteralPath $targetPrereqDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Candidate prerequisite target directory cannot be a reparse point: $targetPrereqDir"
+    }
+
+    $prereqFiles = @(Get-ChildItem -LiteralPath $sourcePrereqDir -File)
+    if ($prereqFiles.Count -eq 0) {
+        throw "No prerequisite files found in source directory: $sourcePrereqDir"
+    }
+    foreach ($pFile in $prereqFiles) {
+        $destFile = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $pFile.Name))
+        if (-not $destFile.StartsWith($targetPrereqDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Prerequisite target file outside prerequisite directory: $destFile"
+        }
+        Copy-Item -LiteralPath $pFile.FullName -Destination $destFile -Force
+        if (-not (Test-Path -LiteralPath $destFile -PathType Leaf)) {
+            throw "Failed to copy prerequisite file to $destFile"
+        }
+        $srcHash = (Get-FileHash -LiteralPath $pFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $dstHash = (Get-FileHash -LiteralPath $destFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($srcHash -ne $dstHash) {
+            throw "Prerequisite file hash mismatch after copy: $destFile ($dstHash vs $srcHash)"
+        }
+        if ((Get-Item -LiteralPath $destFile).Length -ne $pFile.Length) {
+            throw "Prerequisite file size mismatch after copy: $destFile"
+        }
+    }
+
+    $expectedTargetPrereq = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $expectedPrereqName))
+    if (-not (Test-Path -LiteralPath $expectedTargetPrereq -PathType Leaf)) {
+        throw "Candidate prerequisite $expectedPrereqName missing after copy: $expectedTargetPrereq"
+    }
+    if ($expectedPrereqHash) {
+        $targetPrereqHash = (Get-FileHash -LiteralPath $expectedTargetPrereq -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($targetPrereqHash -ne $expectedPrereqHash) {
+            throw "Candidate prerequisite SHA-256 mismatch against pinned manifest ($targetPrereqHash vs $expectedPrereqHash)"
+        }
+    }
+
     # Normalize versions to 0.0.13 in candidate-source only (preserving lock dependencies and version metadata)
     $cPkgPath = Join-Path $candidateSource 'package.json'
     $cPkg = Get-Content -LiteralPath $cPkgPath -Raw | ConvertFrom-Json
@@ -679,6 +745,9 @@ if ($Phase -eq 'prepare') {
                 "--phar=$candidatePhar" `
                 "--repo-root=$repo"
             if ($LASTEXITCODE -ne 0) { throw 'Candidate PHAR layout verification failed.' }
+
+            & npm.cmd run verify:desktop-runtime
+            if ($LASTEXITCODE -ne 0) { throw 'npm run verify:desktop-runtime failed.' }
 
             & npm.cmd run electron:build -- --x64
             if ($LASTEXITCODE -ne 0) { throw 'npm run electron:build failed.' }
