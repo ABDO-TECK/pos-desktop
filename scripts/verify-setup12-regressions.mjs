@@ -1607,6 +1607,9 @@ try {
       auth,
     });
 
+    const witnessedReceiptIds = new Set();
+    const witnessedNativeOwnerIds = new Set();
+
     async function executeTransition({
       stepName,
       channel,
@@ -1763,17 +1766,149 @@ try {
         fs.readdirSync(receiptsDir).filter((f) => f.endsWith('.json') && !f.endsWith('.plan.json')).map((f) => f.slice(0, -5))
       );
 
-      const updateJobsDir = path.join(storageDir, 'update-jobs');
-      fs.mkdirSync(updateJobsDir, { recursive: true });
-      const preExistingJobs = new Set(fs.readdirSync(updateJobsDir));
-
       await waitForApplySlot('transition_apply');
+
+      let beforeApplyResolved = false;
+      let capturedPrepareReceiptId = null;
+      let capturedPrepOwnerId = null;
+      let capturedSnapshotPath = null;
+      let capturedElectronPid = null;
+
+      const beforeApplyPromise = new Promise((resolve, reject) => {
+        transitionTransport.beforeApply(async (payload) => {
+          try {
+            const data = payload?.data ?? payload;
+            assert.equal(data.ok, true, `[${stepName}] Prepare response data.ok must be true`);
+            assert.equal(data.code, 200, `[${stepName}] Prepare response data.code must be 200`);
+            assert.equal(data.requires_desktop_handoff, true, `[${stepName}] Prepare response requires_desktop_handoff must be true`);
+            assert.equal(data.handoff_version, expectedTargetVersion, `[${stepName}] Prepare response handoff_version mismatch`);
+            assert.ok(
+              typeof data.receipt_id === 'string' && /^[0-9a-f]{64}$/.test(data.receipt_id),
+              `[${stepName}] Prepare receipt_id must be 64-char hex string`
+            );
+            assert.ok(!preExistingReceipts.has(data.receipt_id), `[${stepName}] Prepare receipt_id must not be pre-existing`);
+            assert.ok(!witnessedReceiptIds.has(data.receipt_id), `[${stepName}] Prepare receipt_id must be unique across transitions`);
+            assert.equal(data.job_id, undefined, `[${stepName}] Prepare response job_id must be undefined`);
+
+            capturedPrepareReceiptId = data.receipt_id;
+
+            const statePath = path.join(storageDir, 'update-state.json');
+            assert.ok(fs.existsSync(statePath), `[${stepName}] update-state.json must exist during prepare interception`);
+            assertNoSymlinks(statePath);
+            const prepState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+
+            assert.equal(prepState.transition_receipt, data.receipt_id, `[${stepName}] prepState.transition_receipt must match prepared receipt_id`);
+            assert.ok(typeof prepState.handoff_plan === 'string' && prepState.handoff_plan.length > 0, `[${stepName}] prepState.handoff_plan must be string`);
+            assert.ok(typeof prepState.owner_id === 'string' && prepState.owner_id.length > 0, `[${stepName}] prepState.owner_id must be present`);
+            capturedPrepOwnerId = prepState.owner_id;
+
+            const realStorage = fs.realpathSync(storageDir);
+
+            const planFilePath = path.resolve(prepState.handoff_plan);
+            assert.ok(fs.existsSync(planFilePath), `[${stepName}] Handoff plan file missing`);
+            assertNoSymlinks(planFilePath);
+            const realPlanFile = fs.realpathSync(planFilePath);
+            assert.ok(
+              realPlanFile.toLowerCase().startsWith((realStorage + path.sep).toLowerCase()),
+              `[${stepName}] Handoff plan must reside within storage directory`
+            );
+
+            const handoffPlan = JSON.parse(fs.readFileSync(realPlanFile, 'utf8'));
+            assert.equal(handoffPlan.version, expectedTargetVersion, `[${stepName}] handoffPlan.version mismatch`);
+            assert.equal(path.resolve(handoffPlan.root_dir).toLowerCase(), path.resolve(root).toLowerCase(), `[${stepName}] handoffPlan.root_dir mismatch`);
+            assert.equal(path.resolve(handoffPlan.storage_dir).toLowerCase(), path.resolve(storageDir).toLowerCase(), `[${stepName}] handoffPlan.storage_dir mismatch`);
+            assert.equal(handoffPlan.db_recovery, null, `[${stepName}] handoffPlan.db_recovery must be null`);
+
+            assert.ok(typeof handoffPlan.staging_dir === 'string' && handoffPlan.staging_dir.length > 0, `[${stepName}] handoffPlan.staging_dir must be string`);
+            assertNoSymlinks(handoffPlan.staging_dir);
+            const realStagingDir = fs.realpathSync(handoffPlan.staging_dir);
+            assert.ok(
+              realStagingDir.toLowerCase().startsWith((realStorage + path.sep).toLowerCase()),
+              `[${stepName}] Staging directory must reside within storage directory`
+            );
+            assert.equal(
+              path.dirname(realPlanFile).toLowerCase(),
+              realStagingDir.toLowerCase(),
+              `[${stepName}] Handoff plan directory must match staging directory`
+            );
+
+            assert.ok(typeof handoffPlan.snapshot_path === 'string' && handoffPlan.snapshot_path.length > 0, `[${stepName}] handoffPlan.snapshot_path must be string`);
+            assertNoSymlinks(handoffPlan.snapshot_path);
+            const backupsDir = path.join(storageDir, 'update-backups');
+            assert.ok(fs.existsSync(backupsDir), `[${stepName}] update-backups directory missing`);
+            assertNoSymlinks(backupsDir);
+            const realBackups = fs.realpathSync(backupsDir);
+            const realSnapshot = fs.realpathSync(handoffPlan.snapshot_path);
+            assert.ok(
+              realSnapshot.toLowerCase().startsWith((realBackups + path.sep).toLowerCase()),
+              `[${stepName}] Snapshot path must reside within update-backups directory`
+            );
+            capturedSnapshotPath = handoffPlan.snapshot_path;
+
+            const manifest = handoffPlan.manifest;
+            assert.ok(manifest && typeof manifest === 'object', `[${stepName}] handoffPlan.manifest missing`);
+            assert.equal(manifest.version, expectedTargetVersion, `[${stepName}] manifest.version mismatch`);
+            if (channel) {
+              assert.equal(manifest.channel, channel, `[${stepName}] manifest.channel mismatch`);
+            }
+            assert.ok(Array.isArray(manifest.migrations) && manifest.migrations.length === 0, `[${stepName}] manifest.migrations must be empty array`);
+
+            if (baseInv && baseInv.files) {
+              const expectedBaselineFiles = {};
+              for (const [k, v] of Object.entries(baseInv.files)) {
+                expectedBaselineFiles[k] = v.sha256;
+              }
+              assert.deepEqual(manifest.baseline_files, expectedBaselineFiles, `[${stepName}] manifest.baseline_files mismatch`);
+            }
+
+            if (carrierDesc && Array.isArray(carrierDesc.files)) {
+              const expectedChangedFiles = carrierDesc.files.filter((file) => {
+                const baseEntry = baseInv?.files?.[file.path];
+                return !baseEntry || baseEntry.sha256 !== file.sha256 || baseEntry.size !== file.size;
+              });
+              assert.deepEqual(manifest.files, expectedChangedFiles, `[${stepName}] manifest.files mismatch`);
+            }
+
+            if (carrierDesc) {
+              assert.deepEqual(manifest.deleted_files, carrierDesc.deleted_files || [], `[${stepName}] manifest.deleted_files mismatch`);
+            }
+
+            capturedElectronPid = await transitionLab.evaluateMain('process.pid');
+            assert.ok(Number.isInteger(capturedElectronPid) && capturedElectronPid > 0, `[${stepName}] Electron main PID must be positive integer`);
+
+            beforeApplyResolved = true;
+            resolve();
+          } catch (err) {
+            reject(err);
+            throw err;
+          }
+        });
+      });
+      beforeApplyPromise.catch(() => {});
+
       const transitionAt = Date.now();
       const transitionRunId = 'trans_' + transitionAt;
       await transitionLab.evaluate(`window.__pageRunId = ${JSON.stringify(transitionRunId)}`);
       await transitionLab.until('Boolean(document.querySelector("[data-testid=apply-channel-transition]"))', 'apply button visible');
       await transitionLab.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');
       await transitionLab.click('تأكيد');
+
+      let timeoutId;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          if (!beforeApplyResolved) {
+            reject(new Error(`[${stepName}] beforeApply hook was not called within 60s`));
+          }
+        }, 60000);
+      });
+
+      try {
+        await Promise.race([beforeApplyPromise, timeoutPromise]);
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+      assert.ok(capturedPrepareReceiptId, `[${stepName}] Prepare receipt ID must have been captured`);
+
       await versionIs(transitionLab, auth, expectedTargetVersion, transitionAt, transitionRunId);
 
       assert.ok(fs.existsSync(genuinePhp13), `Genuine portable PHP executable missing after transition: ${genuinePhp13}`);
@@ -1787,19 +1922,24 @@ try {
       let receipt;
       let boundReceiptId;
       do {
-        const state = JSON.parse(fs.readFileSync(path.join(storageDir, 'update-state.json'), 'utf8'));
-        if (state.transition_receipt && !preExistingReceipts.has(state.transition_receipt)) {
-          boundReceiptId = state.transition_receipt;
-          try {
-            receipt = JSON.parse(fs.readFileSync(path.join(receiptsDir, state.transition_receipt + '.json'), 'utf8'));
-          } catch {}
-          if (receipt?.state === 'completed') break;
-          if (receipt?.state === 'failed') throw new Error(`[${stepName}] Transition receipt failed: ${receipt?.reason_code || 'unknown'}`);
+        try {
+          const state = JSON.parse(fs.readFileSync(path.join(storageDir, 'update-state.json'), 'utf8'));
+          if (state.transition_receipt && !preExistingReceipts.has(state.transition_receipt)) {
+            boundReceiptId = state.transition_receipt;
+            try {
+              receipt = JSON.parse(fs.readFileSync(path.join(receiptsDir, state.transition_receipt + '.json'), 'utf8'));
+            } catch {}
+            if (receipt?.state === 'completed' && state.state === 'completed' && state.transition_verified === true) break;
+            if (receipt?.state === 'failed') throw new Error(`[${stepName}] Transition receipt failed: ${receipt?.reason_code || 'unknown'}`);
+          }
+        } catch (e) {
+          if (e.message?.startsWith(`[${stepName}] Transition receipt failed:`)) throw e;
         }
         await delay(250);
       } while (Date.now() < receiptDeadline);
 
       assert.ok(boundReceiptId && !preExistingReceipts.has(boundReceiptId), `[${stepName}] Transition must produce a new receipt ID`);
+      assert.equal(boundReceiptId, capturedPrepareReceiptId, `[${stepName}] Bound receipt ID must match captured prepare receipt ID`);
       assert.equal(receipt?.state, 'completed', `[${stepName}] Transition receipt never completed`);
       assert.equal(receipt.receipt_id, boundReceiptId, `[${stepName}] Receipt ID mismatch`);
       assert.equal(receipt.target_inventory_matches, true, `[${stepName}] Receipt must confirm target_inventory_matches`);
@@ -1810,14 +1950,31 @@ try {
 
       const planPath = path.join(receiptsDir, receipt.receipt_id + '.plan.json');
       assert.ok(fs.existsSync(planPath), `[${stepName}] Transition plan file must exist alongside receipt`);
+      assertNoSymlinks(planPath);
       const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
       assert.equal(plan.receipt_id, receipt.receipt_id, `[${stepName}] Plan receipt_id mismatch`);
       assert.equal(plan.target_version, expectedTargetVersion, `[${stepName}] Plan target_version mismatch`);
-      assert.equal(plan.source_inventory?.version, expectedFromVersion, `[${stepName}] Plan source_inventory.version mismatch`);
+      if (expectedFromVersion) {
+        assert.equal(plan.source_inventory?.version, expectedFromVersion, `[${stepName}] Plan source_inventory.version mismatch`);
+      }
       assert.equal(plan.target_inventory?.version, expectedTargetVersion, `[${stepName}] Plan target_inventory.version mismatch`);
       assert.ok(typeof plan.source_sha256 === 'string' && /^[0-9a-f]{64}$/.test(plan.source_sha256), `[${stepName}] Plan source_sha256 must be 64-char hex`);
       assert.ok(fs.existsSync(plan.source_phar), `[${stepName}] Plan source_phar must exist`);
       assert.equal(hasher(plan.source_phar), plan.source_sha256, `[${stepName}] Plan source_phar hash must match source_sha256`);
+      assert.equal(plan.snapshot_path, capturedSnapshotPath, `[${stepName}] Plan snapshot_path must match captured handoff plan snapshot_path`);
+      assert.equal(path.resolve(plan.root).toLowerCase(), path.resolve(root).toLowerCase(), `[${stepName}] Plan root mismatch`);
+      assert.equal(path.resolve(plan.storage).toLowerCase(), path.resolve(storageDir).toLowerCase(), `[${stepName}] Plan storage mismatch`);
+
+      const expectedPharSha = baseInv?.files?.['backend/backend.phar']?.sha256;
+      assert.ok(
+        typeof expectedPharSha === 'string' && /^[0-9a-f]{64}$/.test(expectedPharSha),
+        `[${stepName}] baseInv.files['backend/backend.phar'].sha256 must be valid 64-char hex`
+      );
+      assert.equal(
+        plan.source_sha256,
+        expectedPharSha,
+        `[${stepName}] Plan source_sha256 must match signed source inventory backend/backend.phar SHA`
+      );
       if (baseInv) {
         assert.deepEqual(plan.source_inventory?.files, baseInv.files, `[${stepName}] Plan source_inventory.files mismatch against baseInv.files`);
       }
@@ -1825,59 +1982,72 @@ try {
         assert.deepEqual(plan.target_inventory?.files, targetInv.files, `[${stepName}] Plan target_inventory.files mismatch against targetInv.files`);
       }
 
-      // Native update job terminal verification: find exact new job_<ID>.json matching receipt_id, operation_id, and job_id
-      const jobDeadline = Date.now() + 30000;
-      let boundJob = null;
-      let boundJobId = null;
+      const terminalStatePath = path.join(storageDir, 'update-state.json');
+      assert.ok(fs.existsSync(terminalStatePath), `[${stepName}] Terminal update-state.json must exist`);
+      assertNoSymlinks(terminalStatePath);
+      const terminalState = JSON.parse(fs.readFileSync(terminalStatePath, 'utf8'));
 
-      do {
-        if (fs.existsSync(updateJobsDir)) {
-          for (const jf of fs.readdirSync(updateJobsDir)) {
-            if (preExistingJobs.has(jf)) continue;
-            const match = jf.match(/^job_(\d+)\.json$/);
-            if (!match) continue;
-            try {
-              const jobData = JSON.parse(fs.readFileSync(path.join(updateJobsDir, jf), 'utf8'));
-              const rcId = jobData.result?.receipt_id ?? jobData.result?.data?.receipt_id;
-              if (rcId === boundReceiptId) {
-                boundJob = jobData;
-                boundJobId = match[1];
-                if (boundJob.status === 'completed') break;
-              }
-            } catch {}
-          }
+      assert.equal(terminalState.state, 'completed', `[${stepName}] Terminal state must be completed`);
+      assert.equal(terminalState.operation, 'channel_transition', `[${stepName}] Terminal operation must be channel_transition`);
+      assert.equal(terminalState.transition_verified, true, `[${stepName}] Terminal transition_verified must be true`);
+      assert.equal(terminalState.transition_receipt, capturedPrepareReceiptId, `[${stepName}] Terminal transition_receipt must match captured prepare receipt ID`);
+      assert.equal(terminalState.phase, 'completed', `[${stepName}] Terminal phase must be completed`);
+      assert.equal(terminalState.target_version, expectedTargetVersion, `[${stepName}] Terminal target_version mismatch`);
+      assert.equal(terminalState.to_version, expectedTargetVersion, `[${stepName}] Terminal to_version mismatch`);
+      assert.equal(terminalState.backup_snapshot, capturedSnapshotPath, `[${stepName}] Terminal backup_snapshot mismatch`);
+
+      assert.ok(!terminalState.error, `[${stepName}] Terminal state must not have error`);
+      assert.ok(!terminalState.primary_error, `[${stepName}] Terminal state must not have primary_error`);
+      if (terminalState.secondary_errors !== undefined && terminalState.secondary_errors !== null) {
+        if (Array.isArray(terminalState.secondary_errors)) {
+          assert.equal(terminalState.secondary_errors.length, 0, `[${stepName}] Terminal secondary_errors array must be empty`);
+        } else if (typeof terminalState.secondary_errors === 'object') {
+          assert.equal(Object.keys(terminalState.secondary_errors).length, 0, `[${stepName}] Terminal secondary_errors object must be empty`);
+        } else {
+          assert.fail(`[${stepName}] Terminal secondary_errors must be empty or absent`);
         }
-        if (boundJob && boundJob.status === 'completed') break;
-        await delay(250);
-      } while (Date.now() < jobDeadline);
+      }
+      assert.equal(terminalState.requires_recovery, false, `[${stepName}] Terminal state requires_recovery must be false`);
+      assert.ok(!terminalState.recovery_required, `[${stepName}] Terminal state must not have recovery_required`);
+      assert.ok(!terminalState.recovery_in_progress, `[${stepName}] Terminal state must not have recovery_in_progress`);
+      assert.ok(!terminalState.recovery_attempted, `[${stepName}] Terminal state must not have recovery_attempted`);
+      assert.ok(!terminalState.recovery_failed, `[${stepName}] Terminal state must not have recovery_failed`);
+      assert.ok(!terminalState.rollback, `[${stepName}] Terminal state must not have rollback`);
+      assert.ok(!terminalState.rolled_back, `[${stepName}] Terminal state must not have rolled_back`);
+      assert.ok(!terminalState.rollback_in_progress, `[${stepName}] Terminal state must not have rollback_in_progress`);
+      assert.ok(!terminalState.rollback_attempted, `[${stepName}] Terminal state must not have rollback_attempted`);
+      assert.ok(!terminalState.rollback_failed, `[${stepName}] Terminal state must not have rollback_failed`);
+      assert.ok(!terminalState.db_restore_error, `[${stepName}] Terminal state must not have db_restore_error`);
+      assert.ok(!terminalState.db_restored_from, `[${stepName}] Terminal state must not have db_restored_from`);
+      assert.ok(!terminalState.failed, `[${stepName}] Terminal state must not have failed`);
+      assert.ok(!terminalState.reason_code, `[${stepName}] Terminal state must not have reason_code`);
 
-      assert.ok(boundJob, `[${stepName}] Exact new update job for receipt ${boundReceiptId} must exist`);
-      assert.equal(String(boundJob.job_id), String(boundJobId), `[${stepName}] Job job_id must match filename ID`);
-      assert.ok(typeof boundJob.operation_id === 'string' && boundJob.operation_id.length > 0, `[${stepName}] Job operation_id must be present`);
+      assert.ok(typeof terminalState.owner_id === 'string' && terminalState.owner_id.length > 0, `[${stepName}] Terminal owner_id must be non-empty string`);
+      const ownerMatch = terminalState.owner_id.match(/^(\d+)-(\d+)-([0-9a-f]+)$/);
+      assert.ok(ownerMatch, `[${stepName}] Terminal owner_id must match Electron PID-timestamp-random pattern`);
 
-      const currentUpdateState = JSON.parse(fs.readFileSync(path.join(storageDir, 'update-state.json'), 'utf8'));
-      assert.equal(currentUpdateState.operation_id, boundJob.operation_id, `[${stepName}] update-state.operation_id must match boundJob.operation_id`);
-      assert.equal(currentUpdateState.transition_receipt, boundReceiptId, `[${stepName}] update-state.transition_receipt must match boundReceiptId`);
+      const ownerPid = Number(ownerMatch[1]);
+      const ownerTs = Number(ownerMatch[2]);
+      assert.ok(Number.isSafeInteger(ownerPid) && ownerPid > 0, `[${stepName}] ownerPid must be a positive safe integer`);
+      assert.equal(ownerPid, capturedElectronPid, `[${stepName}] Terminal owner_id PID must match captured Electron main PID`);
+      assert.ok(Number.isSafeInteger(ownerTs), `[${stepName}] Terminal owner_id timestamp must be a safe integer`);
+      assert.ok(ownerTs >= transitionAt, `[${stepName}] Terminal owner_id timestamp must not be stale (>= transitionAt)`);
+      assert.ok(ownerTs <= Date.now(), `[${stepName}] Terminal owner_id timestamp must not be in the future (<= Date.now())`);
+      assert.notEqual(terminalState.owner_id, capturedPrepOwnerId, `[${stepName}] Terminal owner_id must be distinct from PHP preparer owner_id`);
+      assert.ok(!witnessedNativeOwnerIds.has(terminalState.owner_id), `[${stepName}] Terminal owner_id must be unique across all transitions`);
 
-      assert.equal(boundJob.status, 'completed', `[${stepName}] Job status must be completed`);
-      assert.equal(boundJob.result?.ok, true, `[${stepName}] Job result.ok must be true`);
-      assert.equal(boundJob.result?.desktop_handoff_completed, true, `[${stepName}] Job result.desktop_handoff_completed must be true`);
-      assert.equal(boundJob.result?.requires_desktop_handoff, false, `[${stepName}] Job result.requires_desktop_handoff must be false`);
+      witnessedReceiptIds.add(capturedPrepareReceiptId);
+      witnessedNativeOwnerIds.add(terminalState.owner_id);
 
       await transitionLab.system();
       await transitionLab.until(
-        `sessionStorage.getItem('pos.active_update_job_id') === null && sessionStorage.getItem('pos.update_handoff_' + ${JSON.stringify(boundJobId)}) === 'done' && Boolean(document.querySelector("a[href='/settings']"))`,
-        'UI settlement, active_update_job_id cleared, and handoff done in sessionStorage'
+        `document.querySelector('[data-testid="channel-transition"]')?.getAttribute('aria-busy') === 'false'`,
+        'channel panel not busy after settlement'
       );
       assert.equal(
-        await transitionLab.evaluate(`sessionStorage.getItem('pos.update_handoff_' + ${JSON.stringify(boundJobId)})`),
-        'done',
-        `[${stepName}] pos.update_handoff_${boundJobId} must be 'done' in sessionStorage`
-      );
-      assert.equal(
-        await transitionLab.evaluate(`sessionStorage.getItem('pos.active_update_job_id')`),
-        null,
-        `[${stepName}] pos.active_update_job_id must be null after settlement`
+        await transitionLab.evaluate(`document.querySelector('[data-testid="channel-transition"]')?.getAttribute('aria-busy')`),
+        'false',
+        `[${stepName}] channel-transition panel aria-busy must be false after settlement`
       );
 
       verifyInventoryFiles(targetInv, baseInv);
@@ -1963,6 +2133,9 @@ try {
       targetInv: candidate13DeltaInv,
       baseInv: beta12Inv,
     });
+
+    assert.equal(witnessedReceiptIds.size, 4, 'All 4 transitions must have produced unique receipt IDs');
+    assert.equal(witnessedNativeOwnerIds.size, 4, 'All 4 transitions must have used distinct native lease owner IDs');
 
     results.verifications.repeated_channel_roundtrip_verified = true;
     results.verifications.indexeddb_offline_preserved = true;
