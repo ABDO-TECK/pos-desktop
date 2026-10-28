@@ -178,9 +178,6 @@ class BackupService implements BackupServiceInterface {
         // إزالة BOM
         $content = preg_replace('/^\xEF\xBB\xBF/', '', $content);
 
-        // تنظيف UNSIGNED لمنع خطأ Foreign Key errno 150
-        $content = preg_replace('/\b((?:INT|BIGINT|TINYINT|SMALLINT|MEDIUMINT)(?:\s*\([\d]+\))?)\s+UNSIGNED\b/i', '$1', $content);
-
         if (!preg_match('/\b(DROP\s+TABLE|CREATE\s+TABLE|INSERT\s+INTO)\b/is', $content)) {
             return ['ok' => false, 'error' => 'محتوى الملف لا يبدو ملف SQL صالحاً لقاعدة البيانات', 'code' => 400];
         }

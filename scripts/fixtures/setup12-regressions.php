@@ -15,12 +15,14 @@ declare(strict_types=1);
  *  - seed-db: Seeds sentinel customer and setting records for SQL integrity and restore testing.
  *  - inspect-db: Inspects schema, ledger, business records, and admin credentials.
  *  - mutate-db: Modifies sentinel business row to test restore reversion.
+ *  - verify-restore-sql-preservation: Verifies byte-level SQL preservation in BackupService::validateUploadedSqlFile.
  */
 
 require_once __DIR__ . '/../../backend/vendor/autoload.php';
 require_once __DIR__ . '/../build-channel-transition.php';
 require_once __DIR__ . '/../deployment-inventory.php';
 
+use App\Services\BackupService;
 use App\Services\ManifestSignatureService;
 use App\Services\UpdateChannelPolicy;
 use App\Services\UpdateDataCompatibilityService;
@@ -1428,6 +1430,186 @@ final class Setup12RegressionsHelper
             }
         }
     }
+
+    public function verifyRestoreSqlPreservation(?string $labDir = null): array
+    {
+        $targetDir = ($labDir !== null && $labDir !== '')
+            ? $this->assertSafeRunnerTempPath($labDir, true)
+            : $this->runnerTemp;
+        $workDir = $targetDir . '/sql-preservation-' . bin2hex(random_bytes(6));
+        if (file_exists($workDir) || is_dir($workDir)) {
+            throw new RuntimeException('Temporary fixture dir already exists');
+        }
+        if (!mkdir($workDir, 0700, false) || !is_dir($workDir)) {
+            throw new RuntimeException('Failed to create temporary fixture dir');
+        }
+        $workDir = $this->assertSafeRunnerTempPath($workDir, true);
+
+        $backupService = new BackupService();
+        $caseCounts = 0;
+        $unsignedDdlPreserved = false;
+        $literalsCommentsPreserved = false;
+        $bomRemovedCleanly = false;
+        $dangerousCommandsRejected = false;
+        $benignLiteralsAccepted = false;
+
+        try {
+            // Case 1: Exact unsigned DDL (integer sized variants, case, signed + UNSIGNED FK)
+            $ddlSql = "-- Schema with unsigned variants and foreign key\n"
+                . "CREATE TABLE `pos_parent` (\n"
+                . "  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+                . "  PRIMARY KEY (`id`)\n"
+                . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                . "CREATE TABLE `pos_types` (\n"
+                . "  `tiny_val` TINYINT UNSIGNED NOT NULL,\n"
+                . "  `small_val` SMALLINT UNSIGNED NOT NULL,\n"
+                . "  `med_val` MEDIUMINT UNSIGNED NOT NULL,\n"
+                . "  `int_val` INT UNSIGNED NOT NULL,\n"
+                . "  `big_val` BIGINT UNSIGNED NOT NULL,\n"
+                . "  `int_sized` INT(10) UNSIGNED NOT NULL,\n"
+                . "  `case_tiny` tinyint unsigned NOT NULL,\n"
+                . "  `case_big` bigint(20) unsigned NOT NULL,\n"
+                . "  `signed_col` INT NOT NULL,\n"
+                . "  `parent_fk` INT UNSIGNED NOT NULL,\n"
+                . "  CONSTRAINT `fk_parent` FOREIGN KEY (`parent_fk`) REFERENCES `pos_parent` (`id`)\n"
+                . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                . "INSERT INTO `pos_parent` (`id`) VALUES (1);\n";
+
+            $ddlFile = $workDir . '/case1_ddl.sql';
+            file_put_contents($ddlFile, $ddlSql);
+            $resDdl = $backupService->validateUploadedSqlFile([
+                'name' => 'case1_ddl.sql',
+                'tmp_name' => $ddlFile,
+                'size' => filesize($ddlFile),
+                'error' => UPLOAD_ERR_OK,
+            ]);
+            if (($resDdl['ok'] ?? false) !== true || ($resDdl['content'] ?? '') !== $ddlSql) {
+                throw new RuntimeException('Unsigned DDL was not preserved byte-for-byte.');
+            }
+            $unsignedDdlPreserved = true;
+            $caseCounts++;
+
+            // Case 2: Unsigned large max numeric string + literal containing 'INT UNSIGNED' / comments
+            $litSql = "-- Data rows with literals and comments\n"
+                . "CREATE TABLE `pos_notes` (\n"
+                . "  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+                . "  `num_str` VARCHAR(64) NOT NULL,\n"
+                . "  `note` TEXT NOT NULL,\n"
+                . "  PRIMARY KEY (`id`)\n"
+                . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                . "-- Line comment containing INT UNSIGNED reference\n"
+                . "/* Block comment containing BIGINT UNSIGNED and TINYINT UNSIGNED */\n"
+                . "INSERT INTO `pos_notes` (`num_str`, `note`) VALUES\n"
+                . "  ('18446744073709551615', 'Notice: INT UNSIGNED field must retain exact text'),\n"
+                . "  ('4294967295', 'Second notice: MEDIUMINT UNSIGNED and SMALLINT UNSIGNED in literal');\n";
+
+            $litFile = $workDir . '/case2_literals.sql';
+            file_put_contents($litFile, $litSql);
+            $resLit = $backupService->validateUploadedSqlFile([
+                'name' => 'case2_literals.sql',
+                'tmp_name' => $litFile,
+                'size' => filesize($litFile),
+                'error' => UPLOAD_ERR_OK,
+            ]);
+            if (($resLit['ok'] ?? false) !== true || ($resLit['content'] ?? '') !== $litSql) {
+                throw new RuntimeException('Literals and comments containing INT UNSIGNED were modified.');
+            }
+            $literalsCommentsPreserved = true;
+            $caseCounts++;
+
+            // Case 3: BOM expected only removal
+            $bomSql = "\xEF\xBB\xBF" . $ddlSql;
+            $bomFile = $workDir . '/case3_bom.sql';
+            file_put_contents($bomFile, $bomSql);
+            $resBom = $backupService->validateUploadedSqlFile([
+                'name' => 'case3_bom.sql',
+                'tmp_name' => $bomFile,
+                'size' => filesize($bomFile),
+                'error' => UPLOAD_ERR_OK,
+            ]);
+            if (($resBom['ok'] ?? false) !== true || ($resBom['content'] ?? '') !== $ddlSql) {
+                throw new RuntimeException('BOM removal failed to preserve exact remainder.');
+            }
+            $bomRemovedCleanly = true;
+            $caseCounts++;
+
+            // Case 4: Existing dangerous commands still rejected
+            $dangerousList = [
+                "CREATE TABLE `t_drop` (`x` INT);\nDROP DATABASE `production`;\n",
+                "CREATE TABLE `t_grant` (`x` INT);\nGRANT ALL ON *.* TO 'attacker'@'%';\n",
+                "CREATE TABLE `t_out` (`x` INT);\nSELECT * INTO OUTFILE '/tmp/dump' FROM `t_out`;\n",
+                "CREATE TABLE `t_load` (`x` INT);\nLOAD DATA INFILE '/etc/passwd' INTO TABLE `t_load`;\n",
+                "CREATE TABLE `t_shut` (`x` INT);\nSHUTDOWN;\n",
+            ];
+            $allDangerousRejected = true;
+            foreach ($dangerousList as $idx => $badSql) {
+                $badFile = $workDir . "/case4_bad_{$idx}.sql";
+                file_put_contents($badFile, $badSql);
+                $resBad = $backupService->validateUploadedSqlFile([
+                    'name' => "case4_bad_{$idx}.sql",
+                    'tmp_name' => $badFile,
+                    'size' => filesize($badFile),
+                    'error' => UPLOAD_ERR_OK,
+                ]);
+                if (($resBad['ok'] ?? true) !== false) {
+                    $allDangerousRejected = false;
+                    break;
+                }
+                $caseCounts++;
+            }
+            if (!$allDangerousRejected) {
+                throw new RuntimeException('Dangerous SQL commands were not rejected.');
+            }
+            $dangerousCommandsRejected = true;
+
+            // Case 5: Valid benign literal not false positive
+            $benignSql = "CREATE TABLE `feeds` (\n"
+                . "  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+                . "  `source` VARCHAR(100) NOT NULL,\n"
+                . "  `log_entry` TEXT NOT NULL,\n"
+                . "  PRIMARY KEY (`id`)\n"
+                . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                . "INSERT INTO `feeds` (`source`, `log_entry`) VALUES\n"
+                . "  ('pos-source', 'User attempted DROP DATABASE test inside string literal'),\n"
+                . "  ('network', 'Action GRANT PERMISSIONS logged safely in audit trail');\n";
+
+            $benignFile = $workDir . '/case5_benign.sql';
+            file_put_contents($benignFile, $benignSql);
+            $resBenign = $backupService->validateUploadedSqlFile([
+                'name' => 'case5_benign.sql',
+                'tmp_name' => $benignFile,
+                'size' => filesize($benignFile),
+                'error' => UPLOAD_ERR_OK,
+            ]);
+            if (($resBenign['ok'] ?? false) !== true || ($resBenign['content'] ?? '') !== $benignSql) {
+                throw new RuntimeException('Benign SQL literals triggered false positive.');
+            }
+            $benignLiteralsAccepted = true;
+            $caseCounts++;
+        } finally {
+            if (is_dir($workDir)) {
+                $files = glob($workDir . '/*');
+                if ($files !== false) {
+                    foreach ($files as $f) {
+                        if (is_file($f)) {
+                            @unlink($f);
+                        }
+                    }
+                }
+                @rmdir($workDir);
+            }
+        }
+
+        return [
+            'ok' => true,
+            'cases_tested' => $caseCounts,
+            'unsigned_ddl_preserved' => $unsignedDdlPreserved,
+            'literals_comments_preserved' => $literalsCommentsPreserved,
+            'bom_removed_cleanly' => $bomRemovedCleanly,
+            'dangerous_commands_rejected' => $dangerousCommandsRejected,
+            'benign_literals_accepted' => $benignLiteralsAccepted,
+        ];
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1438,6 +1620,7 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
     $options = getopt('', [
         'action:',
         'lab-dir:',
+        'lab:',
         'evidence-dir:',
         'assets-dir:',
         'output-root:',
@@ -1573,6 +1756,13 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                     (string)($options['config-dir'] ?? ''),
                     (string)($options['sentinel'] ?? 'codex_setup12_regression_sentinel'),
                     (string)($options['mutated-name'] ?? 'codex_mutated_row_sentinel')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'verify-restore-sql-preservation':
+                $result = $helper->verifyRestoreSqlPreservation(
+                    (string)($options['lab-dir'] ?? $options['lab'] ?? '')
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

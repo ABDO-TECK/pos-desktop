@@ -636,6 +636,18 @@ async function pendingSale(ui, action) {
   })()`);
 }
 
+async function seedOfflinePendingSale(ui) {
+  let stored = false;
+  for (let i = 0; i < 20 && !stored; i++) {
+    stored = await pendingSale(ui, 'put');
+    if (!stored) await delay(500);
+  }
+  assert.equal(stored, true, 'Offline fixture store unavailable');
+  const record = await pendingSale(ui, 'get');
+  assert.ok(record?.localId === 'codex-transition-pending', 'Seeded offline sale fixture record missing');
+  return record;
+}
+
 function createRegressionLab(appDir, evidenceDir, extraEnv = {}) {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Desktop lab requires ephemeral CI');
   const temporary = fs.realpathSync(process.env.RUNNER_TEMP).toLowerCase() + path.sep;
@@ -1036,6 +1048,16 @@ async function versionIs(ui, auth, expectedVersion, startedAt = 0, expectedRunId
 if (phase === 'contract') {
   console.log('=== Executing Contract Phase on Published Setup 12 ===');
   assertOwnedRun();
+  console.log('[Contract] Verifying restore SQL byte preservation logic in BackupService...');
+  const preservationRes = runPhpFixture('verify-restore-sql-preservation', { 'lab-dir': lab });
+  assert.equal(preservationRes.ok, true, 'verify-restore-sql-preservation failed');
+  assert.equal(preservationRes.unsigned_ddl_preserved, true, 'unsigned_ddl_preserved must be true');
+  assert.equal(preservationRes.literals_comments_preserved, true, 'literals_comments_preserved must be true');
+  assert.equal(preservationRes.bom_removed_cleanly, true, 'bom_removed_cleanly must be true');
+  assert.equal(preservationRes.dangerous_commands_rejected, true, 'dangerous_commands_rejected must be true');
+  assert.equal(preservationRes.benign_literals_accepted, true, 'benign_literals_accepted must be true');
+  console.log(`[Contract] Verified restore SQL preservation logic successfully (${preservationRes.cases_tested} cases tested).`);
+
   const ui = createRegressionLab(application, evidence);
   try {
     await ui.start({ enableMainInspector: false });
@@ -1112,6 +1134,7 @@ const schemaDiagnostics = {
   actual_matches_carrier: null,
   carrier_matches_contract: null,
   earliest_drift_stage: 'none',
+  candidate_restore_recovered_contract: null,
   stages: [],
 };
 
@@ -1178,6 +1201,8 @@ const results = {
 let offlineBefore = null;
 let dbAfterRestore = null;
 let dbAfterUpgrade = null;
+let dbPreTransition = null;
+let setup12BackupSha256 = null;
 
 try {
   // ── TEST 1: Reproduce Bug 1 on Published Setup 12 ──────────────────────────
@@ -1215,6 +1240,7 @@ try {
     assert.ok(setup12Sql.length > 50, 'Setup 12 backup too small');
     const setup12BackupPath = path.join(lab, 'setup12-backup-baseline.sql');
     fs.writeFileSync(setup12BackupPath, setup12Sql, 'utf8');
+    setup12BackupSha256 = hasher(setup12BackupPath);
 
     // Mutate sentinel to test Setup 12 restore attempt
     const mutateRes = runPhpFixture('mutate-db', {
@@ -1290,14 +1316,7 @@ try {
 
     // Seed actual actor-scoped review IndexedDB record AFTER baseline Setup 12 restore/reauth and BEFORE candidate 13 NSIS
     console.log('[Test 1 IndexedDB] Seeding actor-scoped offline sale fixture into IndexedDB pos_offline...');
-    let stored = false;
-    for (let i = 0; i < 20 && !stored; i++) {
-      stored = await pendingSale(reproLab, 'put');
-      if (!stored) await delay(500);
-    }
-    assert.equal(stored, true, 'Offline fixture store unavailable');
-    offlineBefore = await pendingSale(reproLab, 'get');
-    assert.ok(offlineBefore?.localId === 'codex-transition-pending', 'Seeded offline sale fixture record missing');
+    offlineBefore = await seedOfflinePendingSale(reproLab);
     console.log('[Test 1 IndexedDB] Seeded offline pending sale fixture successfully.');
 
     await reproLab.system();
@@ -1453,6 +1472,118 @@ try {
     };
     console.log('PASS [Test 2] Candidate 13 silent upgrade verified. Files, shell root, and database preserved.');
 
+    // ── TEST 2B: Candidate 13 Restore Recovery (Revert Test 1 Baseline Schema Drift) ────
+    console.log('\n[Test 2B] Executing Candidate 13 native restore recovery using original Setup 12 baseline SQL backup...');
+    const recoveryBackupPath = path.join(lab, 'setup12-backup-baseline.sql');
+    assert.ok(fs.existsSync(recoveryBackupPath), 'Baseline Setup 12 SQL backup missing for Test 2B');
+    assert.equal(hasher(recoveryBackupPath), setup12BackupSha256, 'Setup 12 baseline backup SQL file must be unmodified');
+    const recoverySql = fs.readFileSync(recoveryBackupPath, 'utf8');
+    assert.ok(recoverySql.length > 50, 'Baseline Setup 12 backup SQL file empty');
+
+    await transitionLab.mockOpenDialog(recoveryBackupPath);
+
+    const safetyDir2B = path.join(storageDir, 'update-backups', 'migration-safety');
+    fs.mkdirSync(safetyDir2B, { recursive: true });
+    const preExistingSafety2B = new Set(fs.readdirSync(safetyDir2B));
+
+    const pageRunIdBefore2B = 'recovery_' + Date.now();
+    await transitionLab.evaluate(`window.__pageRunId = ${JSON.stringify(pageRunIdBefore2B)}`);
+
+    // Immediate settled wrapper catching all transport rejections without unhandled rejection
+    let restore2BContextLost = false;
+    let restore2BSettled = null;
+    const restore2BPromise = transitionLab.evaluate('window.electronAPI.backup.restore()')
+      .then((res) => { restore2BSettled = res; return res; })
+      .catch((err) => {
+        restore2BContextLost = /destroyed|cannot find context|navigated|target closed|session closed|protocol error/i.test(err?.message || '');
+        restore2BSettled = { context_lost: restore2BContextLost, error: true };
+        return restore2BSettled;
+      });
+
+    // Observe creation of safety snapshot pair (.sql and .sql.json)
+    const snapshot2B = await observeMigrationSafetySnapshot(safetyDir2B, preExistingSafety2B);
+
+    // Successful restore reloads window and clears session
+    await transitionLab.until('Boolean(document.querySelector("input[type=email]"))', 'login form after recovery restore reload', 90000);
+    await restore2BPromise;
+    console.log('[Test 2B] Recovery restore promise settled; context lost:', restore2BContextLost);
+
+    if (restore2BSettled?.context_lost) {
+      assert.ok(restore2BContextLost, 'Context loss must match expected navigation pattern');
+    } else {
+      assert.equal(restore2BSettled?.success, true, 'Restore settlement must return success: true');
+    }
+
+    // Document reload proof: window.__pageRunId set before restore must not equal pageRunIdBefore2B
+    const pageRunIdAfter2B = await transitionLab.evaluate('window.__pageRunId');
+    assert.notEqual(pageRunIdAfter2B, pageRunIdBefore2B, 'window.__pageRunId must change post-reload to prove document reload');
+
+    // Verify restore cleared actor offline IndexedDB rows via read-only lookup on the unauthenticated login page
+    const offlineAfter2B = await pendingSale(transitionLab, 'get');
+    assert.ok(offlineAfter2B === undefined || offlineAfter2B === null, 'Restore must clear actor offline IndexedDB pending sales rows');
+
+    // Verify safety snapshots were deleted after complete success
+    assert.equal(fs.existsSync(snapshot2B.sqlPath), false, 'Safety snapshot .sql must be deleted after successful recovery restore');
+    assert.equal(fs.existsSync(snapshot2B.jsonPath), false, 'Safety snapshot .sql.json must be deleted after successful recovery restore');
+
+    // Preexisting snapshots preserved in memory
+    for (const f of preExistingSafety2B) {
+      assert.ok(fs.existsSync(path.join(safetyDir2B, f)), 'Preexisting safety snapshot must be preserved');
+    }
+
+    // Inspect current database after recovery restore
+    dbPreTransition = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+    });
+    assert.equal(dbPreTransition.ok, true, 'inspect-db after candidate 13 recovery failed');
+
+    // Safe diagnostic stage comparison: baseline_to_candidate_restore
+    const candidateRestoreDiff = compareDbStages('baseline_to_candidate_restore', baselineDb, dbPreTransition);
+    schemaDiagnostics.stages.push(candidateRestoreDiff);
+    schemaDiagnostics.candidate_restore_recovered_contract = Boolean(
+      dbPreTransition.schema_sha256 === contract.schema_sha256 &&
+      dbPreTransition.ledger_sha256 === contract.ledger_sha256
+    );
+    schemaDiagnostics.actual_matches_contract = schemaDiagnostics.candidate_restore_recovered_contract;
+    persistSchemaDiagnostics();
+    console.log(
+      `[Schema Drift Diagnostic] Stage: baseline_to_candidate_restore | schema_equal: ${candidateRestoreDiff.schema_equal} | ledger_equal: ${candidateRestoreDiff.ledger_equal} | raw_schema_equal: ${candidateRestoreDiff.raw_schema_equal} | candidate_restore_recovered_contract: ${schemaDiagnostics.candidate_restore_recovered_contract} | earliest_drift: ${schemaDiagnostics.earliest_drift_stage}`
+    );
+
+    assert.equal(dbPreTransition.customer?.name, SENTINEL, 'Original sentinel customer row must be restored');
+    assert.equal(dbPreTransition.setting?.value, baselineDb.setting?.value, 'Original sentinel setting must be restored');
+    assert.equal(dbPreTransition.admin_digest, baselineDb.admin_digest, 'Original admin credentials must be restored');
+    assert.deepEqual(dbPreTransition.ledger_rows, baselineDb.ledger_rows, 'Full raw schema_versions rows altered after recovery restore');
+    assert.equal(dbPreTransition.schema_sha256, contract.schema_sha256, 'Restored schema SHA256 must match original signed contract');
+    assert.equal(dbPreTransition.ledger_sha256, contract.ledger_sha256, 'Restored ledger SHA256 must match original signed contract');
+    assert.equal(dbPreTransition.schema_sha256, baselineDb.schema_sha256, 'Restored canonical schema SHA256 must match original baseline');
+    assert.equal(dbPreTransition.raw_schema_sha256, baselineDb.raw_schema_sha256, 'Restored RAW schema SHA256 must match original baseline');
+
+    // Verify system protected state preserved across recovery restore
+    const protectedAfterRecovery = await getSystemProtectedState(transitionLab);
+    assertProtectedStatePreserved(baselineProtected, protectedAfterRecovery, 'Candidate 13 Recovery Restore');
+
+    // Require actual new 13 recovery contract match BEFORE Test 3
+    assert.equal(schemaDiagnostics.candidate_restore_recovered_contract, true, 'Candidate 13 restore recovery must match original contract before Test 3');
+    assert.equal(schemaDiagnostics.actual_matches_contract, true, 'Current database must match contract before Test 3');
+
+    // Fresh login after restore reload
+    await transitionLab.login(auth.email, auth.password);
+    await transitionLab.until("Boolean(document.querySelector(\"a[href='/settings']\"))", 'authenticated navigation after recovery', 60000);
+
+    // Re-seed SAME actor-scoped syncStatus:'review' offline fixture after native 13 recovery for TRANSITIONS
+    console.log('[Test 2B IndexedDB] Re-seeding actor-scoped offline sale fixture into IndexedDB pos_offline...');
+    offlineBefore = await seedOfflinePendingSale(transitionLab);
+    console.log('[Test 2B IndexedDB] Re-seeded offline pending sale fixture successfully.');
+
+    results.details.candidate13_restore_recovery = {
+      outcome: 'SUCCESS',
+      schema_matches_contract: true,
+      raw_schema_matches_baseline: true,
+    };
+    console.log('PASS [Test 2B] Candidate 13 restore recovery verified. Schema restored to baseline and contract.');
+
     // ── TEST 3: Bidirectional Channel Transition on Candidate 13 ───────────────
     console.log('\n[Test 3] Testing Bidirectional Channel Transitions on Candidate 13 (Bug 1 Fix)...');
     await transitionLab.system();
@@ -1501,10 +1632,10 @@ try {
             sampleDesc.data_compatibility.schema_sha256 === contract.schema_sha256 &&
             sampleDesc.data_compatibility.ledger_sha256 === contract.ledger_sha256
           );
-          if (dbAfterUpgrade) {
+          if (dbPreTransition) {
             schemaDiagnostics.actual_matches_carrier = Boolean(
-              sampleDesc.data_compatibility.schema_sha256 === dbAfterUpgrade.schema_sha256 &&
-              sampleDesc.data_compatibility.ledger_sha256 === dbAfterUpgrade.ledger_sha256
+              sampleDesc.data_compatibility.schema_sha256 === dbPreTransition.schema_sha256 &&
+              sampleDesc.data_compatibility.ledger_sha256 === dbPreTransition.ledger_sha256
             );
           }
           if (!schemaDiagnostics.carrier_matches_contract && schemaDiagnostics.earliest_drift_stage === 'none') {
@@ -1758,6 +1889,8 @@ try {
       assert.equal(dbAfter.setting?.value, baselineDb.setting?.value, `[${stepName}] Setting lost`);
       assert.equal(dbAfter.admin_digest, baselineDb.admin_digest, `[${stepName}] Admin credentials altered`);
       assert.deepEqual(dbAfter.ledger_rows, baselineDb.ledger_rows, `[${stepName}] Schema versions rows altered`);
+      assert.equal(dbAfter.schema_sha256, baselineDb.schema_sha256, `[${stepName}] Schema altered`);
+      assert.equal(dbAfter.raw_schema_sha256, baselineDb.raw_schema_sha256, `[${stepName}] Raw schema altered`);
 
       assert.deepEqual(await pendingSale(transitionLab, 'get'), offlineBefore, `[${stepName}] Offline sale preserved`);
 
