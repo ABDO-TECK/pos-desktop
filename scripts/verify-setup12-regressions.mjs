@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { classifyVerifiedPublicStagedCa } from './protected-certificate-classification.mjs';
+import { attachTransitionTransport } from './channel-transition-ui-transport.mjs';
 
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -848,6 +849,7 @@ function createRegressionLab(appDir, evidenceDir, extraEnv = {}) {
     system,
     screenshot,
     callRenderer,
+    call: callRenderer,
     onEvent: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -1090,6 +1092,7 @@ try {
     POS_TRANSITION_FIXTURE: reproFixturePath,
     APP_DEPLOY_ROOT: root,
   });
+  let reproTransport = null;
 
   try {
     await reproLab.start({ enableMainInspector: true });
@@ -1158,6 +1161,19 @@ try {
       await reproLab.login(auth.email, auth.password);
     }
 
+    const genuinePhp12 = path.join(application, 'resources/portable/php/php.exe');
+    assert.ok(fs.existsSync(genuinePhp12), `Genuine portable PHP executable missing in Setup 12: ${genuinePhp12}`);
+    assert.ok(fs.existsSync(root), `Genuine unpacked root missing in Setup 12: ${root}`);
+
+    reproTransport = await attachTransitionTransport({
+      ui: reproLab,
+      application,
+      storage: storageDir,
+      evidence,
+      fixture: reproFixturePath,
+      auth,
+    });
+
     // Seed actual actor-scoped review IndexedDB record AFTER baseline Setup 12 restore/reauth and BEFORE candidate 13 NSIS
     console.log('[Test 1 IndexedDB] Seeding actor-scoped offline sale fixture into IndexedDB pos_offline...');
     let stored = false;
@@ -1212,6 +1228,10 @@ try {
     };
     console.log('PASS [Test 1] Bug 1 reproduced: Setup 12 correctly blocked with source_inventory_mismatch.');
   } finally {
+    if (reproTransport) {
+      await reproTransport.close().catch(() => {});
+      reproTransport = null;
+    }
     await reproLab.stop();
   }
 
@@ -1258,6 +1278,7 @@ try {
     POS_TRANSITION_FIXTURE: roundtripFixturePath,
     APP_DEPLOY_ROOT: root,
   });
+  let transitionTransport = null;
 
   try {
     await transitionLab.start({ enableMainInspector: true });
@@ -1301,6 +1322,25 @@ try {
     console.log('\n[Test 3] Testing Bidirectional Channel Transitions on Candidate 13 (Bug 1 Fix)...');
     await transitionLab.system();
 
+    const genuinePhp13 = path.join(application, 'resources/portable/php/php.exe');
+    assert.ok(fs.existsSync(genuinePhp13), `Genuine portable PHP executable missing in Candidate 13: ${genuinePhp13}`);
+    assert.ok(fs.existsSync(root), `Genuine unpacked root missing in Candidate 13: ${root}`);
+
+    const tracePath = path.join(evidence, 'provider-trace.jsonl');
+    const baselineTraceCount = fs.existsSync(tracePath)
+      ? fs.readFileSync(tracePath, 'utf8').trim().split('\n').filter(Boolean).length
+      : 0;
+    let v13TraceVerified = false;
+
+    transitionTransport = await attachTransitionTransport({
+      ui: transitionLab,
+      application,
+      storage: storageDir,
+      evidence,
+      fixture: roundtripFixturePath,
+      auth,
+    });
+
     async function executeTransition({
       stepName,
       channel,
@@ -1332,6 +1372,35 @@ try {
         return await res.json();
       })()`);
       console.log(`[${stepName}] Preview Status:`, previewData?.data?.status, 'Reason:', previewData?.data?.reason_code);
+      if (!v13TraceVerified && expectedFromVersion === '0.0.13') {
+        assert.ok(fs.existsSync(tracePath), `[${stepName}] Provider trace file missing: ${tracePath}`);
+        const traceLines = fs.readFileSync(tracePath, 'utf8').trim().split('\n').filter(Boolean);
+        const newTraceEntries = traceLines.slice(baselineTraceCount).map((l) => {
+          try { return JSON.parse(l); } catch { return null; }
+        }).filter(Boolean);
+
+        const expectedDesktopUrl = 'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/tags/v0.0.13';
+        const expectedUpdatesUrl = 'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/tags/v0.0.13';
+        let hasDesktop = false;
+        let hasUpdates = false;
+        for (const entry of newTraceEntries) {
+          const mUrl = entry?.metadata_url;
+          if (mUrl === expectedDesktopUrl) {
+            assert.ok(Number.isInteger(entry.pid) && entry.pid > 0, `[${stepName}] Matched pos-desktop trace entry PID must be positive integer`);
+            hasDesktop = true;
+          } else if (mUrl === expectedUpdatesUrl) {
+            assert.ok(Number.isInteger(entry.pid) && entry.pid > 0, `[${stepName}] Matched pos-desktop-updates trace entry PID must be positive integer`);
+            hasUpdates = true;
+          }
+        }
+
+        assert.ok(
+          hasDesktop && hasUpdates,
+          `[${stepName}] Both v0.0.13 canonical source URLs must be queried in provider trace (pos-desktop=${hasDesktop}, pos-desktop-updates=${hasUpdates})`
+        );
+        console.log(`[${stepName}] Verified canonical v0.0.13 source queries in provider trace (pos-desktop: ${hasDesktop}, pos-desktop-updates: ${hasUpdates}, new_traces: ${newTraceEntries.length}).`);
+        v13TraceVerified = true;
+      }
       assert.equal(previewData?.data?.status, 'ready', `[${stepName}] Transition preview must be ready`);
       if (expectedFromVersion) {
         assert.equal(previewData?.data?.installed?.version, expectedFromVersion, `[${stepName}] Installed version mismatch in preview`);
@@ -1407,6 +1476,13 @@ try {
       await transitionLab.evaluate('document.querySelector("[data-testid=apply-channel-transition]").click()');
       await transitionLab.click('تأكيد');
       await versionIs(transitionLab, auth, expectedTargetVersion, transitionAt, transitionRunId);
+
+      assert.ok(fs.existsSync(genuinePhp13), `Genuine portable PHP executable missing after transition: ${genuinePhp13}`);
+      assert.ok(fs.existsSync(root), `Genuine unpacked root missing after transition: ${root}`);
+      assert.ok(fs.existsSync(path.join(root, 'backend/backend.phar')), `Genuine backend PHAR missing after transition: ${path.join(root, 'backend/backend.phar')}`);
+
+      transitionTransport.resume();
+      await transitionTransport.reauth();
 
       const receiptDeadline = Date.now() + 30000;
       let receipt;
@@ -1590,6 +1666,12 @@ try {
     results.verifications.repeated_channel_roundtrip_verified = true;
     results.verifications.indexeddb_offline_preserved = true;
     console.log('PASS [Test 3] Both channel transition roundtrips verified.');
+
+    if (transitionTransport) {
+      console.log('Closing channel transition transport before Test 4 desktop SQL restore...');
+      await transitionTransport.close();
+      transitionTransport = null;
+    }
 
     // ── TEST 4: Bug 2 Verification - Desktop SQL Restore Integration ─────────
     console.log('\n[Test 4] Verifying Desktop SQL Restore on Candidate 13 (Bug 2 Fix)...');
@@ -1804,6 +1886,10 @@ try {
     };
     console.log('PASS [Test 4D] Desktop SQL restore error classification, reference propagation, and rollback verified.');
   } finally {
+    if (transitionTransport) {
+      await transitionTransport.close().catch(() => {});
+      transitionTransport = null;
+    }
     await transitionLab.stop();
   }
 
