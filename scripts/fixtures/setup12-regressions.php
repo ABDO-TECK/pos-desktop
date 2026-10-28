@@ -974,6 +974,146 @@ final class Setup12RegressionsHelper
         ];
     }
 
+    public function probeDb(string $configDir, string $sentinel, ?string $settingKey = null): array
+    {
+        $db = $this->connectDatabase($configDir);
+
+        // 1. Discover trusted repo migrations dynamically
+        $migrationsDir = realpath(__DIR__ . '/../../database/migrations');
+        if ($migrationsDir === false || !is_dir($migrationsDir)) {
+            throw new RuntimeException('Migrations directory missing');
+        }
+        $trustedRepoMigrations = [];
+        foreach (scandir($migrationsDir) ?: [] as $file) {
+            if (str_ends_with($file, '.sql') && preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $file)) {
+                $trustedRepoMigrations[] = $file;
+            }
+        }
+        sort($trustedRepoMigrations);
+        if (count($trustedRepoMigrations) !== 58) {
+            throw new RuntimeException('Expected 58 trusted repo migrations, found ' . count($trustedRepoMigrations));
+        }
+
+        // 2. Metadata VIEW existence, type, and driver errno
+        $driverErrno = null;
+        $metadataObjectExists = null;
+        $metadataObjectType = null;
+        $metadataQueryOk = null;
+
+        try {
+            $stmt = $db->prepare('SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
+            $stmt->execute(['product_catalog_trigger_metadata']);
+            $viewRow = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!empty($viewRow)) {
+                $metadataObjectExists = true;
+                $metadataObjectType = (string)$viewRow['TABLE_TYPE'];
+            } else {
+                $metadataObjectExists = false;
+                $metadataObjectType = null;
+            }
+        } catch (PDOException $pe) {
+            $metadataObjectExists = null;
+            $metadataObjectType = null;
+            $err = $pe->errorInfo[1] ?? null;
+            if (is_int($err) && $err > 0 && $err <= 99999) {
+                $driverErrno = $err;
+            }
+        } catch (Throwable) {
+            $metadataObjectExists = null;
+            $metadataObjectType = null;
+        }
+
+        try {
+            $q = $db->query('SELECT 1 FROM product_catalog_trigger_metadata LIMIT 1');
+            $metadataQueryOk = $q !== false;
+        } catch (PDOException $pe) {
+            $metadataQueryOk = false;
+            if ($driverErrno === null) {
+                $err = $pe->errorInfo[1] ?? null;
+                if (is_int($err) && $err > 0 && $err <= 99999) {
+                    $driverErrno = $err;
+                }
+            }
+        } catch (Throwable) {
+            $metadataQueryOk = false;
+        }
+
+        // 3. Ledger names and count from schema_versions
+        $ledgerCount = null;
+        $latestLedgerVersion = null;
+        $canonical58Match = null;
+        try {
+            $ledgerStmt = $db->query('SELECT version FROM schema_versions ORDER BY version');
+            if ($ledgerStmt !== false) {
+                $ledgerVersions = $ledgerStmt->fetchAll(PDO::FETCH_COLUMN);
+                $ledgerCount = count($ledgerVersions);
+                $rawLatest = !empty($ledgerVersions) ? (string)end($ledgerVersions) : null;
+                if ($rawLatest !== null && in_array($rawLatest, $trustedRepoMigrations, true)) {
+                    $latestLedgerVersion = $rawLatest;
+                }
+                $canonical58Match = ($ledgerCount === 58 && empty(array_diff($ledgerVersions, $trustedRepoMigrations)));
+            }
+        } catch (PDOException $pe) {
+            $ledgerCount = null;
+            $latestLedgerVersion = null;
+            $canonical58Match = null;
+            if ($driverErrno === null) {
+                $err = $pe->errorInfo[1] ?? null;
+                if (is_int($err) && $err > 0 && $err <= 99999) {
+                    $driverErrno = $err;
+                }
+            }
+        } catch (Throwable) {
+            $ledgerCount = null;
+            $latestLedgerVersion = null;
+            $canonical58Match = null;
+        }
+
+        // 4. Sentinel customer boolean
+        $sentinelCustomerPresent = null;
+        try {
+            $stmt = $db->prepare('SELECT 1 FROM customers WHERE name = ? LIMIT 1');
+            $stmt->execute([$sentinel]);
+            $sentinelCustomerPresent = (bool)$stmt->fetchColumn();
+        } catch (Throwable) {
+            $sentinelCustomerPresent = null;
+        }
+
+        // 5. Admin user boolean
+        $adminUserPresent = null;
+        try {
+            $stmt = $db->query("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1");
+            $adminUserPresent = $stmt !== false ? (bool)$stmt->fetchColumn() : null;
+        } catch (Throwable) {
+            $adminUserPresent = null;
+        }
+
+        // 6. Sentinel setting boolean
+        $sentinelSettingPresent = null;
+        try {
+            $resolvedSettingKey = $settingKey ?? ('sentinel_' . substr(md5($sentinel), 0, 10));
+            $stmt = $db->prepare('SELECT 1 FROM settings WHERE `key` = ? LIMIT 1');
+            $stmt->execute([$resolvedSettingKey]);
+            $sentinelSettingPresent = (bool)$stmt->fetchColumn();
+        } catch (Throwable) {
+            $sentinelSettingPresent = null;
+        }
+
+        return [
+            'ok' => true,
+            'metadata_object_exists' => $metadataObjectExists,
+            'metadata_object_type' => $metadataObjectType,
+            'metadata_query_ok' => $metadataQueryOk,
+            'driver_errno' => $driverErrno,
+            'ledger_count' => $ledgerCount,
+            'latest_ledger_version' => $latestLedgerVersion,
+            'canonical_58_match' => $canonical58Match,
+            'sentinel_customer_present' => $sentinelCustomerPresent,
+            'admin_user_present' => $adminUserPresent,
+            'sentinel_setting_present' => $sentinelSettingPresent,
+        ];
+    }
+
     public function inspectDb(string $configDir, string $sentinel, ?string $settingKey = null): array
     {
         $db = $this->connectDatabase($configDir);
@@ -2102,6 +2242,18 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                 $result = $helper->seedDb(
                     (string)($options['config-dir'] ?? ''),
                     (string)($options['sentinel'] ?? 'codex_setup12_regression_sentinel')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'probe-db':
+                $settingKey = isset($options['setting-key']) && $options['setting-key'] !== ''
+                    ? (string)$options['setting-key']
+                    : null;
+                $result = $helper->probeDb(
+                    (string)($options['config-dir'] ?? ''),
+                    (string)($options['sentinel'] ?? 'codex_setup12_regression_sentinel'),
+                    $settingKey
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

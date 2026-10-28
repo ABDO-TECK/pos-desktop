@@ -1222,6 +1222,8 @@ const ALLOWED_LEGACY_RESULTS = new Set([
   'in_progress',
 ]);
 
+const ALLOWED_RESTORE_CODES = new Set(['DATABASE_RESTORE_VALIDATION_FAILED', 'DATABASE_RESTORE_SNAPSHOT_FAILED', 'DATABASE_RESTORE_FAILED_RECOVERED', 'DATABASE_RESTORE_RECOVERY_FAILED', 'DATABASE_RESTORE_RESTART_FAILED', 'DATABASE_RESTORE_FINALIZE_FAILED', 'DATABASE_RESTORE_FAILED']);
+
 const ALLOWED_RESTORE_STAGES = new Set([
   'restore_validate',
   'restore_snapshot',
@@ -1243,11 +1245,91 @@ const ALLOWED_LEGACY_STAGES = new Set([
   'finalVerify',
 ]);
 
-const KNOWN_MIGRATION_FILENAMES = new Set(
-  fs.existsSync(path.join(root, 'database/migrations'))
+const repoMigrations = path.join(process.cwd(), 'database/migrations');
+const KNOWN_MIGRATION_FILENAMES = new Set([
+  ...(fs.existsSync(path.join(root, 'database/migrations'))
     ? fs.readdirSync(path.join(root, 'database/migrations')).filter((f) => f.endsWith('.sql'))
-    : []
-);
+    : []),
+  ...(fs.existsSync(repoMigrations)
+    ? fs.readdirSync(repoMigrations).filter((f) => f.endsWith('.sql'))
+    : []),
+]);
+
+function has16HexReference(val) {
+  if (typeof val === 'string') {
+    if (/^[a-f0-9]{16}$/i.test(val.trim())) return true;
+    if (/\bReference:\s*([a-f0-9]{16})\b/i.test(val)) return true;
+  }
+  return false;
+}
+
+let setup12Diagnostic = null;
+
+function persistSetup12Diagnostic(patch = {}) {
+  if (!setup12Diagnostic) return;
+  Object.assign(setup12Diagnostic, patch);
+
+  const safeCode = typeof setup12Diagnostic.code === 'string' && ALLOWED_RESTORE_CODES.has(setup12Diagnostic.code)
+    ? setup12Diagnostic.code
+    : null;
+  const safeStage = typeof setup12Diagnostic.stage === 'string' && ALLOWED_RESTORE_STAGES.has(setup12Diagnostic.stage)
+    ? setup12Diagnostic.stage
+    : null;
+  const safeRecovered = typeof setup12Diagnostic.recovered === 'boolean'
+    ? setup12Diagnostic.recovered
+    : null;
+  const safeReferencePresent = typeof setup12Diagnostic.reference_present === 'boolean'
+    ? setup12Diagnostic.reference_present
+    : null;
+
+  const safeDriverErrno = typeof setup12Diagnostic.driver_errno === 'number' && Number.isInteger(setup12Diagnostic.driver_errno) && setup12Diagnostic.driver_errno >= 1 && setup12Diagnostic.driver_errno <= 99999
+    ? setup12Diagnostic.driver_errno
+    : null;
+  const safeMigrationDriverErrno = typeof setup12Diagnostic.migration_driver_errno === 'number' && Number.isInteger(setup12Diagnostic.migration_driver_errno) && setup12Diagnostic.migration_driver_errno >= 1 && setup12Diagnostic.migration_driver_errno <= 99999
+    ? setup12Diagnostic.migration_driver_errno
+    : null;
+
+  const safeFailedMigration = typeof setup12Diagnostic.failed_migration === 'string' && KNOWN_MIGRATION_FILENAMES.has(setup12Diagnostic.failed_migration)
+    ? setup12Diagnostic.failed_migration
+    : null;
+
+  const safeLedgerCount = typeof setup12Diagnostic.ledger_count === 'number' && Number.isInteger(setup12Diagnostic.ledger_count) && setup12Diagnostic.ledger_count >= 0
+    ? setup12Diagnostic.ledger_count
+    : null;
+
+  const safeLatestLedgerVersion = typeof setup12Diagnostic.latest_ledger_version === 'string' && KNOWN_MIGRATION_FILENAMES.has(setup12Diagnostic.latest_ledger_version)
+    ? setup12Diagnostic.latest_ledger_version
+    : null;
+
+  const safe = {
+    format: 1,
+    restore_outcome: typeof setup12Diagnostic.restore_outcome === 'string' ? setup12Diagnostic.restore_outcome : null,
+    restore_success_flag: typeof setup12Diagnostic.success_flag === 'boolean' ? setup12Diagnostic.success_flag : null,
+    restore_code: safeCode,
+    restore_stage: safeStage,
+    restore_recovered: safeRecovered,
+    restore_has_reference: safeReferencePresent,
+    context_lost: typeof setup12Diagnostic.context_lost === 'boolean' ? setup12Diagnostic.context_lost : false,
+    ui_reload_ready: typeof setup12Diagnostic.ui_reload_ready === 'boolean' ? setup12Diagnostic.ui_reload_ready : null,
+    document_marker_changed: typeof setup12Diagnostic.document_marker_changed === 'boolean' ? setup12Diagnostic.document_marker_changed : null,
+    metadata_object_exists: typeof setup12Diagnostic.metadata_object_exists === 'boolean' ? setup12Diagnostic.metadata_object_exists : null,
+    metadata_object_type: typeof setup12Diagnostic.metadata_object_type === 'string' ? setup12Diagnostic.metadata_object_type : null,
+    metadata_query_ok: typeof setup12Diagnostic.metadata_query_ok === 'boolean' ? setup12Diagnostic.metadata_query_ok : null,
+    view_exists: typeof setup12Diagnostic.metadata_object_exists === 'boolean' ? setup12Diagnostic.metadata_object_exists : null,
+    view_type: typeof setup12Diagnostic.metadata_object_type === 'string' ? setup12Diagnostic.metadata_object_type : null,
+    driver_errno: safeDriverErrno,
+    ledger_count: safeLedgerCount,
+    latest_ledger_version: safeLatestLedgerVersion,
+    canonical_58_match: typeof setup12Diagnostic.canonical_58_match === 'boolean' ? setup12Diagnostic.canonical_58_match : null,
+    sentinel_customer_present: typeof setup12Diagnostic.sentinel_customer_present === 'boolean' ? setup12Diagnostic.sentinel_customer_present : null,
+    admin_user_present: typeof setup12Diagnostic.admin_user_present === 'boolean' ? setup12Diagnostic.admin_user_present : null,
+    sentinel_setting_present: typeof setup12Diagnostic.sentinel_setting_present === 'boolean' ? setup12Diagnostic.sentinel_setting_present : null,
+    failed_migration: safeFailedMigration,
+    migration_driver_errno: safeMigrationDriverErrno,
+  };
+
+  fs.writeFileSync(path.join(evidence, 'diagnostic-setup12-restore-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
+}
 
 let legacyDiagnostic = null;
 
@@ -1334,24 +1416,339 @@ try {
     });
     assert.equal(dbMutated.customer?.name, MUTATED_SENTINEL, 'Mutated sentinel must exist before restore attempt');
 
-    await reproLab.mockOpenDialog(setup12BackupPath);
-    let setup12ContextLost = false;
-    let setup12RestoreOutcome;
-    try {
-      setup12RestoreOutcome = await reproLab.evaluate('window.electronAPI.backup.restore()');
-    } catch (err) {
-      setup12ContextLost = /destroyed|cannot find context|navigated|target closed|session closed|protocol error/i.test(err?.message || '');
-      setup12RestoreOutcome = { error: true };
+    // Goal 2: mark pre-restore log offsets and timestamps
+    const restoreStartTime = Date.now();
+    const preRestoreLogs = {};
+    const logsDir = path.join(storageDir, 'logs');
+    assertNoSymlinks(logsDir);
+    if (fs.existsSync(logsDir)) {
+      try {
+        for (const file of fs.readdirSync(logsDir)) {
+          if (file.endsWith('.log')) {
+            const fullPath = path.join(logsDir, file);
+            assertNoSymlinks(fullPath);
+            try {
+              const stat = fs.statSync(fullPath);
+              preRestoreLogs[file] = { size: stat.size, mtimeMs: stat.mtimeMs, birthtimeMs: stat.birthtimeMs };
+            } catch {}
+          }
+        }
+      } catch {}
     }
 
-    dbAfterRestore = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
-    const dbSuccess = dbAfterRestore.customer?.name === SENTINEL;
-    const outcomeClass = dbSuccess ? 'SUCCESS' : (setup12ContextLost ? 'UNKNOWN_CONTEXT_LOST' : 'FAILURE');
-    results.details.setup12_baseline_restore = {
-      outcome: outcomeClass,
-      db_restored: dbSuccess,
-      failed: !dbSuccess,
+    // Goal 1: fresh document marker before restore
+    const pageRunIdBefore1 = 'setup12_restore_' + Date.now();
+    await reproLab.evaluate(`window.__pageRunId = ${JSON.stringify(pageRunIdBefore1)}`);
+
+    await reproLab.mockOpenDialog(setup12BackupPath);
+
+    // Goal 2: Persist diagnostic-setup12-restore-summary.json immediately before native IPC start (with initial unknown nulls)
+    setup12Diagnostic = {
+      restore_outcome: 'INITIALIZING',
+      code: null,
+      stage: null,
+      recovered: null,
+      success_flag: null,
+      reference_present: null,
+      context_lost: false,
+      ui_reload_ready: null,
+      document_marker_changed: null,
+      metadata_object_exists: null,
+      metadata_object_type: null,
+      metadata_query_ok: null,
+      driver_errno: null,
+      ledger_count: null,
+      latest_ledger_version: null,
+      canonical_58_match: null,
+      sentinel_customer_present: null,
+      admin_user_present: null,
+      sentinel_setting_present: null,
+      failed_migration: null,
+      migration_driver_errno: null,
     };
+    persistSetup12Diagnostic();
+
+    // Goal 1: Actual native Setup 12 restore outcome MUST be recorded before any DB-describe/throw
+    let setup12ContextLost = false;
+    let setup12UnexpectedError = null;
+    let setup12RawOutcome = null;
+
+    const restore1Promise = reproLab.evaluate('window.electronAPI.backup.restore()')
+      .then((res) => {
+        setup12RawOutcome = res;
+        const successFlag = typeof res?.success === 'boolean' ? res.success : null;
+        const safeCode = typeof res?.code === 'string' && ALLOWED_RESTORE_CODES.has(res.code) ? res.code : null;
+        const safeStage = typeof res?.stage === 'string' && ALLOWED_RESTORE_STAGES.has(res.stage) ? res.stage : null;
+        const safeRecovered = typeof res?.recovered === 'boolean' ? res.recovered : null;
+        const refPresent = has16HexReference(res?.reference) || has16HexReference(res?.error);
+
+        let outcomeClass = 'UNKNOWN';
+        if (successFlag === true) {
+          outcomeClass = 'SUCCESS';
+        } else if (successFlag === false) {
+          outcomeClass = 'FAILURE';
+        }
+
+        persistSetup12Diagnostic({
+          restore_outcome: outcomeClass,
+          code: safeCode,
+          stage: safeStage,
+          recovered: safeRecovered,
+          success_flag: successFlag,
+          reference_present: refPresent,
+          context_lost: false,
+        });
+        return res;
+      })
+      .catch((err) => {
+        const isKnownNav = /destroyed|cannot find context|navigated|target closed|session closed|protocol error/i.test(err?.message || '');
+        if (isKnownNav) {
+          setup12ContextLost = true;
+          persistSetup12Diagnostic({
+            restore_outcome: 'UNKNOWN_CONTEXT_LOST',
+            context_lost: true,
+            success_flag: null,
+          });
+        } else {
+          setup12UnexpectedError = err;
+          persistSetup12Diagnostic({
+            restore_outcome: 'UNEXPECTED_ERROR',
+            context_lost: false,
+            success_flag: null,
+          });
+        }
+        return null;
+      });
+
+    await restore1Promise;
+
+    // Goal 1 & 2: Check reload and login readiness; if native false, skip login wait
+    let uiReloadReady = false;
+    let documentMarkerChanged = false;
+
+    const reloadExpected = setup12ContextLost || setup12RawOutcome?.success === true;
+
+    if (reloadExpected) {
+      try {
+        await reproLab.until('Boolean(document.querySelector("input[type=email]"))', 'login form after Setup 12 restore reload', 90000);
+        uiReloadReady = true;
+      } catch (waitErr) {
+        uiReloadReady = false;
+        console.warn('[Test 1 Baseline Restore] UI reload wait timed out or login form not reached');
+      }
+
+      if (uiReloadReady) {
+        try {
+          const pageRunIdAfter1 = await reproLab.evaluate('window.__pageRunId');
+          documentMarkerChanged = pageRunIdAfter1 !== pageRunIdBefore1;
+        } catch {
+          documentMarkerChanged = false;
+        }
+      }
+
+      persistSetup12Diagnostic({
+        ui_reload_ready: uiReloadReady,
+        document_marker_changed: documentMarkerChanged,
+      });
+
+      if (!uiReloadReady || !documentMarkerChanged) {
+        results.details.setup12_baseline_restore = {
+          outcome: 'RELOAD_FAILED',
+          success_flag: typeof setup12RawOutcome?.success === 'boolean' ? setup12RawOutcome.success : null,
+          code: typeof setup12RawOutcome?.code === 'string' && ALLOWED_RESTORE_CODES.has(setup12RawOutcome.code) ? setup12RawOutcome.code : null,
+          stage: typeof setup12RawOutcome?.stage === 'string' && ALLOWED_RESTORE_STAGES.has(setup12RawOutcome.stage) ? setup12RawOutcome.stage : null,
+          recovered: typeof setup12RawOutcome?.recovered === 'boolean' ? setup12RawOutcome.recovered : null,
+          reference_present: has16HexReference(setup12RawOutcome?.reference) || has16HexReference(setup12RawOutcome?.error),
+          context_lost: setup12ContextLost,
+          ui_reload_ready: uiReloadReady,
+          document_marker_changed: documentMarkerChanged,
+          db_restored: false,
+          failed: true,
+        };
+        throw new Error(`Setup 12 expected reload failed: uiReloadReady=${uiReloadReady}, documentMarkerChanged=${documentMarkerChanged}`);
+      }
+    } else {
+      // Native false or unexpected error: skip login wait
+      persistSetup12Diagnostic({
+        ui_reload_ready: false,
+        document_marker_changed: false,
+      });
+    }
+
+    if (setup12UnexpectedError) {
+      throw setup12UnexpectedError;
+    }
+
+    // Goal 4: Parse structured logs for failed migration and driver errno
+    let logFailedMigration = null;
+    let logMigrationDriverErrno = null;
+
+    assertNoSymlinks(logsDir);
+    if (fs.existsSync(logsDir)) {
+      try {
+        for (const file of fs.readdirSync(logsDir)) {
+          if (!file.endsWith('.log')) continue;
+          const fullPath = path.join(logsDir, file);
+          assertNoSymlinks(fullPath);
+          try {
+            const currentStat = fs.statSync(fullPath);
+            let startOffset = 0;
+            let bytesToRead = 0;
+
+            if (Object.prototype.hasOwnProperty.call(preRestoreLogs, file)) {
+              const prev = preRestoreLogs[file];
+              if (currentStat.size > prev.size) {
+                startOffset = prev.size;
+                bytesToRead = Math.min(currentStat.size - prev.size, 65536);
+              } else if (currentStat.size < prev.size) {
+                continue;
+              } else {
+                continue;
+              }
+            } else {
+              const isNew = currentStat.mtimeMs >= restoreStartTime || (currentStat.birthtimeMs && currentStat.birthtimeMs >= restoreStartTime);
+              if (isNew && currentStat.size > 0) {
+                startOffset = 0;
+                bytesToRead = Math.min(currentStat.size, 65536);
+              } else {
+                continue;
+              }
+            }
+
+            if (bytesToRead > 0) {
+              const fd = fs.openSync(fullPath, 'r');
+              const buf = Buffer.alloc(bytesToRead);
+              fs.readSync(fd, buf, 0, bytesToRead, startOffset);
+              fs.closeSync(fd);
+              const text = buf.toString('utf8');
+              const lines = text.split(/\r?\n/);
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const entry = JSON.parse(trimmed);
+                  if (entry && entry.level === 'ERROR' && typeof entry.message === 'string') {
+                    const match = entry.message.match(/^Migration failed:\s*(.+)$/);
+                    if (match) {
+                      const fname = match[1].trim();
+                      if (KNOWN_MIGRATION_FILENAMES.has(fname)) {
+                        logFailedMigration = fname;
+                        const dc = entry.context?.driver_code;
+                        if (typeof dc === 'number' && Number.isInteger(dc) && dc >= 1 && dc <= 99999) {
+                          logMigrationDriverErrno = dc;
+                        } else if (typeof dc === 'string' && /^\d+$/.test(dc)) {
+                          const parsedDc = parseInt(dc, 10);
+                          if (parsedDc >= 1 && parsedDc <= 99999) {
+                            logMigrationDriverErrno = parsedDc;
+                          } else {
+                            logMigrationDriverErrno = null;
+                          }
+                        } else {
+                          logMigrationDriverErrno = null;
+                        }
+                      }
+                    }
+                  }
+                } catch {}
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    // Goal 3: Read-only minimal probe of owned ephemeral DB BEFORE describe
+    const probeResult = runPhpFixture('probe-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+      'setting-key': baselineDb.setting.key,
+    });
+    console.log(
+      `[Test 1 DB Probe] Probe result: metadata_object_exists: ${probeResult.metadata_object_exists} | metadata_object_type: ${probeResult.metadata_object_type} | driver_errno: ${probeResult.driver_errno} | ledger_count: ${probeResult.ledger_count} | latest_ledger: ${probeResult.latest_ledger_version} | sentinel_customer: ${probeResult.sentinel_customer_present}`
+    );
+
+    // Goal 2 & 3: Update diagnostic after probe
+    persistSetup12Diagnostic({
+      metadata_object_exists: probeResult.metadata_object_exists,
+      metadata_object_type: probeResult.metadata_object_type,
+      metadata_query_ok: probeResult.metadata_query_ok,
+      driver_errno: typeof probeResult.driver_errno === 'number' && probeResult.driver_errno >= 1 && probeResult.driver_errno <= 99999 ? probeResult.driver_errno : null,
+      ledger_count: probeResult.ledger_count,
+      latest_ledger_version: probeResult.latest_ledger_version,
+      canonical_58_match: probeResult.canonical_58_match,
+      sentinel_customer_present: probeResult.sentinel_customer_present,
+      admin_user_present: probeResult.admin_user_present,
+      sentinel_setting_present: probeResult.sentinel_setting_present,
+      failed_migration: logFailedMigration,
+      migration_driver_errno: logMigrationDriverErrno,
+    });
+    console.log('[Test 1 Diagnostic] Updated diagnostic-setup12-restore-summary.json after probe and log parsing');
+
+    // Extract safe allowlisted native outcome properties for results.details
+    const safeCode = typeof setup12RawOutcome?.code === 'string' && ALLOWED_RESTORE_CODES.has(setup12RawOutcome.code)
+      ? setup12RawOutcome.code
+      : null;
+    const safeStage = typeof setup12RawOutcome?.stage === 'string' && ALLOWED_RESTORE_STAGES.has(setup12RawOutcome.stage)
+      ? setup12RawOutcome.stage
+      : null;
+    const safeRecovered = typeof setup12RawOutcome?.recovered === 'boolean'
+      ? setup12RawOutcome.recovered
+      : null;
+    const refPresent = has16HexReference(setup12RawOutcome?.reference) || has16HexReference(setup12RawOutcome?.error);
+    const successFlag = typeof setup12RawOutcome?.success === 'boolean'
+      ? setup12RawOutcome.success
+      : null;
+
+    let initialOutcomeClass = 'UNKNOWN';
+    if (successFlag === true) {
+      initialOutcomeClass = 'SUCCESS';
+    } else if (setup12ContextLost) {
+      initialOutcomeClass = 'UNKNOWN_CONTEXT_LOST';
+    } else if (successFlag === false) {
+      initialOutcomeClass = 'FAILURE';
+    }
+
+    results.details.setup12_baseline_restore = {
+      outcome: initialOutcomeClass,
+      success_flag: successFlag,
+      code: safeCode,
+      stage: safeStage,
+      recovered: safeRecovered,
+      reference_present: refPresent,
+      context_lost: setup12ContextLost,
+      ui_reload_ready: uiReloadReady,
+      document_marker_changed: documentMarkerChanged,
+      db_restored: false,
+      failed: successFlag === false,
+    };
+    console.log('[Test 1 Baseline Restore] Setup 12 native restore result recorded:', initialOutcomeClass, 'context_lost:', setup12ContextLost, 'reload_ready:', uiReloadReady);
+
+    // Goal 1: Assert fail-closed after probe + safe artifact if metadata_object_exists !== true or metadata_object_type !== 'VIEW' before describe
+    assert.equal(
+      probeResult.metadata_object_exists,
+      true,
+      `Setup 12 baseline restore failed closed: metadata object product_catalog_trigger_metadata does not exist (probe errno: ${probeResult.driver_errno}, failed migration: ${logFailedMigration})`
+    );
+    assert.equal(
+      probeResult.metadata_object_type,
+      'VIEW',
+      `Setup 12 baseline restore failed closed: metadata object product_catalog_trigger_metadata exists but is type ${probeResult.metadata_object_type}, expected VIEW`
+    );
+
+    // If metadata view exists and is valid VIEW, proceed to normal inspect-db
+    dbAfterRestore = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+    });
+    const dbSuccess = dbAfterRestore.customer?.name === SENTINEL;
+
+    const finalOutcomeClass = dbSuccess
+      ? 'SUCCESS'
+      : (setup12ContextLost ? 'UNKNOWN_CONTEXT_LOST' : 'FAILURE');
+
+    results.details.setup12_baseline_restore.outcome = finalOutcomeClass;
+    results.details.setup12_baseline_restore.db_restored = dbSuccess;
+    results.details.setup12_baseline_restore.failed = !dbSuccess;
     console.log('[Test 1 Baseline Restore] Setup 12 restore attempt recorded:', results.details.setup12_baseline_restore.outcome);
 
     const restoreDiff = compareDbStages('baseline_to_restore', baselineDb, dbAfterRestore);
@@ -1378,7 +1775,10 @@ try {
       });
       assert.equal(revertRes.ok, true, 'Revert to sentinel failed');
       assert.equal(revertRes.affected, 1, 'Revert must affect exactly 1 row');
-      const dbReverted = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
+      const dbReverted = runPhpFixture('inspect-db', {
+        'config-dir': configDir,
+        sentinel: SENTINEL,
+      });
       assert.equal(dbReverted.customer?.name, SENTINEL, 'Database must be restored to baseline sentinel before Test 1 preview');
     }
 
