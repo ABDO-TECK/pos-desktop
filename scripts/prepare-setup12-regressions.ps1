@@ -615,11 +615,12 @@ if ($Phase -eq 'prepare') {
     $cPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cPkgPath
 
     $cLockPath = Join-Path $candidateSource 'package-lock.json'
-    $cLock = Get-Content -LiteralPath $cLockPath -Raw | ConvertFrom-Json
-    $cLock.version = '0.0.13'
-    if ($cLock.packages -and $cLock.packages.'') {
-        $cLock.packages.''.version = '0.0.13'
+    $cLock = Get-Content -LiteralPath $cLockPath -Raw | ConvertFrom-Json -AsHashtable
+    if (-not ($cLock -and ($cLock['packages'] -is [System.Collections.IDictionary]) -and ($cLock['packages'][''] -is [System.Collections.IDictionary]))) {
+        throw "Candidate package-lock.json missing required root package entry in packages['']."
     }
+    $cLock['version'] = '0.0.13'
+    $cLock['packages']['']['version'] = '0.0.13'
     $cLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cLockPath
 
     $cFEndPkgPath = Join-Path $candidateSource 'frontend/package.json'
@@ -628,11 +629,12 @@ if ($Phase -eq 'prepare') {
     $cFEndPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cFEndPkgPath
 
     $cFEndLockPath = Join-Path $candidateSource 'frontend/package-lock.json'
-    $cFEndLock = Get-Content -LiteralPath $cFEndLockPath -Raw | ConvertFrom-Json
-    $cFEndLock.version = '0.0.13'
-    if ($cFEndLock.packages -and $cFEndLock.packages.'') {
-        $cFEndLock.packages.''.version = '0.0.13'
+    $cFEndLock = Get-Content -LiteralPath $cFEndLockPath -Raw | ConvertFrom-Json -AsHashtable
+    if (-not ($cFEndLock -and ($cFEndLock['packages'] -is [System.Collections.IDictionary]) -and ($cFEndLock['packages'][''] -is [System.Collections.IDictionary]))) {
+        throw "Candidate frontend/package-lock.json missing required root package entry in packages['']."
     }
+    $cFEndLock['version'] = '0.0.13'
+    $cFEndLock['packages']['']['version'] = '0.0.13'
     $cFEndLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cFEndLockPath
 
     # Clone repository version.json preserving all engine metadata, updating only version fields
