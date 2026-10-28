@@ -298,7 +298,7 @@ if ($Phase -eq 'prepare') {
         }
     }
 
-    $preRegistrations = Get-PosDesktopUninstallRegistrations
+    $preRegistrations = @(Get-PosDesktopUninstallRegistrations)
     if ($preRegistrations.Count -gt 0) {
         throw "Preexisting POS Desktop uninstall registration blocks isolated regression test: $(($preRegistrations | ForEach-Object { $_.KeyPath }) -join '; ')"
     }
