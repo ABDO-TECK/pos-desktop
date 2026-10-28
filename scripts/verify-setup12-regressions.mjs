@@ -269,6 +269,104 @@ function verifyInventoryFiles(targetInventory, baseInventory = null) {
   }
 }
 
+async function waitForQZReadiness(desktopLabUi) {
+  const startTime = Date.now();
+  const deadline = startTime + 180000;
+  let triggeredIpc = false;
+
+  while (true) {
+    let foundQzDir = null;
+    for (const target of posTargets) {
+      const dir = path.join(target, 'qz-certs');
+      const key = path.join(dir, 'private-key.pem');
+      const cert = path.join(dir, 'digital-certificate.pem');
+      if (fs.existsSync(key) && fs.existsSync(cert)) {
+        try {
+          if (fs.statSync(key).size > 0 && fs.statSync(cert).size > 0) {
+            foundQzDir = dir;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    if (!foundQzDir && desktopLabUi && !triggeredIpc) {
+      console.log('QZ cert pair not yet on disk; triggering printing IPC initialization...');
+      triggeredIpc = true;
+      await desktopLabUi.evaluate('window.electronAPI?.getQZCert ? window.electronAPI.getQZCert() : null').catch(() => null);
+    }
+
+    let flagStatus = 'missing';
+    const flagSearchDirs = foundQzDir
+      ? [foundQzDir, ...posTargets.map((t) => path.join(t, 'qz-certs'))]
+      : posTargets.map((t) => path.join(t, 'qz-certs'));
+
+    const checkedFlagPaths = new Set();
+    for (const d of flagSearchDirs) {
+      const f = path.join(d, 'ssl-installed.flag');
+      if (checkedFlagPaths.has(f)) continue;
+      checkedFlagPaths.add(f);
+      if (fs.existsSync(f)) {
+        let content = '';
+        try {
+          content = fs.readFileSync(f, 'utf8').trim();
+        } catch {}
+        if (content === 'skipped') {
+          throw new Error('QZ silent SSL installation was skipped (flag: skipped)');
+        }
+        if (content === 'installed') {
+          flagStatus = 'installed';
+        } else if (flagStatus !== 'installed') {
+          flagStatus = content ? 'unknown' : 'pending';
+        }
+      }
+    }
+
+    const rawReceipts = [];
+    let validReceiptCount = 0;
+    for (const target of posTargets) {
+      const p = path.join(target, 'qz-shared-install.json');
+      if (fs.existsSync(p)) {
+        let isFile = false;
+        try {
+          isFile = fs.statSync(p).isFile();
+        } catch {}
+        if (isFile) {
+          rawReceipts.push(p);
+          try {
+            const stat = fs.statSync(p);
+            if (stat.size > 0) {
+              const raw = fs.readFileSync(p, 'utf8');
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === 'object' && typeof parsed.rootCertificateBase64 === 'string' && parsed.rootCertificateBase64.length > 0) {
+                validReceiptCount++;
+              }
+            }
+          } catch {
+            // Transient JSON write in progress; do not count as valid yet
+          }
+        }
+      }
+    }
+
+    if (rawReceipts.length > 1) {
+      throw new Error(`Duplicate QZ ownership receipts detected across POS data targets (count=${rawReceipts.length})`);
+    }
+
+    if (foundQzDir && flagStatus === 'installed' && rawReceipts.length === 1 && validReceiptCount === 1) {
+      return foundQzDir;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for QZ readiness (pairFound=${Boolean(foundQzDir)}, receiptCount=${rawReceipts.length}, validReceipts=${validReceiptCount}, flagStatus=${flagStatus}, elapsedMs=${Date.now() - startTime})`
+      );
+    }
+
+    await delay(500);
+  }
+}
+
 async function getSystemProtectedState(desktopLabUi) {
   // 1. Mandatory credentials: look across the 8 POS targets
   const credFiles = [];
@@ -289,35 +387,8 @@ async function getSystemProtectedState(desktopLabUi) {
     }
   }
 
-  // 3. Mandatory runtime QZ certificate pair (private-key.pem and digital-certificate.pem)
-  let foundQzDir = null;
-  for (const target of posTargets) {
-    const dir = path.join(target, 'qz-certs');
-    const key = path.join(dir, 'private-key.pem');
-    const cert = path.join(dir, 'digital-certificate.pem');
-    if (fs.existsSync(key) && fs.existsSync(cert) && fs.statSync(key).size > 0 && fs.statSync(cert).size > 0) {
-      foundQzDir = dir;
-      break;
-    }
-  }
-
-  // If not initialized, trigger production printing IPC initialization
-  if (!foundQzDir && desktopLabUi) {
-    console.log('QZ cert pair not yet on disk; triggering printing IPC initialization...');
-    await desktopLabUi.evaluate('window.electronAPI?.getQZCert ? window.electronAPI.getQZCert() : null').catch(() => null);
-    for (let i = 0; i < 30 && !foundQzDir; i++) {
-      await delay(500);
-      for (const target of posTargets) {
-        const dir = path.join(target, 'qz-certs');
-        const key = path.join(dir, 'private-key.pem');
-        const cert = path.join(dir, 'digital-certificate.pem');
-        if (fs.existsSync(key) && fs.existsSync(cert) && fs.statSync(key).size > 0 && fs.statSync(cert).size > 0) {
-          foundQzDir = dir;
-          break;
-        }
-      }
-    }
-  }
+  // 3. Mandatory runtime QZ certificate pair and production printing trust readiness
+  const foundQzDir = await waitForQZReadiness(desktopLabUi);
   assert.ok(foundQzDir, 'Mandatory runtime QZ private-key.pem and digital-certificate.pem pair missing after printing initialization');
   const qzKeyPath = path.join(foundQzDir, 'private-key.pem');
   const qzCertPath = path.join(foundQzDir, 'digital-certificate.pem');
