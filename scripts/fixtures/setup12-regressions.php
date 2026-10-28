@@ -972,7 +972,7 @@ final class Setup12RegressionsHelper
         ];
     }
 
-    public function inspectDb(string $configDir, string $sentinel): array
+    public function inspectDb(string $configDir, string $sentinel, ?string $settingKey = null): array
     {
         $db = $this->connectDatabase($configDir);
         $service = new UpdateDataCompatibilityService();
@@ -1001,9 +1001,9 @@ final class Setup12RegressionsHelper
         $allCustomers = $db->query("SELECT id, name, phone FROM customers WHERE name LIKE '%sentinel%' ORDER BY id")->fetchAll(PDO::FETCH_ASSOC);
 
         // Sentinel setting record
-        $settingKey = 'sentinel_' . substr(md5($sentinel), 0, 10);
+        $resolvedSettingKey = $settingKey ?? ('sentinel_' . substr(md5($sentinel), 0, 10));
         $stmt = $db->prepare('SELECT `key`, `value` FROM settings WHERE `key` = ?');
-        $stmt->execute([$settingKey]);
+        $stmt->execute([$resolvedSettingKey]);
         $setting = $stmt->fetch(PDO::FETCH_ASSOC);
 
         // Admin row (including password hash for digest)
@@ -1648,6 +1648,7 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'mode:',
         'sentinel:',
         'mutated-name:',
+        'setting-key:',
     ]);
 
     $action = (string)($options['action'] ?? '');
@@ -1744,9 +1745,13 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                 break;
 
             case 'inspect-db':
+                $settingKey = isset($options['setting-key']) && $options['setting-key'] !== ''
+                    ? (string)$options['setting-key']
+                    : null;
                 $result = $helper->inspectDb(
                     (string)($options['config-dir'] ?? ''),
-                    (string)($options['sentinel'] ?? 'codex_setup12_regression_sentinel')
+                    (string)($options['sentinel'] ?? 'codex_setup12_regression_sentinel'),
+                    $settingKey
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

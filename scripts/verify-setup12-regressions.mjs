@@ -1121,6 +1121,8 @@ const contract = JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 const baselineDbPath = path.join(lab, 'baseline-db.json');
 assert.ok(fs.existsSync(baselineDbPath), `Baseline DB missing: ${baselineDbPath}`);
 const baselineDb = JSON.parse(fs.readFileSync(baselineDbPath, 'utf8'));
+assert.ok(typeof baselineDb?.setting?.key === 'string' && baselineDb.setting.key.length > 0, 'Baseline setting key must be a non-empty string');
+assert.ok(typeof baselineDb?.setting?.value === 'string' && baselineDb.setting.value.length > 0, 'Baseline setting value must be a non-empty string');
 
 const schemaDiagnostics = {
   format: 1,
@@ -1250,7 +1252,11 @@ try {
     });
     assert.equal(mutateRes.ok, true, 'mutate-db failed for Test 1');
     assert.equal(mutateRes.affected, 1, 'mutate-db must affect exactly 1 customer row');
-    const dbMutated = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: MUTATED_SENTINEL });
+    const dbMutated = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: MUTATED_SENTINEL,
+      'setting-key': baselineDb.setting.key,
+    });
     assert.equal(dbMutated.customer?.name, MUTATED_SENTINEL, 'Mutated sentinel must exist before restore attempt');
 
     await reproLab.mockOpenDialog(setup12BackupPath);
@@ -1284,7 +1290,11 @@ try {
     );
 
     if (!dbSuccess) {
-      const dbMutCheck = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: MUTATED_SENTINEL });
+      const dbMutCheck = runPhpFixture('inspect-db', {
+        'config-dir': configDir,
+        sentinel: MUTATED_SENTINEL,
+        'setting-key': baselineDb.setting.key,
+      });
       assert.equal(dbMutCheck.customer?.name, MUTATED_SENTINEL, 'Mutated sentinel must be present if restore failed');
       const revertRes = runPhpFixture('mutate-db', {
         'config-dir': configDir,
@@ -2272,12 +2282,29 @@ try {
     });
     assert.equal(mutateRes4D.ok, true, 'mutate-db failed for Test 4D');
     assert.equal(mutateRes4D.affected, 1, 'Exactly 1 sentinel row should be mutated for Test 4D');
-    const dbBeforeFailed = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: MUTATED_SENTINEL });
+    const dbBeforeFailed = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: MUTATED_SENTINEL,
+      'setting-key': baselineDb.setting.key,
+    });
     assert.equal(dbBeforeFailed.customer?.name, MUTATED_SENTINEL, 'Mutated sentinel must exist prior to failed restore');
     assert.ok(dbBeforeFailed.schema_sha256, 'Pre-failure schema hash missing');
+    assert.ok(dbBeforeFailed.raw_schema_sha256, 'Pre-failure raw schema hash missing');
+    assert.ok(dbBeforeFailed.ledger_sha256, 'Pre-failure ledger hash missing');
     assert.ok(dbBeforeFailed.ledger_rows?.length > 0, 'Pre-failure ledger rows missing');
     assert.ok(dbBeforeFailed.setting?.value, 'Pre-failure setting missing');
+    assert.equal(dbBeforeFailed.setting?.key, baselineDb.setting.key, 'Pre-failure setting key must match baseline setting key');
+    assert.equal(dbBeforeFailed.setting?.value, baselineDb.setting.value, 'Pre-failure setting value must match baseline setting value');
     assert.ok(dbBeforeFailed.admin_digest, 'Pre-failure admin digest missing');
+
+    console.log('[Test 4D IndexedDB] Seeding actor-owned review offline fixture into IndexedDB pos_offline...');
+    const offlineBefore4D = await seedOfflinePendingSale(transitionLab);
+    assert.ok(offlineBefore4D && typeof offlineBefore4D === 'object', 'Test 4D offline sale fixture missing');
+    assert.equal(offlineBefore4D.localId, 'codex-transition-pending', 'Test 4D offline sale localId mismatch');
+    assert.equal(offlineBefore4D.syncStatus, 'review', 'Test 4D offline sale syncStatus must be review');
+
+    console.log('[Test 4D Protected State] Capturing system protected state before failed restore...');
+    const protectedBefore4D = await getSystemProtectedState(transitionLab);
 
     const preExistingSafety4D = new Set(fs.existsSync(safetyDir) ? fs.readdirSync(safetyDir) : []);
 
@@ -2319,12 +2346,28 @@ try {
     const stillAuthenticated = await transitionLab.evaluate("Boolean(document.querySelector(\"a[href='/settings']\"))");
     assert.equal(stillAuthenticated, true, 'User session must be preserved when restore fails and rolls back');
 
+    // Verify offline sale fixture in IndexedDB was preserved across failed restore and rollback
+    const offlineAfter4D = await pendingSale(transitionLab, 'get');
+    assert.ok(offlineAfter4D && typeof offlineAfter4D === 'object', 'Test 4D offline sale fixture missing after rollback');
+    assert.deepEqual(offlineAfter4D, offlineBefore4D, 'Offline sale fixture in IndexedDB must be preserved after failed restore and rollback');
+
+    // Verify system protected state was preserved across failed restore and rollback
+    const protectedAfter4D = await getSystemProtectedState(transitionLab);
+    assertProtectedStatePreserved(protectedBefore4D, protectedAfter4D, 'Test 4D Error-Path Restore Rollback');
+
     // Verify database integrity: original state retained via safety snapshot rollback (restored to mutated pre-attempt state)
-    const dbAfterRollback = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: MUTATED_SENTINEL });
+    const dbAfterRollback = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: MUTATED_SENTINEL,
+      'setting-key': baselineDb.setting.key,
+    });
     assert.deepEqual(dbAfterRollback.customer, dbBeforeFailed.customer, 'Customer row must be restored to pre-failure state');
     assert.equal(dbAfterRollback.customer?.name, MUTATED_SENTINEL, 'Database customer row must retain MUTATED_SENTINEL after rollback');
     assert.equal(dbAfterRollback.schema_sha256, dbBeforeFailed.schema_sha256, 'Database schema must match pre-failure state');
-    assert.equal(dbAfterRollback.setting?.value, dbBeforeFailed.setting?.value, 'Database setting must match pre-failure state');
+    assert.equal(dbAfterRollback.raw_schema_sha256, dbBeforeFailed.raw_schema_sha256, 'Database raw schema must match pre-failure state');
+    assert.equal(dbAfterRollback.ledger_sha256, dbBeforeFailed.ledger_sha256, 'Database ledger SHA256 must match pre-failure state');
+    assert.equal(dbAfterRollback.setting?.key, dbBeforeFailed.setting?.key, 'Database setting key must match pre-failure state');
+    assert.equal(dbAfterRollback.setting?.value, dbBeforeFailed.setting?.value, 'Database setting value must match pre-failure state');
     assert.equal(dbAfterRollback.admin_digest, dbBeforeFailed.admin_digest, 'Database admin digest must match pre-failure state');
     assert.deepEqual(dbAfterRollback.ledger_rows, dbBeforeFailed.ledger_rows, 'Full raw schema_versions rows altered after rollback');
 
