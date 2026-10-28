@@ -1008,11 +1008,58 @@ final class Setup12RegressionsHelper
         $admin = $db->query("SELECT id, name, email, password, role FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")->fetch(PDO::FETCH_ASSOC);
         $adminDigest = $admin ? hash('sha256', json_encode($admin, JSON_THROW_ON_ERROR)) : null;
 
+        // Canonical component fingerprints/counts from describe schema (PRIVATE ONLY)
+        $knownBucketFields = [
+            'tables' => ['name', 'type', 'engine', 'collation'],
+            'columns' => ['table_name', 'name', 'position', 'type', 'nullable', 'default_value', 'extra', 'charset_name', 'collation'],
+            'indexes' => ['table_name', 'name', 'non_unique', 'position', 'column_name', 'collation', 'sub_part', 'type'],
+            'keys' => ['table_name', 'name', 'column_name', 'position', 'referenced_table', 'referenced_column'],
+            'references' => ['table_name', 'name', 'referenced_table', 'update_rule', 'delete_rule', 'match_option'],
+            'checks' => ['table_name', 'name', 'clause_text'],
+            'objects' => ['object_type', 'object_name', 'definition', 'context', 'table_name'],
+        ];
+
+        $canonicalComponents = [
+            'buckets' => [],
+        ];
+        $schemaBuckets = is_array($description['schema'] ?? null) ? $description['schema'] : [];
+        foreach ($knownBucketFields as $bucket => $fields) {
+            $rows = is_array($schemaBuckets[$bucket] ?? null) ? $schemaBuckets[$bucket] : [];
+            $fieldHashes = [];
+            foreach ($fields as $field) {
+                $scalars = [];
+                foreach ($rows as $row) {
+                    if (is_array($row)) {
+                        $val = $row[$field] ?? null;
+                        $scalars[] = $val === null ? null : (string)$val;
+                    }
+                }
+                usort($scalars, static function (?string $a, ?string $b): int {
+                    if ($a === null && $b === null) return 0;
+                    if ($a === null) return -1;
+                    if ($b === null) return 1;
+                    return strcmp($a, $b);
+                });
+                $fieldHashes[$field] = hash('sha256', json_encode($scalars, JSON_THROW_ON_ERROR));
+            }
+            $canonicalComponents['buckets'][$bucket] = [
+                'count' => count($rows),
+                'sha256' => hash('sha256', json_encode($rows, JSON_THROW_ON_ERROR)),
+                'fields' => $fieldHashes,
+            ];
+        }
+
+        $canonicalComponents['ledger'] = [
+            'count' => count(is_array($description['ledger'] ?? null) ? $description['ledger'] : []),
+            'sha256' => (string)($description['ledger_sha256'] ?? ''),
+        ];
+
         return [
             'ok' => true,
             'schema_sha256' => $description['schema_sha256'],
             'ledger_sha256' => $description['ledger_sha256'],
             'raw_schema_sha256' => $rawSchemaSha256,
+            'canonical_components' => $canonicalComponents,
             'ledger_count' => count($ledgerVersions),
             'ledger' => $ledgerVersions,
             'ledger_rows' => $ledgerRows,

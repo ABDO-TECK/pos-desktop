@@ -171,6 +171,79 @@ function findCarrierDescriptor(labDir, { fromVersion, targetVersion, channel, so
   return null;
 }
 
+const BOUNDED_BUCKETS = ['tables', 'columns', 'indexes', 'keys', 'references', 'checks', 'objects'];
+const BOUNDED_FIELDS = {
+  tables: ['name', 'type', 'engine', 'collation'],
+  columns: ['table_name', 'name', 'position', 'type', 'nullable', 'default_value', 'extra', 'charset_name', 'collation'],
+  indexes: ['table_name', 'name', 'non_unique', 'position', 'column_name', 'collation', 'sub_part', 'type'],
+  keys: ['table_name', 'name', 'column_name', 'position', 'referenced_table', 'referenced_column'],
+  references: ['table_name', 'name', 'referenced_table', 'update_rule', 'delete_rule', 'match_option'],
+  checks: ['table_name', 'name', 'clause_text'],
+  objects: ['object_type', 'object_name', 'definition', 'context', 'table_name'],
+};
+
+function compareDbStages(stageName, sourceDb, targetDb) {
+  const schemaEqual = Boolean(
+    sourceDb?.schema_sha256 && targetDb?.schema_sha256 && sourceDb.schema_sha256 === targetDb.schema_sha256
+  );
+  const ledgerEqual = Boolean(
+    sourceDb?.ledger_sha256 && targetDb?.ledger_sha256 && sourceDb.ledger_sha256 === targetDb.ledger_sha256
+  );
+  const rawSchemaEqual = Boolean(
+    sourceDb?.raw_schema_sha256 && targetDb?.raw_schema_sha256 && sourceDb.raw_schema_sha256 === targetDb.raw_schema_sha256
+  );
+
+  const changedBuckets = [];
+  const changedFields = {};
+  const rowCountsDeltas = {};
+
+  const srcBuckets = sourceDb?.canonical_components?.buckets || {};
+  const tgtBuckets = targetDb?.canonical_components?.buckets || {};
+
+  for (const bucket of BOUNDED_BUCKETS) {
+    const srcB = srcBuckets[bucket] || {};
+    const tgtB = tgtBuckets[bucket] || {};
+    const srcCount = Number.isInteger(srcB.count) ? srcB.count : 0;
+    const tgtCount = Number.isInteger(tgtB.count) ? tgtB.count : 0;
+    rowCountsDeltas[bucket] = tgtCount - srcCount;
+
+    const countChanged = srcCount !== tgtCount;
+    const shaChanged = Boolean(srcB.sha256 && tgtB.sha256 && srcB.sha256 !== tgtB.sha256);
+
+    const bucketChangedFields = [];
+    const fieldsList = BOUNDED_FIELDS[bucket] || [];
+    for (const field of fieldsList) {
+      const srcF = srcB.fields?.[field];
+      const tgtF = tgtB.fields?.[field];
+      if (srcF && tgtF && srcF !== tgtF) {
+        bucketChangedFields.push(field);
+      }
+    }
+
+    if (countChanged || shaChanged || bucketChangedFields.length > 0) {
+      changedBuckets.push(bucket);
+      if (bucketChangedFields.length > 0) {
+        changedFields[bucket] = bucketChangedFields;
+      }
+    }
+  }
+
+  const srcLedgerCount = sourceDb?.canonical_components?.ledger?.count ?? (Array.isArray(sourceDb?.ledger) ? sourceDb.ledger.length : 0);
+  const tgtLedgerCount = targetDb?.canonical_components?.ledger?.count ?? (Array.isArray(targetDb?.ledger) ? targetDb.ledger.length : 0);
+  rowCountsDeltas.ledger = tgtLedgerCount - srcLedgerCount;
+
+  return {
+    stage: stageName,
+    schema_equal: schemaEqual,
+    ledger_equal: ledgerEqual,
+    raw_schema_equal: rawSchemaEqual,
+    buckets_changed_count: changedBuckets.length,
+    changed_buckets: changedBuckets,
+    changed_fields: changedFields,
+    row_counts_deltas: rowCountsDeltas,
+  };
+}
+
 async function observeMigrationSafetySnapshot(safetyDir, preExistingFiles, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let sqlPath = null;
@@ -1027,6 +1100,35 @@ const baselineDbPath = path.join(lab, 'baseline-db.json');
 assert.ok(fs.existsSync(baselineDbPath), `Baseline DB missing: ${baselineDbPath}`);
 const baselineDb = JSON.parse(fs.readFileSync(baselineDbPath, 'utf8'));
 
+const schemaDiagnostics = {
+  format: 1,
+  contract_matches_baseline: Boolean(
+    contract?.schema_sha256 && baselineDb?.schema_sha256 &&
+    contract.schema_sha256 === baselineDb.schema_sha256 &&
+    contract?.ledger_sha256 && baselineDb?.ledger_sha256 &&
+    contract.ledger_sha256 === baselineDb.ledger_sha256
+  ),
+  actual_matches_contract: null,
+  actual_matches_carrier: null,
+  carrier_matches_contract: null,
+  earliest_drift_stage: 'none',
+  stages: [],
+};
+
+if (!schemaDiagnostics.contract_matches_baseline) {
+  schemaDiagnostics.earliest_drift_stage = 'contract';
+}
+
+function persistSchemaDiagnostics() {
+  try {
+    const summaryFile = path.join(evidence, 'diagnostic-schema-stage-summary.json');
+    fs.writeFileSync(summaryFile, JSON.stringify(schemaDiagnostics, null, 2), 'utf8');
+  } catch {
+    console.error('Failed to persist schema stage diagnostics: write_failed');
+  }
+}
+persistSchemaDiagnostics();
+
 const baselineProtectedPath = path.join(lab, 'baseline-system-protected.json');
 assert.ok(fs.existsSync(baselineProtectedPath), `Baseline protected state missing: ${baselineProtectedPath}`);
 const baselineProtected = JSON.parse(fs.readFileSync(baselineProtectedPath, 'utf8'));
@@ -1074,6 +1176,8 @@ const results = {
 };
 
 let offlineBefore = null;
+let dbAfterRestore = null;
+let dbAfterUpgrade = null;
 
 try {
   // ── TEST 1: Reproduce Bug 1 on Published Setup 12 ──────────────────────────
@@ -1133,7 +1237,7 @@ try {
       setup12RestoreOutcome = { error: true };
     }
 
-    const dbAfterRestore = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
+    dbAfterRestore = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
     const dbSuccess = dbAfterRestore.customer?.name === SENTINEL;
     const outcomeClass = dbSuccess ? 'SUCCESS' : (setup12ContextLost ? 'UNKNOWN_CONTEXT_LOST' : 'FAILURE');
     results.details.setup12_baseline_restore = {
@@ -1142,6 +1246,16 @@ try {
       failed: !dbSuccess,
     };
     console.log('[Test 1 Baseline Restore] Setup 12 restore attempt recorded:', results.details.setup12_baseline_restore.outcome);
+
+    const restoreDiff = compareDbStages('baseline_to_restore', baselineDb, dbAfterRestore);
+    schemaDiagnostics.stages.push(restoreDiff);
+    if ((!restoreDiff.schema_equal || !restoreDiff.ledger_equal) && schemaDiagnostics.earliest_drift_stage === 'none') {
+      schemaDiagnostics.earliest_drift_stage = 'restore';
+    }
+    persistSchemaDiagnostics();
+    console.log(
+      `[Schema Drift Diagnostic] Stage: baseline_to_restore | schema_equal: ${restoreDiff.schema_equal} | ledger_equal: ${restoreDiff.ledger_equal} | raw_schema_equal: ${restoreDiff.raw_schema_equal} | changed_buckets: [${restoreDiff.changed_buckets.join(', ')}] | earliest_drift: ${schemaDiagnostics.earliest_drift_stage}`
+    );
 
     if (!dbSuccess) {
       const dbMutCheck = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: MUTATED_SENTINEL });
@@ -1291,7 +1405,7 @@ try {
     assert.equal(runningAppVersion, '0.0.13', 'Running native Candidate 13 application must report version 0.0.13');
 
     // Verify database sentinel row and admin digest preserved
-    const dbAfterUpgrade = runPhpFixture('inspect-db', {
+    dbAfterUpgrade = runPhpFixture('inspect-db', {
       'config-dir': configDir,
       sentinel: SENTINEL,
     });
@@ -1300,6 +1414,27 @@ try {
     assert.equal(dbAfterUpgrade.setting?.value, baselineDb.setting?.value, 'Sentinel setting lost during upgrade');
     assert.equal(dbAfterUpgrade.admin_digest, baselineDb.admin_digest, 'Admin credentials altered during upgrade');
     assert.deepEqual(dbAfterUpgrade.ledger_rows, baselineDb.ledger_rows, 'Full raw schema_versions rows altered during silent upgrade');
+
+    if (dbAfterRestore) {
+      const upgradeFromRestoreDiff = compareDbStages('restore_to_upgrade', dbAfterRestore, dbAfterUpgrade);
+      schemaDiagnostics.stages.push(upgradeFromRestoreDiff);
+      if ((!upgradeFromRestoreDiff.schema_equal || !upgradeFromRestoreDiff.ledger_equal) && schemaDiagnostics.earliest_drift_stage === 'none') {
+        schemaDiagnostics.earliest_drift_stage = 'upgrade';
+      }
+    }
+    const upgradeCumulativeDiff = compareDbStages('baseline_to_upgrade', baselineDb, dbAfterUpgrade);
+    schemaDiagnostics.stages.push(upgradeCumulativeDiff);
+    if ((!upgradeCumulativeDiff.schema_equal || !upgradeCumulativeDiff.ledger_equal) && schemaDiagnostics.earliest_drift_stage === 'none') {
+      schemaDiagnostics.earliest_drift_stage = 'upgrade';
+    }
+    schemaDiagnostics.actual_matches_contract = Boolean(
+      dbAfterUpgrade.schema_sha256 === contract.schema_sha256 &&
+      dbAfterUpgrade.ledger_sha256 === contract.ledger_sha256
+    );
+    persistSchemaDiagnostics();
+    console.log(
+      `[Schema Drift Diagnostic] Stage: restore_to_upgrade | schema_equal: ${schemaDiagnostics.stages.find((s) => s.stage === 'restore_to_upgrade')?.schema_equal ?? null} | cumulative_schema_equal: ${upgradeCumulativeDiff.schema_equal} | actual_matches_contract: ${schemaDiagnostics.actual_matches_contract} | earliest_drift: ${schemaDiagnostics.earliest_drift_stage}`
+    );
 
     // Verify system protected state
     const protectedAfterUpgrade = await getSystemProtectedState(transitionLab);
@@ -1353,6 +1488,37 @@ try {
       baseInv,
       screenshotName,
     }) {
+      if (schemaDiagnostics.carrier_matches_contract === null) {
+        const sampleDesc = findCarrierDescriptor(lab, {
+          fromVersion: expectedFromVersion,
+          targetVersion: expectedTargetVersion,
+          channel,
+          sourceInventorySha256: expectedSourceInvHash,
+          targetInventorySha256: expectedTargetInvHash,
+        });
+        if (sampleDesc?.data_compatibility && contract) {
+          schemaDiagnostics.carrier_matches_contract = Boolean(
+            sampleDesc.data_compatibility.schema_sha256 === contract.schema_sha256 &&
+            sampleDesc.data_compatibility.ledger_sha256 === contract.ledger_sha256
+          );
+          if (dbAfterUpgrade) {
+            schemaDiagnostics.actual_matches_carrier = Boolean(
+              sampleDesc.data_compatibility.schema_sha256 === dbAfterUpgrade.schema_sha256 &&
+              sampleDesc.data_compatibility.ledger_sha256 === dbAfterUpgrade.ledger_sha256
+            );
+          }
+          if (!schemaDiagnostics.carrier_matches_contract && schemaDiagnostics.earliest_drift_stage === 'none') {
+            schemaDiagnostics.earliest_drift_stage = 'carrier_descriptor';
+          }
+        }
+      }
+
+      if (schemaDiagnostics.contract_matches_baseline && schemaDiagnostics.earliest_drift_stage === 'restore') {
+        console.log('[Schema Drift Diagnostic] Captured contract matches baseline; schema drift detected post-Setup-12 restore (earliest drift stage: restore).');
+      }
+
+      persistSchemaDiagnostics();
+
       if (await transitionLab.evaluate('Boolean(document.querySelector("input[type=email]"))')) {
         await transitionLab.login(auth.email, auth.password);
       }
@@ -1372,6 +1538,8 @@ try {
         return await res.json();
       })()`);
       console.log(`[${stepName}] Preview Status:`, previewData?.data?.status, 'Reason:', previewData?.data?.reason_code);
+      console.log(`[${stepName} Diagnostic] reason_code: ${previewData?.data?.reason_code || 'none'}, earliest_drift: ${schemaDiagnostics.earliest_drift_stage}`);
+      persistSchemaDiagnostics();
       if (!v13TraceVerified && expectedFromVersion === '0.0.13') {
         assert.ok(fs.existsSync(tracePath), `[${stepName}] Provider trace file missing: ${tracePath}`);
         const traceLines = fs.readFileSync(tracePath, 'utf8').trim().split('\n').filter(Boolean);
@@ -1905,6 +2073,7 @@ try {
 } catch (error) {
   console.error('\nFAILURE during acceptance verification:', error.message);
   try {
+    persistSchemaDiagnostics();
     // Capture sanitized diagnostic files with strict field allowlist
     const stateFile = path.join(storageDir, 'update-state.json');
     if (fs.existsSync(stateFile)) {
