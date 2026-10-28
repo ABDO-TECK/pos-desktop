@@ -1331,7 +1331,7 @@ try {
         });
         return await res.json();
       })()`);
-      console.log(`[${stepName}] Preview Status:`, previewData?.data?.status);
+      console.log(`[${stepName}] Preview Status:`, previewData?.data?.status, 'Reason:', previewData?.data?.reason_code);
       assert.equal(previewData?.data?.status, 'ready', `[${stepName}] Transition preview must be ready`);
       if (expectedFromVersion) {
         assert.equal(previewData?.data?.installed?.version, expectedFromVersion, `[${stepName}] Installed version mismatch in preview`);
