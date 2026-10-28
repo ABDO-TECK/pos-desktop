@@ -2923,8 +2923,6 @@ try {
     });
     assert.equal(pre5Db.ok, true, 'Pre-Test5 inspect-db failed');
     const pre5Protected = await getSystemProtectedState(transitionLab);
-    const installedExePath = path.join(application, 'POS Desktop.exe');
-    const installedAsarPath = path.join(application, 'resources/app.asar');
     assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'Pre-Test5 POS Desktop.exe altered');
     assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'Pre-Test5 app.asar altered');
     verifyInventoryFiles(candidate13DeltaInv);
