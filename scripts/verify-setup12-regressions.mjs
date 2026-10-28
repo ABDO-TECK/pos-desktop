@@ -1173,33 +1173,6 @@ try {
   assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'Installed POS Desktop.exe does not match candidate shell root');
   assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'Installed app.asar does not match candidate shell root');
 
-  // Verify database sentinel row and admin digest preserved
-  const dbAfterUpgrade = runPhpFixture('inspect-db', {
-    'config-dir': configDir,
-    sentinel: SENTINEL,
-  });
-  assert.equal(dbAfterUpgrade.ok, true, 'inspect-db after upgrade failed');
-  assert.equal(dbAfterUpgrade.customer?.name, SENTINEL, 'Sentinel customer record lost during upgrade');
-  assert.equal(dbAfterUpgrade.setting?.value, baselineDb.setting?.value, 'Sentinel setting lost during upgrade');
-  assert.equal(dbAfterUpgrade.admin_digest, baselineDb.admin_digest, 'Admin credentials altered during upgrade');
-  assert.deepEqual(dbAfterUpgrade.ledger_rows, baselineDb.ledger_rows, 'Full raw schema_versions rows altered during silent upgrade');
-
-  // Verify system protected state
-  const protectedAfterUpgrade = await getSystemProtectedState();
-  assertProtectedStatePreserved(baselineProtected, protectedAfterUpgrade, 'Candidate 13 Upgrade');
-
-  results.verifications.candidate13_silent_upgrade = true;
-  results.verifications.candidate13_shell_root_preserved = true;
-  results.details.silent_upgrade = {
-    from_version: '0.0.12',
-    to_version: '0.0.13',
-    schema_matches_contract: dbAfterUpgrade.schema_sha256 === contract.schema_sha256,
-    ledger_count: dbAfterUpgrade.ledger_count,
-  };
-  console.log('PASS [Test 2] Candidate 13 silent upgrade verified. Files, shell root, and database preserved.');
-
-  // ── TEST 3: Bidirectional Channel Transition on Candidate 13 ───────────────
-  console.log('\n[Test 3] Testing Bidirectional Channel Transitions on Candidate 13 (Bug 1 Fix)...');
   const roundtripFixturePath = path.join(lab, 'provider-roundtrip.json');
   runPhpFixture('generate-provider-fixture', {
     mode: 'candidate13-roundtrip',
@@ -1220,10 +1193,41 @@ try {
     if (await transitionLab.evaluate('Boolean(document.querySelector("input[type=email]"))')) {
       await transitionLab.login(auth.email, auth.password);
     }
+    await transitionLab.until('Boolean(document.querySelector("a[href=\'/settings\']"))', 'authenticated navigation', 60000);
+
+    const runningAppVersion = await transitionLab.evaluate('window.electronAPI?.getVersion ? window.electronAPI.getVersion() : null');
+    assert.equal(runningAppVersion, '0.0.13', 'Running native Candidate 13 application must report version 0.0.13');
+
+    // Verify database sentinel row and admin digest preserved
+    const dbAfterUpgrade = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: SENTINEL,
+    });
+    assert.equal(dbAfterUpgrade.ok, true, 'inspect-db after upgrade failed');
+    assert.equal(dbAfterUpgrade.customer?.name, SENTINEL, 'Sentinel customer record lost during upgrade');
+    assert.equal(dbAfterUpgrade.setting?.value, baselineDb.setting?.value, 'Sentinel setting lost during upgrade');
+    assert.equal(dbAfterUpgrade.admin_digest, baselineDb.admin_digest, 'Admin credentials altered during upgrade');
+    assert.deepEqual(dbAfterUpgrade.ledger_rows, baselineDb.ledger_rows, 'Full raw schema_versions rows altered during silent upgrade');
+
+    // Verify system protected state
+    const protectedAfterUpgrade = await getSystemProtectedState(transitionLab);
+    assertProtectedStatePreserved(baselineProtected, protectedAfterUpgrade, 'Candidate 13 Upgrade');
 
     // Verify IndexedDB pending sale preserved across NSIS silent upgrade
     assert.deepEqual(await pendingSale(transitionLab, 'get'), offlineBefore, 'Offline sale preserved after Candidate 13 silent upgrade');
 
+    results.verifications.candidate13_silent_upgrade = true;
+    results.verifications.candidate13_shell_root_preserved = true;
+    results.details.silent_upgrade = {
+      from_version: '0.0.12',
+      to_version: '0.0.13',
+      schema_matches_contract: dbAfterUpgrade.schema_sha256 === contract.schema_sha256,
+      ledger_count: dbAfterUpgrade.ledger_count,
+    };
+    console.log('PASS [Test 2] Candidate 13 silent upgrade verified. Files, shell root, and database preserved.');
+
+    // ── TEST 3: Bidirectional Channel Transition on Candidate 13 ───────────────
+    console.log('\n[Test 3] Testing Bidirectional Channel Transitions on Candidate 13 (Bug 1 Fix)...');
     await transitionLab.system();
 
     async function executeTransition({
