@@ -1,0 +1,112 @@
+name: Setup 12 Packaged Acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix-setup12-channel-and-restore
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup12-packaged-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-acceptance:
+    name: Setup 12 Packaged Acceptance
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Cache pinned vendor archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-tools/desktop-runtime-downloads
+            build-tools/qz-tray-2.2.6-x86_64.exe
+          key: windows-portable-${{ hashFiles('scripts/desktop-runtime.json') }}
+
+      - name: Prepare portable desktop runtime
+        shell: pwsh
+        run: |
+          npm run prepare:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run prepare:print-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run verify:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Prepare Setup 12 packaged regressions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase prepare
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Sign Setup 12 bidirectional transition packages
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase sign
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Execute Setup 12 packaged acceptance
+        shell: pwsh
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase acceptance
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Cleanup regression resources and finalize acceptance
+        if: always()
+        shell: pwsh
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase cleanup
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup12-packaged-acceptance-evidence
+          path: |
+            ${{ runner.temp }}/setup12-regression-evidence/acceptance.json
+            ${{ runner.temp }}/setup12-regression-evidence/candidate-results.json
+            ${{ runner.temp }}/setup12-regression-evidence/*.png
+            ${{ runner.temp }}/setup12-regression-evidence/diagnostic-*.json
+          if-no-files-found: ignore
+          retention-days: 14
