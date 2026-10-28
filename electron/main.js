@@ -468,16 +468,42 @@ async function clearDesktopRendererStorage() {
 }
 
 async function restoreDesktopBackup(filePath) {
+  const {
+    createRestoreError,
+    RESTORE_STAGES,
+    RESTORE_ERROR_CODES,
+    RESTORE_PREFLIGHT_REASONS,
+    executeRestoreStateMachine,
+  } = require('./services/restore-manager');
+
   if (process.env.POS_LAN_ENABLED === 'true') {
-    throw new Error('Database restore is available only while the desktop runtime is local');
+    const crypto = require('node:crypto');
+    throw createRestoreError(
+      RESTORE_ERROR_CODES.VALIDATION_FAILED,
+      'Database restore is available only while the desktop runtime is local',
+      {
+        stage: RESTORE_STAGES.VALIDATE,
+        reason: RESTORE_PREFLIGHT_REASONS.LAN_ENABLED,
+        recovered: false,
+        reference: crypto.randomBytes(8).toString('hex'),
+      }
+    );
   }
 
   const phpServer = require('./services/php-server');
   if (!phpServer.getPhpServerInfo()) {
-    throw new Error('The local PHP server is not running');
+    const crypto = require('node:crypto');
+    throw createRestoreError(
+      RESTORE_ERROR_CODES.VALIDATION_FAILED,
+      'The local PHP server is not running',
+      {
+        stage: RESTORE_STAGES.VALIDATE,
+        reason: RESTORE_PREFLIGHT_REASONS.PHP_NOT_RUNNING,
+        recovered: false,
+        reference: crypto.randomBytes(8).toString('hex'),
+      }
+    );
   }
-
-  const { executeRestoreStateMachine } = require('./services/restore-manager');
 
   const hooks = {
     stopWorker: async () => {
@@ -1313,11 +1339,16 @@ app.whenReady().then(async () => {
     try {
       return await restoreDesktopBackup(selection.filePaths[0]);
     } catch (error) {
-      console.error('[Backup] Desktop restore failed:', error.message);
-      return {
-        success: false,
-        error: 'Database restore failed. Check the error log for the reference.',
-      };
+      const { formatRestoreFailure, classifyRestoreError } = require('./services/restore-manager');
+      const failure = formatRestoreFailure(error);
+      const diagnostics = classifyRestoreError(error);
+      console.error(
+        `[Backup] Desktop restore failed [${failure.reference}]: ` +
+        `stage=${failure.stage || 'unknown'}, code=${failure.code}, recovered=${failure.recovered}, ` +
+        `errorName=${diagnostics.name}, cause=${diagnostics.causeClassification || 'none'}` +
+        (diagnostics.reason ? `, reason=${diagnostics.reason}` : '')
+      );
+      return failure;
     }
   });
 

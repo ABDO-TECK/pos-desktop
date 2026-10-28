@@ -1,0 +1,90 @@
+name: Setup 12 Core Unit Regressions
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix-setup12-channel-and-restore]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup12-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-unit-regressions:
+    name: Setup 12 Core Unit Regressions
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Execute core unit regressions
+        shell: pwsh
+        run: |
+          php scripts/verify-active-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-release-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-update-channel-policy.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-channel-transition-compatibility.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-channel-transition-flow.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-api.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-catalog.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-data.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-manifest.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-preview.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-transition-receipt.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-restore-error-contract.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-desktop-restore-flow.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Record unit regression summary
+        shell: pwsh
+        run: |
+          Write-Output 'Unit tests only; packaged Setup/channel handoff/desktop SQL restore acceptance NOT RUN.'
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### Setup 12 Core Unit Regressions'
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'Unit tests only; packaged Setup/channel handoff/desktop SQL restore acceptance NOT RUN.'
+          }

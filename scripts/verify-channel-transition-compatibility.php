@@ -6,6 +6,7 @@ require_once __DIR__.'/verify-transition-data.php';
 use App\Services\{
     BackupService,
     ChannelTransitionManifestService,
+    ChannelTransitionPreviewStore,
     ChannelTransitionReleaseCatalog,
     ChannelTransitionService,
     DeltaUpdateService,
@@ -990,6 +991,380 @@ compatAssert(
 );
 
 // =========================================================================
+// TEST 15: Dual-source v0.0.12 resolution - Setup 12 variant chosen and ready
+// when matching fixture carrier exists; assert source binding & raw inventory digest
+// =========================================================================
+$setup12VersionContent = json_encode(['version' => '0.0.12', 'build' => 'setup']);
+$setup12PharContent = 'authentic-setup-12-phar-content';
+$setup12JsContent = 'console.log("setup-12");';
+
+file_put_contents($root . '/version.json', $setup12VersionContent);
+file_put_contents($root . '/backend/backend.phar', $setup12PharContent);
+file_put_contents($root . '/frontend/dist/app.js', $setup12JsContent);
+
+$installedSetup12Files = [
+    'version.json' => ['sha256' => hash('sha256', $setup12VersionContent), 'size' => strlen($setup12VersionContent)],
+    'backend/backend.phar' => ['sha256' => hash('sha256', $setup12PharContent), 'size' => strlen($setup12PharContent)],
+    'frontend/dist/app.js' => ['sha256' => hash('sha256', $setup12JsContent), 'size' => strlen($setup12JsContent)],
+];
+$inventorySetup12 = ['format' => 1, 'version' => '0.0.12', 'shell_sha256' => $shellDigest, 'files' => $installedSetup12Files];
+$inventorySetup12Raw = json_encode($inventorySetup12, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+$inventorySetup12Sha = hash('sha256', $inventorySetup12Raw);
+
+// Delta 12 has distinct authentic inventory files for the same published version 0.0.12
+$delta12VersionContent = json_encode(['version' => '0.0.12', 'build' => 'delta']);
+$delta12PharContent = 'authentic-delta-12-phar-content';
+$delta12JsContent = 'console.log("delta-12");';
+
+$installedDelta12Files = [
+    'version.json' => ['sha256' => hash('sha256', $delta12VersionContent), 'size' => strlen($delta12VersionContent)],
+    'backend/backend.phar' => ['sha256' => hash('sha256', $delta12PharContent), 'size' => strlen($delta12PharContent)],
+    'frontend/dist/app.js' => ['sha256' => hash('sha256', $delta12JsContent), 'size' => strlen($delta12JsContent)],
+];
+$inventoryDelta12 = ['format' => 1, 'version' => '0.0.12', 'shell_sha256' => $shellDigest, 'files' => $installedDelta12Files];
+$inventoryDelta12Raw = json_encode($inventoryDelta12, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+$inventoryDelta12Sha = hash('sha256', $inventoryDelta12Raw);
+compatAssert($inventorySetup12Sha !== $inventoryDelta12Sha, 'Setup and Delta 12 inventories must have distinct digests');
+
+// Target Beta 0.0.12-beta.1 release
+$targetBeta12Files = [
+    'version.json' => ['sha256' => hash('sha256', 'beta12-target-version'), 'size' => 33],
+    'backend/backend.phar' => ['sha256' => hash('sha256', 'beta12-target-phar'), 'size' => 600],
+    'frontend/dist/app.js' => ['sha256' => hash('sha256', 'beta12-target-js'), 'size' => 450],
+];
+$inventoryBeta12 = ['format' => 1, 'version' => '0.0.12-beta.1', 'shell_sha256' => $shellDigest, 'files' => $targetBeta12Files];
+$inventoryBeta12Raw = json_encode($inventoryBeta12, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+$inventoryBeta12Sha = hash('sha256', $inventoryBeta12Raw);
+
+// Signed transition descriptor: Setup 12 -> Beta 12
+$stemSetup12ToBeta = 'transition-0.0.12-setup-to-beta-0.0.12-beta.1-delta';
+$descSetup12ToBeta = [
+    'format' => 1,
+    'operation' => 'channel_transition',
+    'carrier_tag' => 'v0.0.12-beta.1',
+    'from_version' => '0.0.12',
+    'from_channel' => 'stable',
+    'source_inventory_sha256' => $inventorySetup12Sha,
+    'source_inventory' => $inventorySetup12,
+    'version' => '0.0.12-beta.1',
+    'channel' => 'beta',
+    'target_repo' => 'pos-desktop-updates',
+    'target_tag' => 'v0.0.12-beta.1',
+    'target_inventory_sha256' => $inventoryBeta12Sha,
+    'target_inventory' => $inventoryBeta12,
+    'shell_sha256' => $shellDigest,
+    'type' => 'delta',
+    'files' => array_map(static fn($p) => ['path' => $p, ...$targetBeta12Files[$p]], array_keys($targetBeta12Files)),
+    'deleted_files' => [],
+    'migrations' => [],
+    'package' => ['asset' => $stemSetup12ToBeta . '.zip', 'sha256' => str_repeat('1', 64), 'size' => 300],
+    'data_compatibility' => $contract,
+];
+[$rawDescSetup12ToBeta, $sigDescSetup12ToBeta] = $sign($descSetup12ToBeta);
+$entrySetup12ToBeta = [
+    'from_version' => '0.0.12',
+    'source_inventory_sha256' => $inventorySetup12Sha,
+    'version' => '0.0.12-beta.1',
+    'channel' => 'beta',
+    'descriptor' => $stemSetup12ToBeta . '.json',
+    'signature' => $stemSetup12ToBeta . '.sig',
+    'descriptor_sha256' => hash('sha256', $rawDescSetup12ToBeta),
+    'type' => 'delta',
+];
+
+// Signed transition descriptor: Delta 12 -> Beta 12
+$stemDelta12ToBeta = 'transition-0.0.12-delta-to-beta-0.0.12-beta.1-delta';
+$descDelta12ToBeta = [
+    'format' => 1,
+    'operation' => 'channel_transition',
+    'carrier_tag' => 'v0.0.12-beta.1',
+    'from_version' => '0.0.12',
+    'from_channel' => 'stable',
+    'source_inventory_sha256' => $inventoryDelta12Sha,
+    'source_inventory' => $inventoryDelta12,
+    'version' => '0.0.12-beta.1',
+    'channel' => 'beta',
+    'target_repo' => 'pos-desktop-updates',
+    'target_tag' => 'v0.0.12-beta.1',
+    'target_inventory_sha256' => $inventoryBeta12Sha,
+    'target_inventory' => $inventoryBeta12,
+    'shell_sha256' => $shellDigest,
+    'type' => 'delta',
+    'files' => array_map(static fn($p) => ['path' => $p, ...$targetBeta12Files[$p]], array_keys($targetBeta12Files)),
+    'deleted_files' => [],
+    'migrations' => [],
+    'package' => ['asset' => $stemDelta12ToBeta . '.zip', 'sha256' => str_repeat('2', 64), 'size' => 300],
+    'data_compatibility' => $contract,
+];
+[$rawDescDelta12ToBeta, $sigDescDelta12ToBeta] = $sign($descDelta12ToBeta);
+$entryDelta12ToBeta = [
+    'from_version' => '0.0.12',
+    'source_inventory_sha256' => $inventoryDelta12Sha,
+    'version' => '0.0.12-beta.1',
+    'channel' => 'beta',
+    'descriptor' => $stemDelta12ToBeta . '.json',
+    'signature' => $stemDelta12ToBeta . '.sig',
+    'descriptor_sha256' => hash('sha256', $rawDescDelta12ToBeta),
+    'type' => 'delta',
+];
+
+// Carrier index containing both transitions
+[$rawIndexBeta12Dual, $sigIndexBeta12Dual] = $sign([
+    'format' => 1,
+    'carrier_tag' => 'v0.0.12-beta.1',
+    'entries' => [$entrySetup12ToBeta, $entryDelta12ToBeta],
+]);
+
+$releaseSourceUpdates12 = makeCompatRelease('pos-desktop-updates', '0.0.12', ['deployment-inventory.json']);
+$releaseSourceSetup12 = makeCompatRelease('pos-desktop', '0.0.12', ['deployment-inventory.json']);
+$releaseBeta12Carrier = makeCompatRelease('pos-desktop-updates', '0.0.12-beta.1', [
+    'deployment-inventory.json',
+    'channel-transitions.json',
+    'channel-transitions.sig',
+    $stemSetup12ToBeta . '.json',
+    $stemSetup12ToBeta . '.sig',
+    $stemSetup12ToBeta . '.zip',
+    $stemDelta12ToBeta . '.json',
+    $stemDelta12ToBeta . '.sig',
+    $stemDelta12ToBeta . '.zip',
+]);
+
+$provider->releasesByRepoTag['pos-desktop-updates:v0.0.12'] = $releaseSourceUpdates12;
+$provider->releasesByRepoTag['pos-desktop:v0.0.12'] = $releaseSourceSetup12;
+$provider->releasesByRepoTag['pos-desktop-updates:v0.0.12-beta.1'] = $releaseBeta12Carrier;
+$provider->channelCandidates['beta'] = [$releaseBeta12Carrier];
+
+$beta12Url = static fn(string $name): string => 'https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12-beta.1/' . $name;
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12/deployment-inventory.json'] = $inventoryDelta12Raw;
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json'] = $inventorySetup12Raw;
+$provider->assets[$beta12Url('deployment-inventory.json')] = $inventoryBeta12Raw;
+$provider->assets[$beta12Url('channel-transitions.json')] = $rawIndexBeta12Dual;
+$provider->assets[$beta12Url('channel-transitions.sig')] = $sigIndexBeta12Dual;
+$provider->assets[$beta12Url($stemSetup12ToBeta . '.json')] = $rawDescSetup12ToBeta;
+$provider->assets[$beta12Url($stemSetup12ToBeta . '.sig')] = $sigDescSetup12ToBeta;
+$provider->assets[$beta12Url($stemDelta12ToBeta . '.json')] = $rawDescDelta12ToBeta;
+$provider->assets[$beta12Url($stemDelta12ToBeta . '.sig')] = $sigDescDelta12ToBeta;
+
+$updates->setClientChannel('beta');
+$previewDualSetup = $service->preview(1, 'beta');
+compatAssert(
+    $previewDualSetup['status'] === 'ready' &&
+    $previewDualSetup['target']['version'] === '0.0.12-beta.1' &&
+    $previewDualSetup['reason_code'] === null &&
+    $previewDualSetup['package_type'] === 'delta' &&
+    ($previewDualSetup['installed']['source_repo'] ?? '') === 'pos-desktop' &&
+    ($previewDualSetup['installed']['inventory_sha256'] ?? '') === $inventorySetup12Sha,
+    'Scenario 15: Setup v0.0.12 variant must select pos-desktop and be ready with matching carrier. Got: ' . json_encode($previewDualSetup)
+);
+
+// Assert preview claim rejects wrong source inventory SHA in binding
+$previewStore = new ChannelTransitionPreviewStore($lab . '/storage/channel-transition-previews');
+$claimBindingSetup = [
+    'installed_version' => '0.0.12',
+    'source_inventory' => $inventorySetup12Sha,
+    'shell' => $shellDigest,
+    'channel' => 'beta',
+    'target' => $previewDualSetup['target'],
+    'descriptor' => hash('sha256', $rawDescSetup12ToBeta),
+    'schema' => $contract['schema_sha256'],
+    'ledger' => $contract['ledger_sha256'],
+];
+compatAssert(
+    !$previewStore->claim($previewDualSetup['preview_id'], 1, [...$claimBindingSetup, 'source_inventory' => $inventoryDelta12Sha])['ok'],
+    'Scenario 15.1: Claim with Delta inventory SHA on Setup-selected preview must be refused'
+);
+$claimSuccess = $previewStore->claim($previewDualSetup['preview_id'], 1, $claimBindingSetup);
+compatAssert(
+    $claimSuccess['ok'] === true,
+    'Scenario 15.2: Claim with exact authentic Setup source binding must succeed on unconsumed token'
+);
+$claimReuse = $previewStore->claim($previewDualSetup['preview_id'], 1, $claimBindingSetup);
+compatAssert(
+    !$claimReuse['ok'],
+    'Scenario 15.3: Claiming already consumed preview token must fail (single-use preserved)'
+);
+
+// =========================================================================
+// TEST 16: Reverse variant match Delta inventory: chooses pos-desktop-updates, ready
+// =========================================================================
+file_put_contents($root . '/version.json', $delta12VersionContent);
+file_put_contents($root . '/backend/backend.phar', $delta12PharContent);
+file_put_contents($root . '/frontend/dist/app.js', $delta12JsContent);
+
+$previewDualDelta = $service->preview(1, 'beta');
+compatAssert(
+    $previewDualDelta['status'] === 'ready' &&
+    $previewDualDelta['target']['version'] === '0.0.12-beta.1' &&
+    $previewDualDelta['reason_code'] === null &&
+    $previewDualDelta['package_type'] === 'delta' &&
+    ($previewDualDelta['installed']['source_repo'] ?? '') === 'pos-desktop-updates' &&
+    ($previewDualDelta['installed']['inventory_sha256'] ?? '') === $inventoryDelta12Sha,
+    'Scenario 16: Delta v0.0.12 variant must select pos-desktop-updates and be ready. Got: ' . json_encode($previewDualDelta)
+);
+
+// =========================================================================
+// TEST 17: Changing 1 installed file: still source_inventory_mismatch, never bypass
+// =========================================================================
+file_put_contents($root . '/backend/backend.phar', 'tampered-backend-neither-setup-nor-delta');
+$previewTampered12 = $service->preview(1, 'beta');
+compatAssert(
+    $previewTampered12['status'] === 'blocked' &&
+    $previewTampered12['reason_code'] === 'source_inventory_mismatch',
+    'Scenario 17: Tampered file with dual 12 releases present must block with source_inventory_mismatch. Got: ' . json_encode($previewTampered12)
+);
+
+// Restore Setup 12 files
+file_put_contents($root . '/version.json', $setup12VersionContent);
+file_put_contents($root . '/backend/backend.phar', $setup12PharContent);
+file_put_contents($root . '/frontend/dist/app.js', $setup12JsContent);
+
+// =========================================================================
+// TEST 18: Candidate 404, Non-404 discovery fail-closed, Malformed/missing
+// inventory, Equivalent identity, Beta direction coverage
+// =========================================================================
+// 18.1: Candidate pos-desktop-updates returns 404; pos-desktop matches Setup 12
+unset($provider->releasesByRepoTag['pos-desktop-updates:v0.0.12']);
+$previewUpdates404 = $service->preview(1, 'beta');
+compatAssert(
+    $previewUpdates404['status'] === 'ready' &&
+    ($previewUpdates404['installed']['source_repo'] ?? '') === 'pos-desktop',
+    'Scenario 18.1: When pos-desktop-updates is 404, candidate pos-desktop must be chosen. Got: ' . json_encode($previewUpdates404)
+);
+
+// 18.2: Both candidates return 404 -> source_release_unavailable
+unset($provider->releasesByRepoTag['pos-desktop:v0.0.12']);
+$previewBoth404 = $service->preview(1, 'beta');
+compatAssert(
+    $previewBoth404['status'] === 'blocked' &&
+    $previewBoth404['reason_code'] === 'source_release_unavailable',
+    'Scenario 18.2: When both repos 404, must block with source_release_unavailable. Got: ' . json_encode($previewBoth404)
+);
+
+// Restore releases
+$provider->releasesByRepoTag['pos-desktop-updates:v0.0.12'] = $releaseSourceUpdates12;
+$provider->releasesByRepoTag['pos-desktop:v0.0.12'] = $releaseSourceSetup12;
+
+// 18.3: Non-404 discovery error (HTTP 500) must fail closed with discovery_failed
+$errorProvider = new class extends CompatTestReleaseProvider {
+    public function getReleaseByTag(string $tag, string $repo = 'pos-desktop-updates'): array {
+        if ($repo === 'pos-desktop-updates' && $tag === 'v0.0.12') {
+            return ['ok' => false, 'http_code' => 500, 'error' => 'Internal server error 500'];
+        }
+        return parent::getReleaseByTag($tag, $repo);
+    }
+};
+$errorProvider->releasesByRepoTag = $provider->releasesByRepoTag;
+$errorProvider->channelCandidates = $provider->channelCandidates;
+$errorProvider->assets = $provider->assets;
+$errorService = new ChannelTransitionService(
+    new UpdateService(new GitService(), new FrontendBuildService(), new BackupService(), $delta, null, null, $errorProvider),
+    new BackupService(),
+    $pdo,
+    $manifestSignatures
+);
+$preview500 = $errorService->preview(1, 'beta');
+compatAssert(
+    $preview500['status'] === 'blocked' &&
+    $preview500['reason_code'] === 'discovery_failed',
+    'Scenario 18.3: HTTP 500 discovery must fail closed with discovery_failed. Got: ' . json_encode($preview500)
+);
+
+// 18.4: Malformed deployment inventory must fail closed with source_inventory_unavailable
+$savedSetupInv = $provider->assets['https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json'];
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json'] = '{corrupt-json';
+$previewCorruptInv = $service->preview(1, 'beta');
+compatAssert(
+    $previewCorruptInv['status'] === 'blocked' &&
+    $previewCorruptInv['reason_code'] === 'source_inventory_unavailable',
+    'Scenario 18.4: Corrupt deployment inventory must fail closed with source_inventory_unavailable. Got: ' . json_encode($previewCorruptInv)
+);
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json'] = $savedSetupInv;
+
+// 18.5: Missing deployment-inventory.json asset must fail closed with source_inventory_unavailable
+$releaseSetupNoInv = makeCompatRelease('pos-desktop', '0.0.12', []);
+$provider->releasesByRepoTag['pos-desktop:v0.0.12'] = $releaseSetupNoInv;
+$previewMissingInv = $service->preview(1, 'beta');
+compatAssert(
+    $previewMissingInv['status'] === 'blocked' &&
+    $previewMissingInv['reason_code'] === 'source_inventory_unavailable',
+    'Scenario 18.5: Missing deployment inventory asset must fail closed with source_inventory_unavailable. Got: ' . json_encode($previewMissingInv)
+);
+$provider->releasesByRepoTag['pos-desktop:v0.0.12'] = $releaseSourceSetup12;
+
+// 18.6: Same-version equivalent identity: both repos present with identical valid inventory
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12/deployment-inventory.json'] = $inventorySetup12Raw;
+$previewEquivalent = $service->preview(1, 'beta');
+compatAssert(
+    $previewEquivalent['status'] === 'ready' &&
+    ($previewEquivalent['installed']['source_repo'] ?? '') === 'pos-desktop-updates',
+    'Scenario 18.6: Identical equivalent candidate inventories must deterministically select pos-desktop-updates. Got: ' . json_encode($previewEquivalent)
+);
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12/deployment-inventory.json'] = $inventoryDelta12Raw;
+
+// 18.7: Truly different matching identities with conflicting inventory SHAs -> index_ambiguous
+$inventorySetupVariant = [...$inventorySetup12, 'metadata' => 'alternate_variant'];
+$rawInventorySetupVariant = json_encode($inventorySetupVariant, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+compatAssert(hash('sha256', $rawInventorySetupVariant) !== $inventorySetup12Sha, 'Variant inventory must have different SHA');
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12/deployment-inventory.json'] = $rawInventorySetupVariant;
+$previewAmbiguous = $service->preview(1, 'beta');
+compatAssert(
+    $previewAmbiguous['status'] === 'blocked' &&
+    $previewAmbiguous['reason_code'] === 'index_ambiguous',
+    'Scenario 18.7: Truly different matching identities with conflicting inventory SHAs must fail closed with index_ambiguous. Got: ' . json_encode($previewAmbiguous)
+);
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12/deployment-inventory.json'] = $inventoryDelta12Raw;
+
+// 18.8: Beta direction retains pos-desktop-updates only
+$beta12InstalledVersionContent = json_encode(['version' => '0.0.12-beta.1']);
+$beta12InstalledPharContent = 'beta12-phar-installed';
+$beta12InstalledJsContent = 'beta12-js-installed';
+
+file_put_contents($root . '/version.json', $beta12InstalledVersionContent);
+file_put_contents($root . '/backend/backend.phar', $beta12InstalledPharContent);
+file_put_contents($root . '/frontend/dist/app.js', $beta12InstalledJsContent);
+
+$installedBeta12Files = [
+    'version.json' => ['sha256' => hash('sha256', $beta12InstalledVersionContent), 'size' => strlen($beta12InstalledVersionContent)],
+    'backend/backend.phar' => ['sha256' => hash('sha256', $beta12InstalledPharContent), 'size' => strlen($beta12InstalledPharContent)],
+    'frontend/dist/app.js' => ['sha256' => hash('sha256', $beta12InstalledJsContent), 'size' => strlen($beta12InstalledJsContent)],
+];
+$inventoryBeta12Current = ['format' => 1, 'version' => '0.0.12-beta.1', 'shell_sha256' => $shellDigest, 'files' => $installedBeta12Files];
+$rawInventoryBeta12Current = json_encode($inventoryBeta12Current, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+$provider->assets[$beta12Url('deployment-inventory.json')] = $rawInventoryBeta12Current;
+
+$previewBetaDirection = $service->preview(1, 'stable');
+compatAssert(
+    $previewBetaDirection['installed']['channel'] === 'beta' &&
+    ($previewBetaDirection['installed']['source_repo'] ?? '') === 'pos-desktop-updates',
+    'Scenario 18.8: Installed channel beta probes pos-desktop-updates only and retains coverage. Got: ' . json_encode($previewBetaDirection)
+);
+
+// Restore files and channel to Setup 12
+file_put_contents($root . '/version.json', $setup12VersionContent);
+file_put_contents($root . '/backend/backend.phar', $setup12PharContent);
+file_put_contents($root . '/frontend/dist/app.js', $setup12JsContent);
+$updates->setClientChannel('beta');
+
+// =========================================================================
+// TEST 19: Authentic Setup 12 matching inventory but NO carrier transition
+// -> honest transition_package_unavailable (known public coverage gap)
+// =========================================================================
+[$rawIndexOnlyDelta, $sigIndexOnlyDelta] = $sign([
+    'format' => 1,
+    'carrier_tag' => 'v0.0.12-beta.1',
+    'entries' => [$entryDelta12ToBeta],
+]);
+$provider->assets[$beta12Url('channel-transitions.json')] = $rawIndexOnlyDelta;
+$provider->assets[$beta12Url('channel-transitions.sig')] = $sigIndexOnlyDelta;
+
+$previewNoCarrier = $service->preview(1, 'beta');
+compatAssert(
+    $previewNoCarrier['status'] === 'blocked' &&
+    $previewNoCarrier['reason_code'] === 'transition_package_unavailable',
+    'Scenario 19: Authentic Setup 12 matches inventory but carrier has no Setup transition -> honest transition_package_unavailable. Got: ' . json_encode($previewNoCarrier)
+);
+
+// =========================================================================
 // Cleanup fixture directory safely
 // =========================================================================
 $canonical = realpath($lab);
@@ -1008,4 +1383,4 @@ foreach ($cleanup as $file) {
 }
 rmdir($lab);
 
-echo "PASS channel transition compatibility: bidirectional discovery, stable-to-older-beta, beta-to-stable, same-release, cross-carrier conflict guards, equivalent carrier deduplication, multi-shell variant selection, ledger/schema integrity, fail-closed signatures\n";
+echo "PASS channel transition compatibility: bidirectional discovery, stable-to-older-beta, beta-to-stable, same-release, cross-carrier conflict guards, equivalent carrier deduplication, multi-shell variant selection, ledger/schema integrity, fail-closed signatures, dual-source v0.0.12 bounded resolution, setup/delta variant matching, fail-closed tampering/discovery\n";

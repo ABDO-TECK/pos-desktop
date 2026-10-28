@@ -98,26 +98,21 @@ final class ChannelTransitionService
             if (!in_array($channel,UpdateChannelPolicy::active(),true)) throw new RuntimeException('inactive_channel');
             $installed['shell_sha256']=$this->shellDigest();$preview['installed']=$installed;
             if ($installed['channel']==='retired') throw new RuntimeException('retired_installed_release');
-            $sourceRepo = 'pos-desktop-updates';
-            $source = $this->provider->getReleaseByTag('v'.$version, 'pos-desktop-updates');
-            if (!$source['ok']) {
-                $httpCode = (int)($source['http_code'] ?? 0);
-                $error = (string)($source['error'] ?? '');
-                $is404 = ($httpCode === 404) || ($httpCode === 0 && ($error === 'Release is unavailable.' || str_contains(strtolower($error), 'not found')));
-                if (!$is404) {
-                    throw new RuntimeException('discovery_failed');
-                }
-                if ($installed['channel'] === 'stable') {
-                    $source = $this->provider->getReleaseByTag('v'.$version, 'pos-desktop');
-                    $sourceRepo = 'pos-desktop';
-                }
-            }
-            if (!$source['ok']) throw new RuntimeException('source_release_unavailable');
-            $rawInventory=$this->content($source['release'],'deployment-inventory.json');
-            $inventory=json_decode($rawInventory,true,64,JSON_THROW_ON_ERROR);
-            if (($inventory['version']??null)!==$version || empty($inventory['files']['version.json'])) throw new RuntimeException('source_inventory_unavailable');
-            $installed=[...$installed,'source_repo'=>$sourceRepo,'repo'=>$sourceRepo,'inventory_sha256'=>hash('sha256',$rawInventory),'inventory'=>$inventory,'release'=>$source['release']];
-            if (!$this->receipts->verifyFiles($inventory,[])) throw new RuntimeException('source_inventory_mismatch');
+            $selected = $this->resolveSourceRelease($version, $installed['channel']);
+            $installed = [
+                ...$installed,
+                'source_repo' => $selected['repo'],
+                'repo' => $selected['repo'],
+                'inventory_sha256' => $selected['inventory_sha256'],
+                'inventory' => $selected['inventory'],
+                'release' => $selected['release'],
+            ];
+            $preview['installed'] = [
+                ...$preview['installed'],
+                'source_repo' => $selected['repo'],
+                'repo' => $selected['repo'],
+                'inventory_sha256' => $selected['inventory_sha256'],
+            ];
             $catalog=(new ChannelTransitionReleaseCatalog($this->provider))->resolve($channel,$installed);
             if (!$catalog['ok']) { $preview['status']='unreachable';throw new RuntimeException('discovery_failed'); }
             if (!$catalog['target']) { $preview['status']='waiting';throw new RuntimeException('no_target'); }
@@ -152,6 +147,75 @@ final class ChannelTransitionService
         } catch (Throwable $error) {
             return ['preview'=>[...$preview,'reason_code'=>$error instanceof RuntimeException?$error->getMessage():'transition_unverifiable','message'=>'تعذر تجهيز انتقال آمن حاليًا. لم تتغير النسخة المثبتة أو بيانات العمل.']];
         }
+    }
+
+    private function resolveSourceRelease(string $version, string $installedChannel): array
+    {
+        $candidateRepos = ($installedChannel === 'stable')
+            ? ['pos-desktop-updates', 'pos-desktop']
+            : ['pos-desktop-updates'];
+
+        $candidates = [];
+        foreach ($candidateRepos as $sourceRepo) {
+            $source = $this->provider->getReleaseByTag('v' . $version, $sourceRepo);
+            if (!$source['ok']) {
+                $httpCode = (int)($source['http_code'] ?? 0);
+                $error = (string)($source['error'] ?? '');
+                $is404 = ($httpCode === 404) || ($httpCode === 0 && ($error === 'Release is unavailable.' || str_contains(strtolower($error), 'not found')));
+                if (!$is404) {
+                    throw new RuntimeException('discovery_failed');
+                }
+                continue;
+            }
+
+            $asset = ChannelTransitionReleaseCatalog::asset($source['release'], 'deployment-inventory.json');
+            if (!$asset) {
+                throw new RuntimeException('source_inventory_unavailable');
+            }
+            $result = $this->provider->fetchAssetContent($asset['browser_download_url']);
+            if (!$result['ok'] || !is_string($result['content'] ?? null)) {
+                throw new RuntimeException('metadata_download_failed');
+            }
+            $rawInventory = $result['content'];
+            try {
+                $inventory = json_decode($rawInventory, true, 64, JSON_THROW_ON_ERROR);
+            } catch (Throwable) {
+                throw new RuntimeException('source_inventory_unavailable');
+            }
+            if (!is_array($inventory) || ($inventory['version'] ?? null) !== $version || empty($inventory['files']['version.json']) || !is_array($inventory['files'] ?? null)) {
+                throw new RuntimeException('source_inventory_unavailable');
+            }
+
+            $matches = $this->receipts->verifyFiles($inventory, []);
+            $candidates[] = [
+                'repo' => $sourceRepo,
+                'release' => $source['release'],
+                'raw' => $rawInventory,
+                'inventory' => $inventory,
+                'inventory_sha256' => hash('sha256', $rawInventory),
+                'matches' => $matches,
+            ];
+        }
+
+        if (empty($candidates)) {
+            throw new RuntimeException('source_release_unavailable');
+        }
+
+        $matching = array_values(array_filter($candidates, static fn(array $c): bool => $c['matches']));
+        if (empty($matching)) {
+            throw new RuntimeException('source_inventory_mismatch');
+        }
+
+        if (count($matching) > 1) {
+            $firstSha = $matching[0]['inventory_sha256'];
+            foreach ($matching as $c) {
+                if ($c['inventory_sha256'] !== $firstSha) {
+                    throw new RuntimeException('index_ambiguous');
+                }
+            }
+        }
+
+        return $matching[0];
     }
 
     private function validateCarrierEntries(
