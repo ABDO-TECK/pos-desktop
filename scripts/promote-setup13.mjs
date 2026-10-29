@@ -190,6 +190,51 @@ export function assertNumericPositiveId(id, name) {
   );
 }
 
+export function computeCanonicalShellDigest(filesMapOrExe, maybeAsar) {
+  let exeHash;
+  let asarHash;
+  if (typeof filesMapOrExe === 'string' && typeof maybeAsar === 'string') {
+    exeHash = filesMapOrExe;
+    asarHash = maybeAsar;
+  } else if (filesMapOrExe && typeof filesMapOrExe === 'object') {
+    const files = filesMapOrExe.files || filesMapOrExe;
+    exeHash = files['POS Desktop.exe']?.sha256 || files['POS Desktop.exe'];
+    asarHash = files['resources/app.asar']?.sha256 || files['resources/app.asar'];
+  }
+  assert.ok(typeof exeHash === 'string' && /^[a-f0-9]{64}$/.test(exeHash), 'Invalid or missing POS Desktop.exe sha256 for canonical shell digest');
+  assert.ok(typeof asarHash === 'string' && /^[a-f0-9]{64}$/.test(asarHash), 'Invalid or missing resources/app.asar sha256 for canonical shell digest');
+
+  const canonicalJson = JSON.stringify({
+    'POS Desktop.exe': exeHash,
+    'resources/app.asar': asarHash,
+  });
+  return sha256(Buffer.from(canonicalJson, 'utf8'));
+}
+
+export function validateRetainedShellProof(retainedShell, label = 'retained_shell') {
+  assert.ok(retainedShell && typeof retainedShell === 'object' && !Array.isArray(retainedShell), `${label} must be a non-null object`);
+  assert.ok(typeof retainedShell.sha256 === 'string' && /^[a-f0-9]{64}$/.test(retainedShell.sha256), `${label}.sha256 must be a 64-hex lowercase string`);
+
+  const topKeys = Object.keys(retainedShell).sort();
+  assert.deepEqual(topKeys, ['files', 'sha256'], `${label} must contain exact keys {files, sha256}, got: ${topKeys.join(', ')}`);
+
+  assert.ok(retainedShell.files && typeof retainedShell.files === 'object' && !Array.isArray(retainedShell.files), `${label}.files must be an object map`);
+  const fileKeys = Object.keys(retainedShell.files).sort();
+  assert.deepEqual(fileKeys, ['POS Desktop.exe', 'resources/app.asar'].sort(), `${label}.files must contain exact keys {'POS Desktop.exe', 'resources/app.asar'}`);
+
+  for (const fname of ['POS Desktop.exe', 'resources/app.asar']) {
+    const meta = retainedShell.files[fname];
+    assert.ok(meta && typeof meta === 'object' && !Array.isArray(meta), `${label}.files['${fname}'] must be an object`);
+    const metaKeys = Object.keys(meta).sort();
+    assert.deepEqual(metaKeys, ['sha256', 'size'], `${label}.files['${fname}'] must contain exact keys {sha256, size}`);
+    assert.ok(typeof meta.sha256 === 'string' && /^[a-f0-9]{64}$/.test(meta.sha256), `${label}.files['${fname}'].sha256 must be a 64-hex lowercase string`);
+    assert.ok(typeof meta.size === 'number' && Number.isSafeInteger(meta.size) && meta.size > 0, `${label}.files['${fname}'].size must be a positive safe integer`);
+  }
+
+  const recomputed = computeCanonicalShellDigest(retainedShell.files);
+  assert.equal(retainedShell.sha256, recomputed, `${label}.sha256 must match recomputed canonical 2-hash combined digest`);
+}
+
 export function validateEnvironment(env = process.env) {
   assert.equal(
     env.GITHUB_ACTIONS,
@@ -405,6 +450,10 @@ export function validateEvidenceDirectory(evidenceDir, options) {
   assert.ok(fs.existsSync(acceptancePath) && fs.statSync(acceptancePath).isFile(), 'acceptance.json missing from evidence directory root');
   assertNoReparse(acceptancePath);
 
+  const bindingReceiptPath = path.join(resolved, 'setup13-binding-receipt.json');
+  assert.ok(fs.existsSync(bindingReceiptPath) && fs.statSync(bindingReceiptPath).isFile(), 'setup13-binding-receipt.json missing from evidence directory root');
+  assertNoReparse(bindingReceiptPath);
+
   // 1. Validate release-provenance.json
   const provenance = JSON.parse(fs.readFileSync(provenancePath, 'utf8'));
   assert.equal(provenance.schema_version, '1.0.0', `release-provenance schema_version must be '1.0.0', got: ${provenance.schema_version}`);
@@ -499,6 +548,16 @@ export function validateEvidenceDirectory(evidenceDir, options) {
     'release-provenance carrier_artifacts map must not be empty'
   );
 
+  // Verify retained_shell proof in release-provenance
+  assert.ok(provenance.retained_shell, 'release-provenance missing retained_shell proof object');
+  validateRetainedShellProof(provenance.retained_shell, 'release-provenance.retained_shell');
+  const recomputedDigest = computeCanonicalShellDigest(provenance.retained_shell.files);
+  assert.equal(
+    provenance.retained_shell.sha256,
+    recomputedDigest,
+    'release-provenance.retained_shell.sha256 mismatch against recomputed canonical digest'
+  );
+
   // 2. Independently check acceptance.json: run_id is a REQUIRED string
   const acceptance = JSON.parse(fs.readFileSync(acceptancePath, 'utf8'));
   assert.equal(acceptance.verdict, 'PASSED', `acceptance.json verdict must be 'PASSED', got: ${acceptance.verdict}`);
@@ -518,6 +577,11 @@ export function validateEvidenceDirectory(evidenceDir, options) {
   }
 
   assert.ok(
+    typeof acceptance.run_token === 'string' && /^[a-f0-9]{32}$/.test(acceptance.run_token),
+    'acceptance.json run_token must be a 32-hex lowercase string'
+  );
+
+  assert.ok(
     acceptance.verifications && typeof acceptance.verifications === 'object' && !Array.isArray(acceptance.verifications),
     'acceptance.json verifications must be an object map'
   );
@@ -535,6 +599,80 @@ export function validateEvidenceDirectory(evidenceDir, options) {
     );
   }
 
+  // 3. Validate setup13-binding-receipt.json and cross-bind strictly against evidence, acceptance, and setup assets
+  const receipt = JSON.parse(fs.readFileSync(bindingReceiptPath, 'utf8'));
+  assert.equal(receipt.schema_version, '1.0.0', 'setup13-binding-receipt schema_version must be 1.0.0');
+
+  assert.equal(typeof receipt.setup_run_id, 'string', 'setup13-binding-receipt setup_run_id must be a string');
+  assertNumericPositiveId(receipt.setup_run_id, 'setup13-binding-receipt setup_run_id');
+  assert.equal(receipt.setup_run_id, expectedSetupRunId, 'setup13-binding-receipt setup_run_id mismatch');
+
+  assert.equal(typeof receipt.acceptance_run_id, 'string', 'setup13-binding-receipt acceptance_run_id must be a string');
+  assertNumericPositiveId(receipt.acceptance_run_id, 'setup13-binding-receipt acceptance_run_id');
+  assert.equal(receipt.acceptance_run_id, expectedAcceptanceRunId, 'setup13-binding-receipt acceptance_run_id mismatch');
+
+  assertStrictLowerHex40(receipt.source_sha, 'setup13-binding-receipt source_sha');
+  assert.equal(receipt.source_sha, expectedSha, 'setup13-binding-receipt source_sha mismatch');
+
+  assertStrictLowerHex64(receipt.installer_sha256, 'setup13-binding-receipt installer_sha256');
+  assert.equal(
+    receipt.installer_sha256,
+    setupHashes.get('POS-Desktop-Setup-0.0.13.exe'),
+    'setup13-binding-receipt installer_sha256 mismatch'
+  );
+
+  assert.ok(
+    typeof receipt.run_token === 'string' && /^[a-f0-9]{32}$/.test(receipt.run_token),
+    'setup13-binding-receipt run_token must be a 32-hex lowercase string'
+  );
+  assert.equal(receipt.run_token, acceptance.run_token, 'setup13-binding-receipt run_token mismatch against acceptance.json');
+
+  // Validate EXACT setup 5 map {sha256, size} and deep compare all 5 to calculated Setup maps
+  assert.ok(
+    receipt.setup_assets && typeof receipt.setup_assets === 'object' && !Array.isArray(receipt.setup_assets),
+    'setup13-binding-receipt setup_assets must be an object map'
+  );
+  const receiptAssetKeys = Object.keys(receipt.setup_assets).sort();
+  assert.deepEqual(
+    receiptAssetKeys,
+    EXACT_5_SETUP_ASSETS.slice().sort(),
+    `setup13-binding-receipt setup_assets keys mismatch. Expected exact 5 assets, got: ${receiptAssetKeys.join(', ')}`
+  );
+  for (const filename of EXACT_5_SETUP_ASSETS) {
+    const entry = receipt.setup_assets[filename];
+    assert.ok(
+      entry && typeof entry === 'object' && !Array.isArray(entry),
+      `setup13-binding-receipt setup_assets[${filename}] must be a map object with sha256 and size`
+    );
+    const entryKeys = Object.keys(entry).sort();
+    assert.deepEqual(
+      entryKeys,
+      ['sha256', 'size'],
+      `setup13-binding-receipt setup_assets[${filename}] must contain exact properties {sha256, size}; aliases or extra properties rejected`
+    );
+    assertStrictLowerHex64(entry.sha256, `setup13-binding-receipt setup_assets[${filename}].sha256`);
+    assert.equal(
+      entry.sha256,
+      setupHashes.get(filename),
+      `setup13-binding-receipt setup_assets[${filename}] hash mismatch against verified downloaded asset`
+    );
+    assertPositiveInteger(entry.size, `setup13-binding-receipt setup_assets[${filename}].size`);
+    assert.equal(
+      entry.size,
+      setupSizes.get(filename),
+      `setup13-binding-receipt setup_assets[${filename}] size mismatch against verified downloaded asset`
+    );
+  }
+
+  // retained_shell: strict proof + deepEqual provenance
+  assert.ok(receipt.retained_shell, 'setup13-binding-receipt.json missing retained_shell proof object');
+  validateRetainedShellProof(receipt.retained_shell, 'setup13-binding-receipt.json retained_shell');
+  assert.deepEqual(
+    receipt.retained_shell,
+    provenance.retained_shell,
+    'setup13-binding-receipt.json retained_shell mismatch against release-provenance.json'
+  );
+
   return provenance;
 }
 
@@ -543,6 +681,11 @@ export function validateCarrierDirectory(carrierDir, provenance, setupInventoryI
   assert.ok(fs.existsSync(resolved) && fs.statSync(resolved).isDirectory(), `Carrier directory missing or not a directory: ${carrierDir}`);
   assertNoReparse(resolved);
   assert.ok(setupInventoryInfo && setupInventoryInfo.rawBytes && setupInventoryInfo.parsed && setupInventoryInfo.sha256, 'setupInventoryInfo is required');
+
+  assert.ok(provenance.retained_shell, 'release-provenance missing retained_shell proof object');
+  validateRetainedShellProof(provenance.retained_shell, 'release-provenance.retained_shell');
+  const physicalShellDigest = computeCanonicalShellDigest(provenance.retained_shell.files);
+  assert.equal(provenance.retained_shell.sha256, physicalShellDigest, 'provenance.retained_shell.sha256 mismatch against recomputed canonical digest');
 
   const entries = fs.readdirSync(resolved);
   for (const entry of entries) {
@@ -583,6 +726,16 @@ export function validateCarrierDirectory(carrierDir, provenance, setupInventoryI
     carrierInvBytes,
     setupInventoryInfo.rawBytes,
     'Carrier deployment-inventory.json must byte-match Setup deployment-inventory.json identically'
+  );
+
+  // 1b. Carrier source-provenance.json retained_shell MUST match provenance.retained_shell
+  const carrierSourceProv = JSON.parse(fs.readFileSync(path.join(resolved, 'source-provenance.json'), 'utf8'));
+  assert.ok(carrierSourceProv.retained_shell, 'carrier source-provenance.json missing retained_shell proof object');
+  validateRetainedShellProof(carrierSourceProv.retained_shell, 'carrier source-provenance.json retained_shell');
+  assert.deepEqual(
+    carrierSourceProv.retained_shell,
+    provenance.retained_shell,
+    'carrier source-provenance.json retained_shell mismatch against release-provenance.json'
   );
 
   // Compute hashes and sizes for all 18 files
@@ -688,8 +841,8 @@ export function validateCarrierDirectory(carrierDir, provenance, setupInventoryI
       );
       assert.equal(
         descData.shell_sha256,
-        setupInventoryInfo.parsed.shell_sha256,
-        `${entry.descriptor} shell_sha256 mismatch against Setup 13`
+        physicalShellDigest,
+        `${entry.descriptor} shell_sha256 mismatch against physical retained shell digest`
       );
     } else {
       // Forward transition: source is 0.0.13 stable, target is 0.0.12-beta.1
@@ -714,8 +867,8 @@ export function validateCarrierDirectory(carrierDir, provenance, setupInventoryI
       );
       assert.equal(
         descData.shell_sha256,
-        setupInventoryInfo.parsed.shell_sha256,
-        `${entry.descriptor} shell_sha256 mismatch against Setup 13`
+        physicalShellDigest,
+        `${entry.descriptor} shell_sha256 mismatch against physical retained shell digest`
       );
     }
   }

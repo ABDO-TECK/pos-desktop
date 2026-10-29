@@ -16,6 +16,8 @@ import {
   validateCarrierDirectory,
   validateTransitionDescriptor,
   validateTransitionIndex,
+  computeCanonicalShellDigest,
+  validateRetainedShellProof,
   REQUIRED_13_VERIFICATIONS,
   EXACT_5_SETUP_ASSETS,
   EXACT_18_CARRIER_FILES,
@@ -172,159 +174,256 @@ ${'d'.repeat(64)}  deployment-inventory.json
     }
   });
 
-  // 4. Binding Receipt Validation
-  test('validateBindingReceipt accepts fully valid receipt', () => {
+  // 4. Binding Receipt & Retained Shell Validation
+  const VALID_EXE_HASH = 'a1'.repeat(32);
+  const VALID_ASAR_HASH = '2'.repeat(64);
+  const VALID_RUN_TOKEN = '1234567890abcdef1234567890abcdef';
+  const VALID_RETAINED_SHELL = Object.freeze({
+    sha256: computeCanonicalShellDigest(VALID_EXE_HASH, VALID_ASAR_HASH),
+    files: Object.freeze({
+      'POS Desktop.exe': Object.freeze({ sha256: VALID_EXE_HASH, size: 1024 }),
+      'resources/app.asar': Object.freeze({ sha256: VALID_ASAR_HASH, size: 2048 }),
+    }),
+  });
+
+  function createValidReceipt(overrides = {}) {
     const receipt = {
       schema_version: '1.0.0',
       setup_run_id: '11111111',
       acceptance_run_id: '22222222',
       source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
+      run_token: VALID_RUN_TOKEN,
       installer_sha256: 'b'.repeat(64),
       setup_assets: {},
+      retained_shell: JSON.parse(JSON.stringify(VALID_RETAINED_SHELL)),
+      ...overrides,
     };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
+    if (Object.keys(receipt.setup_assets).length === 0) {
+      for (const fn of EXACT_5_SETUP_ASSETS) {
+        receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
+      }
     }
+    return receipt;
+  }
+
+  test('computeCanonicalShellDigest produces deterministic 64-hex digest from files or arguments', () => {
+    const d1 = computeCanonicalShellDigest(VALID_EXE_HASH, VALID_ASAR_HASH);
+    const d2 = computeCanonicalShellDigest(VALID_RETAINED_SHELL.files);
+    assert.equal(d1, d2);
+    assert.ok(/^[a-f0-9]{64}$/.test(d1));
+
+    const expectedCanon = sha256(Buffer.from(JSON.stringify({
+      'POS Desktop.exe': VALID_EXE_HASH,
+      'resources/app.asar': VALID_ASAR_HASH,
+    }), 'utf8'));
+    assert.equal(d1, expectedCanon);
+  });
+
+  test('validateRetainedShellProof accepts valid proof and rejects invalid structures', () => {
+    validateRetainedShellProof(VALID_RETAINED_SHELL, 'test');
+
+    assert.throws(() => {
+      validateRetainedShellProof(null, 'test');
+    }, /must be a non-null object/);
+
+    assert.throws(() => {
+      validateRetainedShellProof({ ...VALID_RETAINED_SHELL, sha256: 'invalid-hex' }, 'test');
+    }, /sha256 must be a 64-hex lowercase string/);
+
+    // Uppercase combined digest
+    assert.throws(() => {
+      validateRetainedShellProof({ ...VALID_RETAINED_SHELL, sha256: VALID_RETAINED_SHELL.sha256.toUpperCase() }, 'test');
+    }, /sha256 must be a 64-hex lowercase string/);
+
+    // Uppercase file hash
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH.toUpperCase(), size: 1024 },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+        },
+      }, 'test');
+    }, /sha256 must be a 64-hex lowercase string/);
+
+    // Extra root key
+    assert.throws(() => {
+      validateRetainedShellProof({ ...VALID_RETAINED_SHELL, extra_root_key: 'unauthorized' }, 'test');
+    }, /must contain exact keys \{files, sha256\}/);
+
+    // Missing native file
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: { 'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: 100 } },
+      }, 'test');
+    }, /files must contain exact keys/);
+
+    // Extra native file
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: 1024 },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+          'extra-unauthorized.exe': { sha256: VALID_EXE_HASH, size: 500 },
+        },
+      }, 'test');
+    }, /files must contain exact keys/);
+
+    // Extra file metadata key
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: 1024, extra_prop: true },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+        },
+      }, 'test');
+    }, /must contain exact keys \{sha256, size\}/);
+
+    // Wrong size type: string
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: '1024' },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+        },
+      }, 'test');
+    }, /size must be a positive safe integer/);
+
+    // Size zero
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: 0 },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+        },
+      }, 'test');
+    }, /size must be a positive safe integer/);
+
+    // Negative size
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: -5 },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 200 },
+        },
+      }, 'test');
+    }, /size must be a positive safe integer/);
+
+    // Unsafe integer size (> Number.MAX_SAFE_INTEGER)
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_EXE_HASH, size: Number.MAX_SAFE_INTEGER + 10 },
+          'resources/app.asar': { sha256: VALID_ASAR_HASH, size: 2048 },
+        },
+      }, 'test');
+    }, /size must be a positive safe integer/);
+
+    // Tampered combined digest
+    assert.throws(() => {
+      validateRetainedShellProof({
+        ...VALID_RETAINED_SHELL,
+        sha256: '3'.repeat(64),
+      }, 'test');
+    }, /sha256 must match recomputed canonical 2-hash combined digest/);
+
+    // Flipped EXE / ASAR hash with unupdated combined digest
+    assert.throws(() => {
+      validateRetainedShellProof({
+        sha256: VALID_RETAINED_SHELL.sha256,
+        files: {
+          'POS Desktop.exe': { sha256: VALID_ASAR_HASH, size: 2048 },
+          'resources/app.asar': { sha256: VALID_EXE_HASH, size: 1024 },
+        },
+      }, 'test');
+    }, /sha256 must match recomputed canonical 2-hash combined digest/);
+  });
+
+  test('validateBindingReceipt accepts fully valid receipt', () => {
+    const receipt = createValidReceipt();
     validateBindingReceipt(receipt, {
       setupRunId: '11111111',
       acceptanceRunId: '22222222',
       sourceSha: 'a'.repeat(40),
-      runToken: 'token-123',
+      runToken: VALID_RUN_TOKEN,
       installerSha: 'b'.repeat(64),
     });
   });
 
   test('validateBindingReceipt rejects setup_run_id mismatch', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
-    }
+    const receipt = createValidReceipt();
     assert.throws(() => {
       validateBindingReceipt(receipt, {
         setupRunId: '99999999',
         acceptanceRunId: '22222222',
         sourceSha: 'a'.repeat(40),
-        runToken: 'token-123',
+        runToken: VALID_RUN_TOKEN,
         installerSha: 'b'.repeat(64),
       });
     }, /setup_run_id mismatch/);
   });
 
   test('validateBindingReceipt rejects acceptance_run_id mismatch', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
-    }
+    const receipt = createValidReceipt();
     assert.throws(() => {
       validateBindingReceipt(receipt, {
         setupRunId: '11111111',
         acceptanceRunId: '33333333',
         sourceSha: 'a'.repeat(40),
-        runToken: 'token-123',
+        runToken: VALID_RUN_TOKEN,
         installerSha: 'b'.repeat(64),
       });
     }, /acceptance_run_id mismatch/);
   });
 
   test('validateBindingReceipt rejects source_sha mismatch', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
-    }
+    const receipt = createValidReceipt();
     assert.throws(() => {
       validateBindingReceipt(receipt, {
         setupRunId: '11111111',
         acceptanceRunId: '22222222',
         sourceSha: 'f'.repeat(40),
-        runToken: 'token-123',
+        runToken: VALID_RUN_TOKEN,
         installerSha: 'b'.repeat(64),
       });
     }, /source_sha mismatch/);
   });
 
   test('validateBindingReceipt rejects run_token mismatch', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
-    }
+    const receipt = createValidReceipt();
     assert.throws(() => {
       validateBindingReceipt(receipt, {
         setupRunId: '11111111',
         acceptanceRunId: '22222222',
         sourceSha: 'a'.repeat(40),
-        runToken: 'wrong-token',
+        runToken: '00000000000000000000000000000000',
         installerSha: 'b'.repeat(64),
       });
     }, /run_token mismatch/);
   });
 
   test('validateBindingReceipt rejects installer_sha256 mismatch', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
-    for (const fn of EXACT_5_SETUP_ASSETS) {
-      receipt.setup_assets[fn] = { sha256: 'b'.repeat(64), size: 100 };
-    }
+    const receipt = createValidReceipt();
     assert.throws(() => {
       validateBindingReceipt(receipt, {
         setupRunId: '11111111',
         acceptanceRunId: '22222222',
         sourceSha: 'a'.repeat(40),
-        runToken: 'token-123',
+        runToken: VALID_RUN_TOKEN,
         installerSha: 'c'.repeat(64),
       });
     }, /installer_sha256 mismatch/);
   });
 
   test('validateBindingReceipt rejects name property in setup_assets', () => {
-    const receipt = {
-      schema_version: '1.0.0',
-      setup_run_id: '11111111',
-      acceptance_run_id: '22222222',
-      source_sha: 'a'.repeat(40),
-      run_token: 'token-123',
-      installer_sha256: 'b'.repeat(64),
-      setup_assets: {},
-    };
+    const receipt = createValidReceipt();
     for (const fn of EXACT_5_SETUP_ASSETS) {
       receipt.setup_assets[fn] = { name: fn, sha256: 'b'.repeat(64), size: 100 };
     }
@@ -333,10 +432,38 @@ ${'d'.repeat(64)}  deployment-inventory.json
         setupRunId: '11111111',
         acceptanceRunId: '22222222',
         sourceSha: 'a'.repeat(40),
-        runToken: 'token-123',
+        runToken: VALID_RUN_TOKEN,
         installerSha: 'b'.repeat(64),
       });
     }, /must not contain 'name' property/);
+  });
+
+  test('validateBindingReceipt rejects missing retained_shell', () => {
+    const receipt = createValidReceipt();
+    delete receipt.retained_shell;
+    assert.throws(() => {
+      validateBindingReceipt(receipt, {
+        setupRunId: '11111111',
+        acceptanceRunId: '22222222',
+        sourceSha: 'a'.repeat(40),
+        runToken: VALID_RUN_TOKEN,
+        installerSha: 'b'.repeat(64),
+      });
+    }, /missing retained_shell proof object/);
+  });
+
+  test('validateBindingReceipt rejects tampered retained_shell digest', () => {
+    const receipt = createValidReceipt();
+    receipt.retained_shell.sha256 = 'f'.repeat(64);
+    assert.throws(() => {
+      validateBindingReceipt(receipt, {
+        setupRunId: '11111111',
+        acceptanceRunId: '22222222',
+        sourceSha: 'a'.repeat(40),
+        runToken: VALID_RUN_TOKEN,
+        installerSha: 'b'.repeat(64),
+      });
+    }, /sha256 must match recomputed canonical 2-hash combined digest/);
   });
 
   // 5. Setup Directory Exact 5 Assets and No Extras/Directories
@@ -437,11 +564,16 @@ ${'d'.repeat(64)}  deployment-inventory.json
     };
 
     assert.throws(() => {
-      validateTransitionDescriptor(descData, { shellHash: 'c'.repeat(64) });
+      validateTransitionDescriptor(descData, {
+        shellHash: 'c'.repeat(64),
+        sourceShellFingerprint: 'd'.repeat(64),
+      });
     }, /Descriptor must NOT contain deprecated carrier_repo field/);
   });
 
   test('validateTransitionDescriptor rejects tampered Beta 12.1 inventory hash', () => {
+    const validShellHash = 'c'.repeat(64);
+    const validSourceFingerprint = 'd'.repeat(64);
     const descData = {
       format: 1,
       operation: 'channel_transition',
@@ -452,10 +584,14 @@ ${'d'.repeat(64)}  deployment-inventory.json
       version: '0.0.12-beta.1',
       channel: 'beta',
       source_inventory_sha256: 'setup-hash',
-      source_inventory: { files: { 'a.txt': { sha256: '1', size: 1 } } },
+      source_inventory: {
+        version: '0.0.13',
+        shell_sha256: validSourceFingerprint,
+        files: { 'a.txt': { sha256: '1', size: 1 } },
+      },
       target_inventory_sha256: 'tampered-beta-hash',
       target_inventory: { version: '0.0.12-beta.1' },
-      shell_sha256: 'shell-hash',
+      shell_sha256: validShellHash,
       package: { asset: 'dummy.zip', sha256: sha256(Buffer.from('zip')), size: 3 },
       data_compatibility: { format: 1, metadata_migration: '059_add_update_compatibility_metadata.sql', schema_sha256: 'a'.repeat(64), ledger_sha256: 'b'.repeat(64) },
     };
@@ -465,10 +601,98 @@ ${'d'.repeat(64)}  deployment-inventory.json
         canonicalSetupInvHash: 'setup-hash',
         canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
         beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
-        shellHash: 'shell-hash',
+        shellHash: validShellHash,
+        sourceShellFingerprint: validSourceFingerprint,
         zipBytes: Buffer.from('zip'),
       });
     }, /Beta 12\.1 target_inventory_sha256 mismatch/);
+  });
+
+  test('validateTransitionDescriptor enforces distinct physical digest and source fingerprint domains', () => {
+    const physicalDigest = VALID_RETAINED_SHELL.sha256;
+    const sourceFingerprint = '4444444444444444444444444444444444444444444444444444444444444444';
+    assert.notEqual(physicalDigest, sourceFingerprint);
+
+    const descData = {
+      format: 1,
+      operation: 'channel_transition',
+      carrier_tag: 'v0.0.13',
+      target_repo: 'pos-desktop-updates',
+      from_version: '0.0.13',
+      from_channel: 'stable',
+      version: '0.0.12-beta.1',
+      channel: 'beta',
+      source_inventory_sha256: 'setup-hash',
+      source_inventory: {
+        version: '0.0.13',
+        shell_sha256: sourceFingerprint,
+        files: { 'a.txt': { sha256: '1', size: 1 } },
+      },
+      target_inventory_sha256: PINNED_BETA12_INVENTORY_SHA256,
+      target_inventory: { version: '0.0.12-beta.1' },
+      shell_sha256: physicalDigest,
+      package: { asset: 'dummy.zip', sha256: sha256(Buffer.from('zip')), size: 3 },
+      data_compatibility: { format: 1, metadata_migration: '059_add_update_compatibility_metadata.sql', schema_sha256: 'a'.repeat(64), ledger_sha256: 'b'.repeat(64) },
+    };
+
+    // Valid: descriptor.shell_sha256 is physicalDigest, descriptor.source_inventory.shell_sha256 is sourceFingerprint
+    validateTransitionDescriptor(descData, {
+      canonicalSetupInvHash: 'setup-hash',
+      canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
+      beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
+      shellHash: physicalDigest,
+      sourceShellFingerprint: sourceFingerprint,
+      zipBytes: Buffer.from('zip'),
+    });
+
+    // Rejects missing expected.sourceShellFingerprint
+    assert.throws(() => {
+      validateTransitionDescriptor(descData, {
+        canonicalSetupInvHash: 'setup-hash',
+        canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
+        beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
+        shellHash: physicalDigest,
+        zipBytes: Buffer.from('zip'),
+      });
+    }, /expected\.sourceShellFingerprint must be a 64-hex lowercase string/);
+
+    // Rejects invalid expected.sourceShellFingerprint
+    assert.throws(() => {
+      validateTransitionDescriptor(descData, {
+        canonicalSetupInvHash: 'setup-hash',
+        canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
+        beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
+        shellHash: physicalDigest,
+        sourceShellFingerprint: 'invalid-hex-fingerprint',
+        zipBytes: Buffer.from('zip'),
+      });
+    }, /expected\.sourceShellFingerprint must be a 64-hex lowercase string/);
+
+    // Rejects when physical shellHash mismatch
+    const wrongPhysical = '5555555555555555555555555555555555555555555555555555555555555555';
+    assert.throws(() => {
+      validateTransitionDescriptor(descData, {
+        canonicalSetupInvHash: 'setup-hash',
+        canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
+        beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
+        shellHash: wrongPhysical,
+        sourceShellFingerprint: sourceFingerprint,
+        zipBytes: Buffer.from('zip'),
+      });
+    }, /Descriptor shell_sha256 mismatch against physical retained shell digest/);
+
+    // Rejects when sourceShellFingerprint mismatch
+    const wrongSourceFingerprint = '6666666666666666666666666666666666666666666666666666666666666666';
+    assert.throws(() => {
+      validateTransitionDescriptor(descData, {
+        canonicalSetupInvHash: 'setup-hash',
+        canonicalSetupFiles: { 'a.txt': { sha256: '1', size: 1 } },
+        beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
+        shellHash: physicalDigest,
+        sourceShellFingerprint: wrongSourceFingerprint,
+        zipBytes: Buffer.from('zip'),
+      });
+    }, /Setup 13 source_inventory\.shell_sha256 mismatch against source tree fingerprint/);
   });
 
   console.log(`\nAll ${passed}/${total} pure policy regression tests passed successfully.`);

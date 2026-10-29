@@ -122,6 +122,51 @@ export function computeDesktopShellFingerprint(sourceRoot) {
   return sha256(Buffer.from(jsonStr, 'utf8'));
 }
 
+export function computeCanonicalShellDigest(filesMapOrExe, maybeAsar) {
+  let exeHash;
+  let asarHash;
+  if (typeof filesMapOrExe === 'string' && typeof maybeAsar === 'string') {
+    exeHash = filesMapOrExe;
+    asarHash = maybeAsar;
+  } else if (filesMapOrExe && typeof filesMapOrExe === 'object') {
+    const files = filesMapOrExe.files || filesMapOrExe;
+    exeHash = files['POS Desktop.exe']?.sha256 || files['POS Desktop.exe'];
+    asarHash = files['resources/app.asar']?.sha256 || files['resources/app.asar'];
+  }
+  assert.ok(typeof exeHash === 'string' && /^[a-f0-9]{64}$/.test(exeHash), 'Invalid or missing POS Desktop.exe sha256 for canonical shell digest');
+  assert.ok(typeof asarHash === 'string' && /^[a-f0-9]{64}$/.test(asarHash), 'Invalid or missing resources/app.asar sha256 for canonical shell digest');
+
+  const canonicalJson = JSON.stringify({
+    'POS Desktop.exe': exeHash,
+    'resources/app.asar': asarHash,
+  });
+  return sha256(Buffer.from(canonicalJson, 'utf8'));
+}
+
+export function validateRetainedShellProof(retainedShell, label = 'retained_shell') {
+  assert.ok(retainedShell && typeof retainedShell === 'object' && !Array.isArray(retainedShell), `${label} must be a non-null object`);
+  assert.ok(typeof retainedShell.sha256 === 'string' && /^[a-f0-9]{64}$/.test(retainedShell.sha256), `${label}.sha256 must be a 64-hex lowercase string`);
+
+  const topKeys = Object.keys(retainedShell).sort();
+  assert.deepEqual(topKeys, ['files', 'sha256'], `${label} must contain exact keys {files, sha256}, got: ${topKeys.join(', ')}`);
+
+  assert.ok(retainedShell.files && typeof retainedShell.files === 'object' && !Array.isArray(retainedShell.files), `${label}.files must be an object map`);
+  const fileKeys = Object.keys(retainedShell.files).sort();
+  assert.deepEqual(fileKeys, ['POS Desktop.exe', 'resources/app.asar'].sort(), `${label}.files must contain exact keys {'POS Desktop.exe', 'resources/app.asar'}`);
+
+  for (const fname of ['POS Desktop.exe', 'resources/app.asar']) {
+    const meta = retainedShell.files[fname];
+    assert.ok(meta && typeof meta === 'object' && !Array.isArray(meta), `${label}.files['${fname}'] must be an object`);
+    const metaKeys = Object.keys(meta).sort();
+    assert.deepEqual(metaKeys, ['sha256', 'size'], `${label}.files['${fname}'] must contain exact keys {sha256, size}`);
+    assert.ok(typeof meta.sha256 === 'string' && /^[a-f0-9]{64}$/.test(meta.sha256), `${label}.files['${fname}'].sha256 must be a 64-hex lowercase string`);
+    assert.ok(typeof meta.size === 'number' && Number.isSafeInteger(meta.size) && meta.size > 0, `${label}.files['${fname}'].size must be a positive safe integer`);
+  }
+
+  const recomputed = computeCanonicalShellDigest(retainedShell.files);
+  assert.equal(retainedShell.sha256, recomputed, `${label}.sha256 must match recomputed canonical 2-hash combined digest`);
+}
+
 export function verifyRsaSignature(data, signatureBase64, publicKeyPem) {
   try {
     const rawSig = Buffer.from(signatureBase64.trim(), 'base64');
@@ -259,11 +304,16 @@ export function validateSetupDirectory(setupArtifactDir) {
 export function validateBindingReceipt(receipt, expected) {
   assert.ok(receipt && typeof receipt === 'object', 'Binding receipt must be an object');
   assert.equal(receipt.schema_version, '1.0.0', 'Binding receipt schema_version must be 1.0.0');
-  assert.equal(String(receipt.setup_run_id), String(expected.setupRunId), `Binding receipt setup_run_id mismatch (${receipt.setup_run_id} vs ${expected.setupRunId})`);
-  assert.equal(String(receipt.acceptance_run_id), String(expected.acceptanceRunId), `Binding receipt acceptance_run_id mismatch (${receipt.acceptance_run_id} vs ${expected.acceptanceRunId})`);
-  assert.equal(receipt.source_sha?.toLowerCase(), String(expected.sourceSha).toLowerCase(), `Binding receipt source_sha mismatch (${receipt.source_sha} vs ${expected.sourceSha})`);
+  assert.equal(typeof receipt.setup_run_id, 'string', 'Binding receipt setup_run_id must be a string');
+  assert.equal(receipt.setup_run_id, String(expected.setupRunId), `Binding receipt setup_run_id mismatch (${receipt.setup_run_id} vs ${expected.setupRunId})`);
+  assert.equal(typeof receipt.acceptance_run_id, 'string', 'Binding receipt acceptance_run_id must be a string');
+  assert.equal(receipt.acceptance_run_id, String(expected.acceptanceRunId), `Binding receipt acceptance_run_id mismatch (${receipt.acceptance_run_id} vs ${expected.acceptanceRunId})`);
+  assert.ok(typeof receipt.source_sha === 'string' && /^[a-f0-9]{40}$/.test(receipt.source_sha), 'Binding receipt source_sha must be 40-hex lowercase');
+  assert.equal(receipt.source_sha, expected.sourceSha, `Binding receipt source_sha mismatch (${receipt.source_sha} vs ${expected.sourceSha})`);
+  assert.ok(typeof receipt.run_token === 'string' && /^[a-f0-9]{32}$/.test(receipt.run_token), 'Binding receipt run_token must be a 32-hex lowercase string');
   assert.equal(receipt.run_token, expected.runToken, `Binding receipt run_token mismatch (${receipt.run_token} vs ${expected.runToken})`);
-  assert.equal(receipt.installer_sha256?.toLowerCase(), expected.installerSha?.toLowerCase(), `Binding receipt installer_sha256 mismatch (${receipt.installer_sha256} vs ${expected.installerSha})`);
+  assert.ok(typeof receipt.installer_sha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.installer_sha256), 'Binding receipt installer_sha256 must be 64-hex lowercase');
+  assert.equal(receipt.installer_sha256, expected.installerSha, `Binding receipt installer_sha256 mismatch (${receipt.installer_sha256} vs ${expected.installerSha})`);
 
   assert.ok(receipt.setup_assets && typeof receipt.setup_assets === 'object', 'Binding receipt missing setup_assets');
   assert.deepEqual(Object.keys(receipt.setup_assets).sort(), EXACT_5_SETUP_ASSETS.slice().sort(), 'Binding receipt setup_assets keys mismatch');
@@ -275,6 +325,13 @@ export function validateBindingReceipt(receipt, expected) {
       assert.equal(meta.sha256, expected.setupAssetsMap[fn].sha256, `setup_assets[${fn}] hash mismatch against expected`);
       assert.equal(meta.size, expected.setupAssetsMap[fn].size, `setup_assets[${fn}] size mismatch against expected`);
     }
+  }
+
+  // Validate retained_shell proof in binding receipt
+  assert.ok(receipt.retained_shell, 'Binding receipt missing retained_shell proof object');
+  validateRetainedShellProof(receipt.retained_shell, 'Binding receipt retained_shell');
+  if (expected.retainedShell) {
+    assert.deepEqual(receipt.retained_shell, expected.retainedShell, 'Binding receipt retained_shell mismatch against expected');
   }
 }
 
@@ -351,8 +408,18 @@ export function validateTransitionDescriptor(descData, expected) {
     assert.equal(descData.package.size, expected.zipBytes.length, 'Package size mismatch against zip archive bytes');
   }
 
-  // Verify shell fingerprint
-  assert.equal(descData.shell_sha256, expected.shellHash, 'Descriptor shell_sha256 mismatch against current shell 13');
+  // Verify expected shell hashes requirements
+  assert.ok(
+    typeof expected.shellHash === 'string' && /^[a-f0-9]{64}$/.test(expected.shellHash),
+    'expected.shellHash must be a 64-hex lowercase string'
+  );
+  assert.ok(
+    typeof expected.sourceShellFingerprint === 'string' && /^[a-f0-9]{64}$/.test(expected.sourceShellFingerprint),
+    'expected.sourceShellFingerprint must be a 64-hex lowercase string'
+  );
+
+  // Verify shell fingerprint / physical digest
+  assert.equal(descData.shell_sha256, expected.shellHash, 'Descriptor shell_sha256 mismatch against physical retained shell digest');
 
   // Verify direction and inventory deep equality
   if (descData.from_version === '0.0.13' && descData.version === '0.0.12-beta.1') {
@@ -360,6 +427,7 @@ export function validateTransitionDescriptor(descData, expected) {
     assert.equal(descData.channel, 'beta');
     assert.equal(descData.source_inventory_sha256, expected.canonicalSetupInvHash, 'Setup 13 source_inventory_sha256 mismatch');
     assert.deepEqual(descData.source_inventory?.files, expected.canonicalSetupFiles, 'Setup 13 source_inventory.files deep equality mismatch');
+    assert.equal(descData.source_inventory?.shell_sha256, expected.sourceShellFingerprint, 'Setup 13 source_inventory.shell_sha256 mismatch against source tree fingerprint');
     assert.equal(descData.target_inventory_sha256, expected.beta12InvHash, 'Beta 12.1 target_inventory_sha256 mismatch');
     assert.equal(descData.target_inventory?.version, '0.0.12-beta.1');
   } else if (descData.from_version === '0.0.12-beta.1' && descData.version === '0.0.13') {
@@ -369,6 +437,7 @@ export function validateTransitionDescriptor(descData, expected) {
     assert.equal(descData.source_inventory?.version, '0.0.12-beta.1');
     assert.equal(descData.target_inventory_sha256, expected.canonicalSetupInvHash, 'Setup 13 target_inventory_sha256 mismatch');
     assert.deepEqual(descData.target_inventory?.files, expected.canonicalSetupFiles, 'Setup 13 target_inventory.files deep equality mismatch');
+    assert.equal(descData.target_inventory?.shell_sha256, expected.sourceShellFingerprint, 'Setup 13 target_inventory.shell_sha256 mismatch against source tree fingerprint');
   } else {
     throw new Error(`Unexpected transition direction: ${descData.from_version} -> ${descData.version}`);
   }
@@ -464,6 +533,34 @@ export function stageCarrierAssets(options = {}) {
   const stagedReceiptHash = sha256(Buffer.from(receiptRaw, 'utf8'));
   console.log('      PASS: setup13-binding-receipt.json validated and hashed before staging.');
 
+  // 3b. Verify candidate unpacked physical shell bytes match receipt.retained_shell before cleanup
+  const candidateUnpacked = options.candidateShellDir
+    ? path.resolve(options.candidateShellDir)
+    : path.join(lab, 'candidate-unpacked');
+  assert.ok(fs.existsSync(candidateUnpacked), `candidate-unpacked directory missing at: ${candidateUnpacked}`);
+  assertNoReparse(candidateUnpacked);
+
+  const candidateExe = path.join(candidateUnpacked, 'POS Desktop.exe');
+  const candidateAsar = path.join(candidateUnpacked, 'resources/app.asar');
+  assert.ok(fs.existsSync(candidateExe), `Candidate POS Desktop.exe missing at: ${candidateExe}`);
+  assert.ok(fs.existsSync(candidateAsar), `Candidate resources/app.asar missing at: ${candidateAsar}`);
+  assertNoReparse(candidateExe);
+  assertNoReparse(candidateAsar);
+
+  const exeBytes = fs.readFileSync(candidateExe);
+  const asarBytes = fs.readFileSync(candidateAsar);
+  const exeHash = sha256(exeBytes);
+  const asarHash = sha256(asarBytes);
+
+  assert.equal(exeHash, receipt.retained_shell.files['POS Desktop.exe'].sha256, 'Candidate POS Desktop.exe sha256 mismatch against receipt');
+  assert.equal(exeBytes.length, receipt.retained_shell.files['POS Desktop.exe'].size, 'Candidate POS Desktop.exe size mismatch against receipt');
+  assert.equal(asarHash, receipt.retained_shell.files['resources/app.asar'].sha256, 'Candidate resources/app.asar sha256 mismatch against receipt');
+  assert.equal(asarBytes.length, receipt.retained_shell.files['resources/app.asar'].size, 'Candidate resources/app.asar size mismatch against receipt');
+
+  const stagedPhysicalDigest = computeCanonicalShellDigest(exeHash, asarHash);
+  assert.equal(receipt.retained_shell.sha256, stagedPhysicalDigest, 'receipt.retained_shell.sha256 mismatch against candidate shell bytes');
+  console.log('      PASS: Verified candidate unpacked physical shell bytes against binding receipt before staging.');
+
   // 4. Validate carrier staging directory strictly within RUNNER_TEMP and FAIL if pre-existing
   assertNoReparse(runnerTemp);
   assertPathWithin(carrierDir, runnerTemp, 'Carrier staging directory');
@@ -540,6 +637,7 @@ export function stageCarrierAssets(options = {}) {
     acceptance_run_id: String(acceptanceRunId),
     supported_baselines: ['v0.0.12-beta.1'],
     carrier_type: 'channel-transition',
+    retained_shell: receipt.retained_shell,
     built_at: new Date().toISOString(),
   };
 
@@ -601,6 +699,7 @@ All transition descriptors, manifests, and index signatures are signed with the 
     source_sha: sourceSha,
     run_token: cRes.run_token,
     binding_receipt_sha256: stagedReceiptHash,
+    retained_shell: receipt.retained_shell,
     carrier_artifacts: carrierArtifactsMap,
     staged_at: new Date().toISOString(),
   };
@@ -652,6 +751,8 @@ export function finalizeReleaseEvidence(options = {}) {
   assert.equal(String(stagingManifest.setup_run_id), String(setupRunId));
   assert.equal(String(stagingManifest.acceptance_run_id), String(acceptanceRunId));
   assert.equal(stagingManifest.source_sha?.toLowerCase(), sourceSha);
+  assert.ok(stagingManifest.retained_shell, 'stagingManifest missing retained_shell proof object');
+  validateRetainedShellProof(stagingManifest.retained_shell, 'stagingManifest.retained_shell');
 
   // 3. Read and validate acceptance.json
   const acceptanceJsonPath = path.join(evidence, 'acceptance.json');
@@ -684,7 +785,13 @@ export function finalizeReleaseEvidence(options = {}) {
     sourceSha,
     runToken: stagingManifest.run_token,
     installerSha: receipt.installer_sha256,
+    retainedShell: stagingManifest.retained_shell,
   });
+  validateRetainedShellProof(receipt.retained_shell, 'receipt.retained_shell');
+  assert.deepEqual(receipt.retained_shell, stagingManifest.retained_shell, 'receipt.retained_shell mismatch against staging manifest retained_shell');
+
+  const recomputedPhysicalDigest = computeCanonicalShellDigest(receipt.retained_shell.files);
+  assert.equal(receipt.retained_shell.sha256, recomputedPhysicalDigest, 'receipt.retained_shell.sha256 mismatch against recomputed canonical digest');
   console.log('      PASS: Verified setup13-binding-receipt.json immutable evidence.');
 
   // 5. Validate Setup Artifacts in setup-artifact-dir
@@ -701,6 +808,7 @@ export function finalizeReleaseEvidence(options = {}) {
     runToken: stagingManifest.run_token,
     installerSha: receipt.installer_sha256,
     setupAssetsMap: setupAssets,
+    retainedShell: stagingManifest.retained_shell,
   });
 
   const canonicalSetupInvHash = sha256(Buffer.from(invRaw, 'utf8'));
@@ -715,6 +823,10 @@ export function finalizeReleaseEvidence(options = {}) {
 
   // 6. Validate Carrier Artifacts in carrierDir
   const carrierArtifacts = validateCarrierDirectory(carrierDir, stagingManifest);
+
+  const carrierSourceProv = JSON.parse(fs.readFileSync(path.join(carrierDir, 'source-provenance.json'), 'utf8'));
+  validateRetainedShellProof(carrierSourceProv.retained_shell, 'carrier source-provenance.json retained_shell');
+  assert.deepEqual(carrierSourceProv.retained_shell, receipt.retained_shell, 'carrier source-provenance.json retained_shell mismatch against binding receipt');
 
   // 7. Verify RSA signatures and transition descriptors
   const publicKeyPath = path.join(repoRoot, 'backend/certs/update_public_key.pem');
@@ -748,7 +860,8 @@ export function finalizeReleaseEvidence(options = {}) {
       canonicalSetupInvHash,
       canonicalSetupFiles,
       beta12InvHash: PINNED_BETA12_INVENTORY_SHA256,
-      shellHash: expectedShellHash,
+      shellHash: recomputedPhysicalDigest,
+      sourceShellFingerprint: expectedShellHash,
       zipName,
       zipBytes,
     });
@@ -770,6 +883,7 @@ export function finalizeReleaseEvidence(options = {}) {
     verifications: acceptance.verifications,
     setup_assets: setupAssets,
     carrier_artifacts: carrierArtifacts,
+    retained_shell: receipt.retained_shell,
     finalized_at: new Date().toISOString(),
   };
 

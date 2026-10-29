@@ -720,31 +720,20 @@ if ($Phase -eq 'prepare') {
             throw "deployment-inventory.json format mismatch: expected 1, got '$($setupInv.format)'"
         }
 
-        # Record binding receipt in evidence outside payload before cleanup
+        # Collect Setup 5-asset map
         $setup5Map = [ordered]@{}
         foreach ($fname in $expectedArtifactFiles) {
             $fpath = Join-Path $SetupArtifactDir $fname
+            $fitem = Get-Item -LiteralPath $fpath
+            $fsize = [long]$fitem.Length
+            if ($fsize -le 0 -or $fsize -gt 9007199254740991) {
+                throw "Setup asset '$fname' size must be a positive safe integer (<= 9007199254740991)."
+            }
             $setup5Map[$fname] = [ordered]@{
                 sha256 = (Get-FileHash -LiteralPath $fpath -Algorithm SHA256).Hash.ToLowerInvariant()
-                size = (Get-Item -LiteralPath $fpath).Length
+                size = $fsize
             }
         }
-
-        $bindingReceipt = [ordered]@{
-            schema_version = '1.0.0'
-            setup_run_id = [string]$SetupRunId
-            acceptance_run_id = [string]$env:GITHUB_RUN_ID
-            source_sha = $currentHeadSha
-            installer_sha256 = $checksumMap['POS-Desktop-Setup-0.0.13.exe']
-            setup_assets = $setup5Map
-            run_token = $runToken
-            created_at = (Get-Date).ToUniversalTime().ToString('o')
-        }
-        $bindingReceiptPath = Join-Path $evidence 'setup13-binding-receipt.json'
-        $tmpBinding = $bindingReceiptPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
-        $bindingReceipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmpBinding -Encoding utf8
-        Move-Item -LiteralPath $tmpBinding -Destination $bindingReceiptPath -Force
-        Write-Host "Recorded setup13 binding receipt in evidence: $bindingReceiptPath"
 
         # Copy verified installer to lab
         $candidateInstaller = Join-Path $lab 'POS-Desktop-Setup-0.0.13.exe'
@@ -765,13 +754,80 @@ if ($Phase -eq 'prepare') {
         if ($LASTEXITCODE -ne 0) { throw 'Failed to unpack external candidate installer files.' }
 
         $candidateShellRoot = $candidateUnpacked
+        Assert-SafeDirectory $candidateShellRoot | Out-Null
+
         $candidateExe = Join-Path $candidateShellRoot 'POS Desktop.exe'
         $candidateAsar = Join-Path $candidateShellRoot 'resources/app.asar'
+        Assert-SafeReceiptPath $candidateExe | Out-Null
+        Assert-SafeReceiptPath $candidateAsar | Out-Null
+
         if (-not (Test-Path -LiteralPath $candidateExe) -or -not (Test-Path -LiteralPath $candidateAsar)) {
             throw "Candidate shell files missing in: $candidateShellRoot"
         }
+
+        $candidateExeItem = Get-Item -LiteralPath $candidateExe
+        $candidateAsarItem = Get-Item -LiteralPath $candidateAsar
+        if ($candidateExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Reparse point rejected for candidate EXE: $candidateExe"
+        }
+        if ($candidateAsarItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Reparse point rejected for candidate ASAR: $candidateAsar"
+        }
+
+        $candidateExeSize = [long]$candidateExeItem.Length
+        $candidateAsarSize = [long]$candidateAsarItem.Length
+        if ($candidateExeSize -le 0 -or $candidateExeSize -gt 9007199254740991 -or $candidateAsarSize -le 0 -or $candidateAsarSize -gt 9007199254740991) {
+            throw "Candidate shell file size must be a positive safe integer (<= 9007199254740991)."
+        }
+
         $candidateExeHash = (Get-FileHash -LiteralPath $candidateExe -Algorithm SHA256).Hash.ToLowerInvariant()
         $candidateAsarHash = (Get-FileHash -LiteralPath $candidateAsar -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($candidateExeHash -notmatch '^[a-f0-9]{64}$' -or $candidateAsarHash -notmatch '^[a-f0-9]{64}$') {
+            throw "Candidate shell file hash must be 64-hex lowercase."
+        }
+
+        # Compute canonical 2-hash physical combined digest {"POS Desktop.exe":"...","resources/app.asar":"..."}
+        $shellJsonPayload = '{"POS Desktop.exe":"' + $candidateExeHash + '","resources/app.asar":"' + $candidateAsarHash + '"}'
+        $hasher = [System.Security.Cryptography.SHA256]::Create()
+        $shellDigestBytes = $hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($shellJsonPayload))
+        $hasher.Dispose()
+        $shellCombinedDigest = [System.BitConverter]::ToString($shellDigestBytes).Replace('-', '').ToLowerInvariant()
+        if ($shellCombinedDigest -notmatch '^[a-f0-9]{64}$') {
+            throw "Combined retained shell digest must be 64-hex lowercase."
+        }
+
+        $retainedShellProof = [ordered]@{
+            sha256 = $shellCombinedDigest
+            files = [ordered]@{
+                'POS Desktop.exe' = [ordered]@{
+                    sha256 = $candidateExeHash
+                    size = $candidateExeSize
+                }
+                'resources/app.asar' = [ordered]@{
+                    sha256 = $candidateAsarHash
+                    size = $candidateAsarSize
+                }
+            }
+        }
+
+        # Record single initial binding receipt in evidence with verified retained_shell proof BEFORE Native tests
+        $bindingReceipt = [ordered]@{
+            schema_version = '1.0.0'
+            setup_run_id = [string]$SetupRunId
+            acceptance_run_id = [string]$env:GITHUB_RUN_ID
+            source_sha = $currentHeadSha
+            installer_sha256 = $checksumMap['POS-Desktop-Setup-0.0.13.exe']
+            setup_assets = $setup5Map
+            retained_shell = $retainedShellProof
+            run_token = $runToken
+            created_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        $bindingReceiptPath = Join-Path $evidence 'setup13-binding-receipt.json'
+        Assert-SafeReceiptPath $bindingReceiptPath | Out-Null
+        $tmpBinding = $bindingReceiptPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        $bindingReceipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmpBinding -Encoding utf8
+        Move-Item -LiteralPath $tmpBinding -Destination $bindingReceiptPath -Force
+        Write-Host "Recorded setup13 binding receipt in evidence: $bindingReceiptPath"
 
         $candidateUnpackedApp = Join-Path $candidateUnpacked 'resources/app.asar.unpacked'
         if (-not (Test-Path -LiteralPath $candidateUnpackedApp)) {

@@ -46,7 +46,9 @@ import {
   validateSetupDirectory,
   validateEvidenceDirectory,
   validateCarrierDirectory,
-  cleanupOwnedStaging
+  cleanupOwnedStaging,
+  computeCanonicalShellDigest,
+  validateRetainedShellProof
 } from './promote-setup13.mjs';
 
 // Enforce GHA-only execution before any test execution
@@ -148,6 +150,20 @@ try {
   // Validate setup assets to get canonical hashes, sizes, and inventoryInfo
   const { setupHashes, setupSizes, inventoryInfo } = validateSetupDirectory(setupDir);
 
+  // Retained shell mock fixture (distinct domain from Git source-input shell fingerprint)
+  const mockExeHash = 'a1'.repeat(32);
+  const mockAsarHash = '2222222222222222222222222222222222222222222222222222222222222222';
+  const mockPhysicalShellDigest = computeCanonicalShellDigest(mockExeHash, mockAsarHash);
+  assert.notEqual(mockPhysicalShellDigest, inventoryInfo.parsed.shell_sha256, 'Mock physical shell digest must be distinct from source fingerprint');
+
+  const mockRetainedShell = {
+    sha256: mockPhysicalShellDigest,
+    files: {
+      'POS Desktop.exe': { sha256: mockExeHash, size: 10485760 },
+      'resources/app.asar': { sha256: mockAsarHash, size: 5242880 },
+    },
+  };
+
   // 2. Populate Valid Baseline Carrier Assets (exact 18 files)
   const transitionEntries = [];
   for (const t of EXPECTED_TRANSITIONS) {
@@ -171,7 +187,7 @@ try {
       type: t.type,
       target_repo: isReturn ? 'pos-desktop' : 'pos-desktop-updates',
       target_tag: isReturn ? EXPECTED_TAG : 'v0.0.12-beta.1',
-      shell_sha256: inventoryInfo.parsed.shell_sha256,
+      shell_sha256: mockPhysicalShellDigest,
       package: {
         asset: zipName,
         sha256: sha256(zipBytes),
@@ -231,7 +247,7 @@ try {
   fs.writeFileSync(path.join(carrierDir, 'channel-transitions.sig'), 'mock-channel-transitions-sig\n');
   // deployment-inventory.json MUST raw-byte match Setup inventory
   fs.writeFileSync(path.join(carrierDir, 'deployment-inventory.json'), setupInventoryBytes);
-  fs.writeFileSync(path.join(carrierDir, 'source-provenance.json'), JSON.stringify({ tag: EXPECTED_TAG }, null, 2) + '\n');
+  fs.writeFileSync(path.join(carrierDir, 'source-provenance.json'), JSON.stringify({ tag: EXPECTED_TAG, retained_shell: mockRetainedShell }, null, 2) + '\n');
   fs.writeFileSync(path.join(carrierDir, 'release-notes.md'), '# Setup 0.0.13 Release Notes\n');
 
   const carrierNonSums = EXACT_18_CARRIER_FILES.filter((f) => f !== 'SHA256SUMS.txt');
@@ -241,7 +257,7 @@ try {
   }).join('\n') + '\n';
   fs.writeFileSync(path.join(carrierDir, 'SHA256SUMS.txt'), carrierSumsContent);
 
-  // 3. Populate Valid Baseline Evidence (release-provenance.json + acceptance.json)
+  // 3. Populate Valid Baseline Evidence (release-provenance.json + acceptance.json + setup13-binding-receipt.json)
   const provSetupAssets = {};
   for (const fn of EXACT_5_SETUP_ASSETS) {
     provSetupAssets[fn] = {
@@ -264,18 +280,22 @@ try {
     verifications13[k] = true;
   }
 
+  const mockRunToken = 'abcdef0123456789abcdef0123456789';
+
   const validProvenance = {
     schema_version: '1.0.0',
     tag: EXPECTED_TAG,
     setup_run_id: '12345',
     acceptance_run_id: '67890',
     source_sha: dummySha,
+    run_token: mockRunToken,
     verdict: 'PASSED',
     cleanup_verified: true,
     artifact_binding_verified: true,
     verifications: verifications13,
     setup_assets: provSetupAssets,
-    carrier_artifacts: provCarrierArtifacts
+    carrier_artifacts: provCarrierArtifacts,
+    retained_shell: mockRetainedShell
   };
   fs.writeFileSync(path.join(evidenceDir, 'release-provenance.json'), JSON.stringify(validProvenance, null, 2) + '\n');
 
@@ -284,9 +304,23 @@ try {
     cleanup_verified: true,
     run_id: '67890',
     setup_run_id: '12345',
+    run_token: mockRunToken,
     verifications: verifications13
   };
   fs.writeFileSync(path.join(evidenceDir, 'acceptance.json'), JSON.stringify(validAcceptance, null, 2) + '\n');
+
+  const validBindingReceipt = {
+    schema_version: '1.0.0',
+    setup_run_id: '12345',
+    acceptance_run_id: '67890',
+    source_sha: dummySha,
+    installer_sha256: setupHashes.get('POS-Desktop-Setup-0.0.13.exe'),
+    setup_assets: provSetupAssets,
+    retained_shell: mockRetainedShell,
+    run_token: mockRunToken,
+    created_at: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(evidenceDir, 'setup13-binding-receipt.json'), JSON.stringify(validBindingReceipt, null, 2) + '\n');
 
   // --- POSITIVE BASELINE TEST ---
   runTest('Positive baseline fixtures satisfy all validators', () => {
@@ -1095,6 +1129,365 @@ try {
     }
   });
 
+  runTest('Policy: Reject release-provenance missing retained_shell proof', () => {
+    const badProv = JSON.parse(JSON.stringify(validProvenance));
+    delete badProv.retained_shell;
+    const badProvPath = path.join(evidenceDir, 'release-provenance.json');
+    fs.writeFileSync(badProvPath, JSON.stringify(badProv, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /release-provenance missing retained_shell proof object/
+      );
+    } finally {
+      fs.writeFileSync(badProvPath, JSON.stringify(validProvenance, null, 2));
+    }
+  });
+
+  runTest('Policy: Reject release-provenance with tampered retained_shell combined digest', () => {
+    const badProv = JSON.parse(JSON.stringify(validProvenance));
+    badProv.retained_shell.sha256 = '0000000000000000000000000000000000000000000000000000000000000000';
+    const badProvPath = path.join(evidenceDir, 'release-provenance.json');
+    fs.writeFileSync(badProvPath, JSON.stringify(badProv, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /sha256 must match recomputed canonical 2-hash combined digest/
+      );
+    } finally {
+      fs.writeFileSync(badProvPath, JSON.stringify(validProvenance, null, 2));
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json with mismatched retained_shell against release-provenance', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.retained_shell = {
+      sha256: computeCanonicalShellDigest('3'.repeat(64), '4'.repeat(64)),
+      files: {
+        'POS Desktop.exe': { sha256: '3'.repeat(64), size: 100 },
+        'resources/app.asar': { sha256: '4'.repeat(64), size: 200 }
+      }
+    };
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt\.json retained_shell mismatch against release-provenance\.json/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject missing setup13-binding-receipt.json in evidence directory', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    fs.unlinkSync(receiptPath);
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt\.json missing from evidence directory root/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject acceptance.json with missing or invalid run_token', () => {
+    const accPath = path.join(evidenceDir, 'acceptance.json');
+    const origAcc = fs.readFileSync(accPath, 'utf8');
+    const badAcc = JSON.parse(origAcc);
+    badAcc.run_token = 'invalid-token-not-32-hex';
+    fs.writeFileSync(accPath, JSON.stringify(badAcc, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /acceptance\.json run_token must be a 32-hex lowercase string/
+      );
+    } finally {
+      fs.writeFileSync(accPath, origAcc);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json with mismatched run_token', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.run_token = '00000000000000000000000000000000';
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt run_token mismatch against acceptance\.json/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json with numeric setup_run_id', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.setup_run_id = 12345;
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_run_id must be a string/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json with uppercase source_sha', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.source_sha = dummySha.toUpperCase();
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt source_sha must be 40-character lowercase hexadecimal/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json with uppercase installer_sha256', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.installer_sha256 = setupHashes.get('POS-Desktop-Setup-0.0.13.exe').toUpperCase();
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt installer_sha256 must be 64-character lowercase hexadecimal/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json setup_assets missing file', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    delete badReceipt.setup_assets['latest.yml'];
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_assets keys mismatch/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json setup_assets extra key', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.setup_assets['extra.bin'] = { sha256: 'a'.repeat(64), size: 10 };
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_assets keys mismatch/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json setup_assets entry hash mismatch', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.setup_assets['latest.yml'].sha256 = '0'.repeat(64);
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_assets\[latest\.yml\] hash mismatch against verified downloaded asset/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json setup_assets entry size mismatch', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.setup_assets['latest.yml'].size += 1;
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_assets\[latest\.yml\] size mismatch against verified downloaded asset/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Reject setup13-binding-receipt.json setup_assets entry extra property', () => {
+    const receiptPath = path.join(evidenceDir, 'setup13-binding-receipt.json');
+    const origReceipt = fs.readFileSync(receiptPath, 'utf8');
+    const badReceipt = JSON.parse(origReceipt);
+    badReceipt.setup_assets['latest.yml'].extra = 'unauthorized';
+    fs.writeFileSync(receiptPath, JSON.stringify(badReceipt, null, 2));
+    try {
+      assert.throws(
+        () => validateEvidenceDirectory(evidenceDir, {
+          expectedSetupRunId: '12345',
+          expectedAcceptanceRunId: '67890',
+          expectedSha: dummySha,
+          setupHashes,
+          setupSizes
+        }),
+        /setup13-binding-receipt setup_assets\[latest\.yml\] must contain exact properties \{sha256, size\}/
+      );
+    } finally {
+      fs.writeFileSync(receiptPath, origReceipt);
+    }
+  });
+
+  runTest('Policy: Retained shell proof negative matrix rejected by validateRetainedShellProof', () => {
+    const base = mockRetainedShell;
+    const cases = [
+      { name: 'null proof', obj: null, err: /must be a non-null object/ },
+      { name: 'uppercase combined digest', obj: { ...base, sha256: base.sha256.toUpperCase() }, err: /sha256 must be a 64-hex lowercase string/ },
+      { name: 'uppercase file hash', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash.toUpperCase(), size: 100 }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /sha256 must be a 64-hex lowercase string/ },
+      { name: 'missing native file', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: 100 } } }, err: /files must contain exact keys/ },
+      { name: 'extra native file', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: 100 }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 }, 'extra.dll': { sha256: mockExeHash, size: 50 } } }, err: /files must contain exact keys/ },
+      { name: 'extra proof root keys', obj: { ...base, extra_root: 1 }, err: /must contain exact keys \{files, sha256\}/ },
+      { name: 'extra metadata keys', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: 100, extra: true }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /must contain exact keys \{sha256, size\}/ },
+      { name: 'string size', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: '100' }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /size must be a positive safe integer/ },
+      { name: 'zero size', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: 0 }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /size must be a positive safe integer/ },
+      { name: 'negative size', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: -10 }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /size must be a positive safe integer/ },
+      { name: 'unsafe integer size', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockExeHash, size: Number.MAX_SAFE_INTEGER + 10 }, 'resources/app.asar': { sha256: mockAsarHash, size: 200 } } }, err: /size must be a positive safe integer/ },
+      { name: 'flipped EXE/ASAR hash with unupdated combined digest', obj: { sha256: base.sha256, files: { 'POS Desktop.exe': { sha256: mockAsarHash, size: 200 }, 'resources/app.asar': { sha256: mockExeHash, size: 100 } } }, err: /sha256 must match recomputed canonical 2-hash combined digest/ },
+    ];
+
+    for (const c of cases) {
+      assert.throws(() => validateRetainedShellProof(c.obj, c.name), c.err, `Failed for case: ${c.name}`);
+    }
+  });
+
+  runTest('Policy: Reject fully well-formed DIFFERENT proof in carrier source-provenance.json', () => {
+    const diffExeHash = '5555555555555555555555555555555555555555555555555555555555555555';
+    const diffAsarHash = '6666666666666666666666666666666666666666666666666666666666666666';
+    const diffProof = {
+      sha256: computeCanonicalShellDigest(diffExeHash, diffAsarHash),
+      files: {
+        'POS Desktop.exe': { sha256: diffExeHash, size: 12345 },
+        'resources/app.asar': { sha256: diffAsarHash, size: 67890 }
+      }
+    };
+    validateRetainedShellProof(diffProof); // internally well-formed
+
+    const srcProvPath = path.join(carrierDir, 'source-provenance.json');
+    const origSrcProv = fs.readFileSync(srcProvPath, 'utf8');
+    const parsed = JSON.parse(origSrcProv);
+    parsed.retained_shell = diffProof;
+    fs.writeFileSync(srcProvPath, JSON.stringify(parsed, null, 2) + '\n');
+    try {
+      assert.throws(
+        () => validateCarrierDirectory(carrierDir, validProvenance, inventoryInfo),
+        /carrier source-provenance\.json retained_shell mismatch against release-provenance\.json/
+      );
+    } finally {
+      fs.writeFileSync(srcProvPath, origSrcProv);
+    }
+  });
+
   runTest('Policy: Reject setup directory containing unexpected extra files', () => {
     const extraFile = path.join(setupDir, 'unexpected-payload.exe');
     fs.writeFileSync(extraFile, 'unauthorized binary');
@@ -1470,6 +1863,84 @@ try {
       assert.throws(
         () => validateCarrierDirectory(carrierDir, validProvenance, inventoryInfo),
         /source_inventory files mismatch against Setup 13/
+      );
+    } finally {
+      fs.writeFileSync(forwardDescPath, origForwardDesc);
+      fs.writeFileSync(indexPath, origIndex);
+    }
+  });
+
+  runTest('Policy: Reject carrier source-provenance.json with mismatched retained_shell', () => {
+    const srcProvPath = path.join(carrierDir, 'source-provenance.json');
+    const origSrcProv = fs.readFileSync(srcProvPath, 'utf8');
+    const parsed = JSON.parse(origSrcProv);
+    parsed.retained_shell = {
+      sha256: computeCanonicalShellDigest('9'.repeat(64), '8'.repeat(64)),
+      files: {
+        'POS Desktop.exe': { sha256: '9'.repeat(64), size: 100 },
+        'resources/app.asar': { sha256: '8'.repeat(64), size: 200 }
+      }
+    };
+    fs.writeFileSync(srcProvPath, JSON.stringify(parsed, null, 2) + '\n');
+    try {
+      assert.throws(
+        () => validateCarrierDirectory(carrierDir, validProvenance, inventoryInfo),
+        /carrier source-provenance\.json retained_shell mismatch against release-provenance\.json/
+      );
+    } finally {
+      fs.writeFileSync(srcProvPath, origSrcProv);
+    }
+  });
+
+  runTest('Policy: Reject transition descriptor with tampered physical shell_sha256', () => {
+    const descStem = 'transition-0.0.12-beta.1-to-stable-0.0.13-delta';
+    const returnDescPath = path.join(carrierDir, `${descStem}.json`);
+    const indexPath = path.join(carrierDir, 'channel-transitions.json');
+    const origReturnDesc = fs.readFileSync(returnDescPath, 'utf8');
+    const origIndex = fs.readFileSync(indexPath, 'utf8');
+
+    const parsedDesc = JSON.parse(origReturnDesc);
+    parsedDesc.shell_sha256 = '0'.repeat(64);
+    const tamperedDescRaw = JSON.stringify(parsedDesc, null, 2) + '\n';
+    fs.writeFileSync(returnDescPath, tamperedDescRaw);
+
+    const parsedIndex = JSON.parse(origIndex);
+    const entry = parsedIndex.entries.find((e) => e.descriptor === `${descStem}.json`);
+    entry.descriptor_sha256 = sha256(Buffer.from(tamperedDescRaw));
+    fs.writeFileSync(indexPath, JSON.stringify(parsedIndex, null, 2) + '\n');
+
+    try {
+      assert.throws(
+        () => validateCarrierDirectory(carrierDir, validProvenance, inventoryInfo),
+        /shell_sha256 mismatch against physical retained shell digest/
+      );
+    } finally {
+      fs.writeFileSync(returnDescPath, origReturnDesc);
+      fs.writeFileSync(indexPath, origIndex);
+    }
+  });
+
+  runTest('Policy: Reject forward transition descriptor with tampered source_inventory shell_sha256', () => {
+    const descStem = 'transition-0.0.13-to-beta-0.0.12-beta.1-delta';
+    const forwardDescPath = path.join(carrierDir, `${descStem}.json`);
+    const indexPath = path.join(carrierDir, 'channel-transitions.json');
+    const origForwardDesc = fs.readFileSync(forwardDescPath, 'utf8');
+    const origIndex = fs.readFileSync(indexPath, 'utf8');
+
+    const parsedDesc = JSON.parse(origForwardDesc);
+    parsedDesc.source_inventory.shell_sha256 = '0'.repeat(64);
+    const tamperedDescRaw = JSON.stringify(parsedDesc, null, 2) + '\n';
+    fs.writeFileSync(forwardDescPath, tamperedDescRaw);
+
+    const parsedIndex = JSON.parse(origIndex);
+    const entry = parsedIndex.entries.find((e) => e.descriptor === `${descStem}.json`);
+    entry.descriptor_sha256 = sha256(Buffer.from(tamperedDescRaw));
+    fs.writeFileSync(indexPath, JSON.stringify(parsedIndex, null, 2) + '\n');
+
+    try {
+      assert.throws(
+        () => validateCarrierDirectory(carrierDir, validProvenance, inventoryInfo),
+        /source_inventory shell_sha256 mismatch against Setup 13/
       );
     } finally {
       fs.writeFileSync(forwardDescPath, origForwardDesc);
