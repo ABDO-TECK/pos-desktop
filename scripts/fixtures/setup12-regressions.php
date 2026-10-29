@@ -1674,6 +1674,43 @@ final class Setup12RegressionsHelper
             $ledgerMatchesContract
         );
 
+        $helperProofHolds = (
+            $dataPreserved &&
+            $adminVerified &&
+            $exactAll58Match &&
+            count($actualVersions) === 58 &&
+            $legacyRetainedCount === 24 &&
+            $legacyTimestampsPreserved &&
+            $pendingAppliedCount === 34 &&
+            $pendingTimestampsNew &&
+            $duplicate016Gone &&
+            $legacyMigrationsTableDropped &&
+            $catalogViewPresent &&
+            $catalogTriggersPresent &&
+            $customerBranchInferred &&
+            $supplierBranchInferred &&
+            $hasUnitType &&
+            $hasFractional &&
+            $hasCatalogChanges &&
+            in_array('059_add_update_compatibility_metadata.sql', $actualVersions, true) &&
+            $ledgerMatchesContract &&
+            $this->is64LowerHex($description['schema_sha256'] ?? null) &&
+            $this->is64LowerHex($expectedSchemaSha) &&
+            $this->is64LowerHex($expectedLedgerSha) &&
+            ($description['ledger_sha256'] ?? null) === $expectedLedgerSha
+        );
+
+        $observedStructuralProfile = null;
+        if ($helperProofHolds) {
+            $observedStructuralProfile = [
+                'format' => 1,
+                'source' => 'synthetic_legacy025_native_reference',
+                'current_schema_sha256' => (string)$description['schema_sha256'],
+                'target_schema_sha256' => $expectedSchemaSha,
+                'ledger_sha256' => $expectedLedgerSha,
+            ];
+        }
+
         return [
             'ok' => true,
             'ledger_count' => count($actualVersions),
@@ -1697,6 +1734,8 @@ final class Setup12RegressionsHelper
             'schema_matches_contract' => $schemaMatchesContract,
             'ledger_matches_contract' => $ledgerMatchesContract,
             'structural_diff' => $structuralDiff,
+            'observed_structural_profile' => $observedStructuralProfile,
+            'observedstructuralProfile' => $observedStructuralProfile,
         ];
     }
 
@@ -2152,6 +2191,11 @@ final class Setup12RegressionsHelper
             return $trimmed;
         }
         return null;
+    }
+
+    private function is64LowerHex(mixed $val): bool
+    {
+        return is_string($val) && preg_match('/^[a-f0-9]{64}$/D', $val) === 1;
     }
 
     private function assertOwnershipReceipt(): array

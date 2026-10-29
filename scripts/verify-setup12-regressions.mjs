@@ -1481,6 +1481,40 @@ function sanitizeStructuralDiff(diff) {
   };
 }
 
+function sanitizeStructuralProfile(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null;
+  if (profile.format !== 1) return null;
+  if (profile.source !== 'synthetic_legacy025_native_reference') return null;
+
+  const is64LowerHex = (val) => typeof val === 'string' && /^[a-f0-9]{64}$/.test(val);
+
+  const currentSchemaSha = is64LowerHex(profile.current_schema_sha256)
+    ? profile.current_schema_sha256
+    : (is64LowerHex(profile.schema_sha256) ? profile.schema_sha256 : null);
+
+  const targetSchemaSha = is64LowerHex(profile.target_schema_sha256)
+    ? profile.target_schema_sha256
+    : (is64LowerHex(profile.baseline_schema_sha256)
+      ? profile.baseline_schema_sha256
+      : (is64LowerHex(profile.expected_schema_sha256) ? profile.expected_schema_sha256 : null));
+
+  const ledgerSha = is64LowerHex(profile.ledger_sha256)
+    ? profile.ledger_sha256
+    : (is64LowerHex(profile.expected_ledger_sha256) ? profile.expected_ledger_sha256 : null);
+
+  if (!currentSchemaSha || !targetSchemaSha || !ledgerSha) {
+    return null;
+  }
+
+  return {
+    format: 1,
+    source: 'synthetic_legacy025_native_reference',
+    current_schema_sha256: currentSchemaSha,
+    target_schema_sha256: targetSchemaSha,
+    ledger_sha256: ledgerSha,
+  };
+}
+
 let legacyDiagnostic = null;
 
 function persistLegacyDiagnostic(patch = {}) {
@@ -1495,6 +1529,10 @@ function persistLegacyDiagnostic(patch = {}) {
   } else if (legacyDiagnostic.result === 'fail') {
     safeCode = 1;
   }
+
+  const safeProfile = sanitizeStructuralProfile(
+    legacyDiagnostic.observed_structural_profile ?? legacyDiagnostic.observedstructuralProfile
+  );
 
   const safe = {
     phase: typeof legacyDiagnostic.phase === 'string' && ALLOWED_LEGACY_PHASES.has(legacyDiagnostic.phase) ? legacyDiagnostic.phase : null,
@@ -1516,6 +1554,8 @@ function persistLegacyDiagnostic(patch = {}) {
     schema_matches_contract: typeof legacyDiagnostic.schema_matches_contract === 'boolean' ? legacyDiagnostic.schema_matches_contract : null,
     ledger_matches_contract: typeof legacyDiagnostic.ledger_matches_contract === 'boolean' ? legacyDiagnostic.ledger_matches_contract : null,
     structural_diff: sanitizeStructuralDiff(legacyDiagnostic.structural_diff),
+    observed_structural_profile: safeProfile,
+    observedstructuralProfile: safeProfile,
   };
   fs.writeFileSync(path.join(evidence, 'diagnostic-legacy-v025-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
 }
@@ -3058,6 +3098,8 @@ try {
       schema_matches_contract: null,
       ledger_matches_contract: null,
       structural_diff: null,
+      observed_structural_profile: null,
+      observedstructuralProfile: null,
     };
     persistLegacyDiagnostic({ phase: 'prepare' });
 
@@ -3246,7 +3288,14 @@ try {
       schema_matches_contract: typeof upgradeRes.schema_matches_contract === 'boolean' ? upgradeRes.schema_matches_contract : null,
       ledger_matches_contract: typeof upgradeRes.ledger_matches_contract === 'boolean' ? upgradeRes.ledger_matches_contract : null,
       structural_diff: upgradeRes.structural_diff || null,
+      observed_structural_profile: upgradeRes.observed_structural_profile || upgradeRes.observedstructuralProfile || null,
+      observedstructuralProfile: upgradeRes.observedstructuralProfile || upgradeRes.observed_structural_profile || null,
     });
+
+    const observedProfile = upgradeRes.observed_structural_profile || upgradeRes.observedstructuralProfile;
+    if (observedProfile) {
+      console.log(`[Test 5 Profile Fingerprints] format=${observedProfile.format} source=${observedProfile.source} current_schema_sha256=${observedProfile.current_schema_sha256} target_schema_sha256=${observedProfile.target_schema_sha256} ledger_sha256=${observedProfile.ledger_sha256}`);
+    }
 
     if (upgradeRes.structural_diff && (!upgradeRes.schema_matches_contract || !upgradeRes.ledger_matches_contract)) {
       console.warn(`[Test 5 Structural Diff] Schema matches contract: ${upgradeRes.schema_matches_contract}, Ledger matches contract: ${upgradeRes.ledger_matches_contract}`);
