@@ -1,0 +1,100 @@
+name: VerifySetup13Public
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Expected 40-character lowercase commit SHA for v0.0.13'
+        required: true
+        type: string
+      setup_run_id:
+        description: 'Successful windows-setup.yml workflow run ID'
+        required: true
+        type: string
+      acceptance_run_id:
+        description: 'Successful setup13-release-acceptance.yml workflow run ID'
+        required: true
+        type: string
+  push:
+    branches:
+      - 'verify-setup13-public-proof'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  syntax:
+    name: Syntax check verifier script
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository at workflow commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Node check verifier script syntax
+        run: node --check scripts/verify-setup13-public.mjs
+
+  verify:
+    name: Verify postpublication public assets and evidence
+    if: github.event_name == 'workflow_dispatch'
+    needs: syntax
+    runs-on: windows-latest
+    steps:
+      - name: Checkout verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - name: Checkout release source at fixed v0.0.13
+        uses: actions/checkout@v4
+        with:
+          ref: v0.0.13
+          path: release-source
+          persist-credentials: false
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Pre-validate workflow runs and source tag
+        env:
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          INPUT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          TOOLING_DIR: tooling
+          RELEASE_SOURCE_DIR: release-source
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/verify-setup13-public.mjs --precheck
+
+      - name: Download Release Acceptance evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: setup13-release-evidence
+          path: evidence
+          run-id: ${{ inputs.acceptance_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify public releases and acceptance integrity
+        env:
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          INPUT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          TOOLING_DIR: tooling
+          RELEASE_SOURCE_DIR: release-source
+          EVIDENCE_DIR: evidence
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/verify-setup13-public.mjs --verify
+
+      - name: Upload public integrity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-integrity-report
+          path: public-integrity.json
+          if-no-files-found: error
