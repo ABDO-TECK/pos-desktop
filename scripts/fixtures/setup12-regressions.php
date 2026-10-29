@@ -17,6 +17,7 @@ declare(strict_types=1);
  *  - mutate-db: Modifies sentinel business row to test restore reversion.
  *  - verify-restore-sql-preservation: Verifies byte-level SQL preservation in BackupService::validateUploadedSqlFile.
  *  - prepare-legacy-v025-backup: Prepares synthetic legacy v0.25 SQL backup injecting dynamic admin auth.
+ *  - capture-legacy-v025-schema-baseline: Captures pre-Test5 MariaDB schema and ledger canonical baseline.
  *  - verify-legacy-v025-upgrade: Verifies post-restore migration reconciliation from legacy v0.25 to candidate 13.
  */
 
@@ -1365,13 +1366,113 @@ final class Setup12RegressionsHelper
         ];
     }
 
-    public function verifyLegacyV025Upgrade(string $configDir, string $authPath, string $contractPath): array
+    public function captureLegacyV025SchemaBaseline(string $configDir, string $contractPath, string $outputPath): array
+    {
+        $receipt = $this->assertOwnershipReceipt();
+
+        $canonicalLab = str_replace('\\', '/', $this->runnerTemp) . '/setup12-regression-lab';
+        $receiptLab = rtrim(str_replace('\\', '/', (string)($receipt['lab'] ?? '')), '/');
+        if (strtolower($receiptLab) !== strtolower($canonicalLab)) {
+            throw new RuntimeException('Ownership receipt lab is not canonical runnerTemp/setup12-regression-lab');
+        }
+
+        $safeContract = $this->assertSafeRunnerTempPath($contractPath, true);
+        $canonicalContract = $canonicalLab . '/data-contract.json';
+        if (strtolower(str_replace('\\', '/', $safeContract)) !== strtolower($canonicalContract)) {
+            throw new RuntimeException('Contract path must be EXACT canonical lab data-contract.json');
+        }
+
+        $safeOutput = $this->assertSafeRunnerTempPath($outputPath, false);
+        $canonicalOutput = $canonicalLab . '/legacy-v025-schema-baseline.json';
+        if (strtolower(str_replace('\\', '/', $safeOutput)) !== strtolower($canonicalOutput)) {
+            throw new RuntimeException('Output path must be EXACT canonical lab legacy-v025-schema-baseline.json');
+        }
+
+        if (file_exists($safeOutput) || is_link($safeOutput)) {
+            throw new RuntimeException('Output path already exists; fresh output required');
+        }
+
+        $contractRaw = (string)file_get_contents($safeContract);
+        $contractData = json_decode($contractRaw, true, 32, JSON_THROW_ON_ERROR);
+        $expectedSchemaSha = (string)($contractData['schema_sha256'] ?? $contractData['contract']['schema_sha256'] ?? '');
+        $expectedLedgerSha = (string)($contractData['ledger_sha256'] ?? $contractData['contract']['ledger_sha256'] ?? '');
+        if ($expectedSchemaSha === '' || $expectedLedgerSha === '') {
+            throw new RuntimeException('Contract file missing required schema_sha256 or ledger_sha256');
+        }
+
+        $db = $this->connectDatabase($configDir);
+        $service = new UpdateDataCompatibilityService();
+        $description = $service->describe($db);
+
+        if ($description['schema_sha256'] !== $expectedSchemaSha) {
+            throw new RuntimeException('Captured pre-Test5 schema SHA256 does not match immutable contract');
+        }
+        if ($description['ledger_sha256'] !== $expectedLedgerSha) {
+            throw new RuntimeException('Captured pre-Test5 ledger SHA256 does not match immutable contract');
+        }
+
+        $baselinePayload = [
+            'format' => 1,
+            'schema' => $description['schema'],
+            'ledger' => $description['ledger'],
+        ];
+
+        $encoded = json_encode($baselinePayload, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+        $fh = @fopen($safeOutput, 'xb');
+        if ($fh === false) {
+            throw new RuntimeException('Failed to create schema baseline file exclusively');
+        }
+        $written = fwrite($fh, $encoded);
+        fclose($fh);
+        if ($written !== strlen($encoded)) {
+            throw new RuntimeException('Failed to write complete schema baseline file');
+        }
+
+        return [
+            'ok' => true,
+            'tables_count' => count($description['schema']['tables'] ?? []),
+            'columns_count' => count($description['schema']['columns'] ?? []),
+            'indexes_count' => count($description['schema']['indexes'] ?? []),
+            'keys_count' => count($description['schema']['keys'] ?? []),
+            'references_count' => count($description['schema']['references'] ?? []),
+            'checks_count' => count($description['schema']['checks'] ?? []),
+            'objects_count' => count($description['schema']['objects'] ?? []),
+            'ledger_count' => count($description['ledger'] ?? []),
+        ];
+    }
+
+    public function verifyLegacyV025Upgrade(string $configDir, string $authPath, string $contractPath, string $baselinePath = ''): array
     {
         $safeAuth = $this->assertSafeRunnerTempPath($authPath, true);
         if (basename($safeAuth) !== 'fixture-auth.json') {
             throw new RuntimeException('Fixture auth path must be fixture-auth.json');
         }
         $safeContract = $this->assertSafeRunnerTempPath($contractPath, true);
+
+        $canonicalLab = str_replace('\\', '/', $this->runnerTemp) . '/setup12-regression-lab';
+        if ($baselinePath === '') {
+            $baselinePath = $canonicalLab . '/legacy-v025-schema-baseline.json';
+        }
+        $safeBaseline = $this->assertSafeRunnerTempPath($baselinePath, true);
+        $canonicalBaseline = $canonicalLab . '/legacy-v025-schema-baseline.json';
+        if (strtolower(str_replace('\\', '/', $safeBaseline)) !== strtolower($canonicalBaseline)) {
+            throw new RuntimeException('Baseline path must be EXACT canonical lab legacy-v025-schema-baseline.json');
+        }
+        if (!is_file($safeBaseline)) {
+            throw new RuntimeException("Schema baseline missing: {$safeBaseline}");
+        }
+
+        $baselineRaw = (string)file_get_contents($safeBaseline);
+        $baselineData = json_decode($baselineRaw, true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($baselineData) || (int)($baselineData['format'] ?? 0) !== 1) {
+            throw new RuntimeException('Invalid baseline format; expected format 1');
+        }
+        $baselineSchema = $baselineData['schema'] ?? null;
+        $baselineLedger = $baselineData['ledger'] ?? null;
+        if (!is_array($baselineSchema) || !is_array($baselineLedger)) {
+            throw new RuntimeException('Baseline missing required schema or ledger structures');
+        }
 
         $authRaw = (string)file_get_contents($safeAuth);
         $auth = json_decode($authRaw, true, 32, JSON_THROW_ON_ERROR);
@@ -1384,6 +1485,15 @@ final class Setup12RegressionsHelper
         $expectedLedgerSha = (string)($contractData['ledger_sha256'] ?? $contractData['contract']['ledger_sha256'] ?? '');
         if ($expectedSchemaSha === '' || $expectedLedgerSha === '') {
             throw new RuntimeException('Contract file missing required schema_sha256 or ledger_sha256');
+        }
+
+        $baselineSchemaSha = hash('sha256', json_encode($baselineSchema, JSON_THROW_ON_ERROR));
+        $baselineLedgerSha = hash('sha256', json_encode($baselineLedger, JSON_THROW_ON_ERROR));
+        if ($baselineSchemaSha !== $expectedSchemaSha) {
+            throw new RuntimeException('Decoded baseline schema SHA256 does not match original immutable contract');
+        }
+        if ($baselineLedgerSha !== $expectedLedgerSha) {
+            throw new RuntimeException('Decoded baseline ledger SHA256 does not match original immutable contract');
         }
 
         $db = $this->connectDatabase($configDir);
@@ -1555,6 +1665,15 @@ final class Setup12RegressionsHelper
         $schemaMatchesContract = ($description['schema_sha256'] === $expectedSchemaSha);
         $ledgerMatchesContract = ($description['ledger_sha256'] === $expectedLedgerSha);
 
+        $structuralDiff = $this->computeStructuralDiff(
+            $baselineSchema,
+            $baselineLedger,
+            $description['schema'],
+            $description['ledger'],
+            $schemaMatchesContract,
+            $ledgerMatchesContract
+        );
+
         return [
             'ok' => true,
             'ledger_count' => count($actualVersions),
@@ -1577,7 +1696,462 @@ final class Setup12RegressionsHelper
             'data_preserved' => $dataPreserved,
             'schema_matches_contract' => $schemaMatchesContract,
             'ledger_matches_contract' => $ledgerMatchesContract,
+            'structural_diff' => $structuralDiff,
         ];
+    }
+
+    private function computeStructuralDiff(
+        array $baselineSchema,
+        array $baselineLedger,
+        array $actualSchema,
+        array $actualLedger,
+        bool $schemaMatchesContract,
+        bool $ledgerMatchesContract
+    ): array {
+        $buckets = ['tables', 'columns', 'indexes', 'keys', 'references', 'checks', 'objects'];
+        $bucketCounts = [];
+        $changedBuckets = [];
+        $records = [];
+
+        foreach ($buckets as $bucket) {
+            $bRows = is_array($baselineSchema[$bucket] ?? null) ? $baselineSchema[$bucket] : [];
+            $aRows = is_array($actualSchema[$bucket] ?? null) ? $actualSchema[$bucket] : [];
+            $bucketCounts[$bucket] = [
+                'baseline' => count($bRows),
+                'actual' => count($aRows),
+            ];
+
+            $bMap = [];
+            foreach ($bRows as $row) {
+                if (!is_array($row)) continue;
+                $id = $this->getStructuralRecordIdentity($bucket, $row);
+                if ($id !== null) {
+                    $bMap[$id] = $row;
+                }
+            }
+
+            $aMap = [];
+            foreach ($aRows as $row) {
+                if (!is_array($row)) continue;
+                $id = $this->getStructuralRecordIdentity($bucket, $row);
+                if ($id !== null) {
+                    $aMap[$id] = $row;
+                }
+            }
+
+            $bucketChanged = false;
+
+            foreach ($bMap as $id => $bRow) {
+                if (!array_key_exists($id, $aMap)) {
+                    $bucketChanged = true;
+                    $records[] = [
+                        'bucket' => $bucket,
+                        'identity' => $id,
+                        'status' => 'missing',
+                        'changed_fields' => [],
+                        'diff' => $this->buildMissingFieldDiff($bucket, $bRow),
+                    ];
+                } else {
+                    $aRow = $aMap[$id];
+                    $diffResult = $this->compareStructuralRecordFields($bucket, $bRow, $aRow);
+                    if (!empty($diffResult['changed_fields'])) {
+                        $bucketChanged = true;
+                        $records[] = [
+                            'bucket' => $bucket,
+                            'identity' => $id,
+                            'status' => 'changed',
+                            'changed_fields' => $diffResult['changed_fields'],
+                            'diff' => $diffResult['diff'],
+                        ];
+                    }
+                }
+            }
+
+            foreach ($aMap as $id => $aRow) {
+                if (!array_key_exists($id, $bMap)) {
+                    $bucketChanged = true;
+                    $records[] = [
+                        'bucket' => $bucket,
+                        'identity' => $id,
+                        'status' => 'added',
+                        'changed_fields' => [],
+                        'diff' => $this->buildAddedFieldDiff($bucket, $aRow),
+                    ];
+                }
+            }
+
+            if ($bucketChanged || count($bRows) !== count($aRows)) {
+                $changedBuckets[] = $bucket;
+            }
+        }
+
+        $bLedger = array_values(array_filter($baselineLedger, 'is_string'));
+        $aLedger = array_values(array_filter($actualLedger, 'is_string'));
+        $bucketCounts['ledger'] = [
+            'baseline' => count($bLedger),
+            'actual' => count($aLedger),
+        ];
+
+        $bLedgerMap = array_fill_keys($bLedger, true);
+        $aLedgerMap = array_fill_keys($aLedger, true);
+        $ledgerChanged = false;
+
+        foreach ($bLedgerMap as $version => $_) {
+            if (!isset($aLedgerMap[$version])) {
+                $ledgerChanged = true;
+                if (preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $version)) {
+                    $records[] = [
+                        'bucket' => 'ledger',
+                        'identity' => $version,
+                        'status' => 'missing',
+                        'changed_fields' => [],
+                        'diff' => (object)[],
+                    ];
+                }
+            }
+        }
+
+        foreach ($aLedgerMap as $version => $_) {
+            if (!isset($bLedgerMap[$version])) {
+                $ledgerChanged = true;
+                if (preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $version)) {
+                    $records[] = [
+                        'bucket' => 'ledger',
+                        'identity' => $version,
+                        'status' => 'added',
+                        'changed_fields' => [],
+                        'diff' => (object)[],
+                    ];
+                }
+            }
+        }
+
+        if ($ledgerChanged || count($bLedger) !== count($aLedger)) {
+            $changedBuckets[] = 'ledger';
+        }
+
+        usort($records, static function (array $a, array $b): int {
+            $cmp = strcmp($a['bucket'], $b['bucket']);
+            if ($cmp !== 0) return $cmp;
+            $cmp = strcmp($a['identity'], $b['identity']);
+            if ($cmp !== 0) return $cmp;
+            return strcmp($a['status'], $b['status']);
+        });
+
+        $totalRecords = count($records);
+        $truncated = false;
+        if ($totalRecords > 100) {
+            $records = array_slice($records, 0, 100);
+            $truncated = true;
+        }
+
+        return [
+            'schema_matches_contract' => $schemaMatchesContract,
+            'ledger_matches_contract' => $ledgerMatchesContract,
+            'changed_buckets' => array_values(array_unique($changedBuckets)),
+            'bucket_counts' => $bucketCounts,
+            'records_count' => $totalRecords,
+            'truncated' => $truncated,
+            'records' => $records,
+        ];
+    }
+
+    private function getStructuralRecordIdentity(string $bucket, array $row): ?string
+    {
+        switch ($bucket) {
+            case 'tables':
+                $name = (string)($row['name'] ?? '');
+                return preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name) ? $name : null;
+
+            case 'columns':
+                $table = (string)($row['table_name'] ?? '');
+                $col = (string)($row['name'] ?? '');
+                if (preg_match('/^[a-zA-Z0-9_]{1,64}$/', $table) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $col)) {
+                    return "{$table}.{$col}";
+                }
+                return null;
+
+            case 'indexes':
+                $table = (string)($row['table_name'] ?? '');
+                $name = (string)($row['name'] ?? '');
+                $pos = (string)($row['position'] ?? '');
+                if (preg_match('/^[a-zA-Z0-9_]{1,64}$/', $table) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name) && preg_match('/^[0-9]{1,5}$/', $pos)) {
+                    return "{$table}.{$name}.{$pos}";
+                }
+                return null;
+
+            case 'keys':
+                $table = (string)($row['table_name'] ?? '');
+                $name = (string)($row['name'] ?? '');
+                $col = (string)($row['column_name'] ?? '');
+                $pos = (string)($row['position'] ?? '');
+                if (preg_match('/^[a-zA-Z0-9_]{1,64}$/', $table) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $col) && preg_match('/^[0-9]{1,5}$/', $pos)) {
+                    return "{$table}.{$name}.{$col}.{$pos}";
+                }
+                return null;
+
+            case 'references':
+                $table = (string)($row['table_name'] ?? '');
+                $name = (string)($row['name'] ?? '');
+                if (preg_match('/^[a-zA-Z0-9_]{1,64}$/', $table) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name)) {
+                    return "{$table}.{$name}";
+                }
+                return null;
+
+            case 'checks':
+                $table = (string)($row['table_name'] ?? '');
+                $name = (string)($row['name'] ?? '');
+                if (preg_match('/^[a-zA-Z0-9_]{1,64}$/', $table) && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name)) {
+                    return "{$table}.{$name}";
+                }
+                return null;
+
+            case 'objects':
+                $type = (string)($row['object_type'] ?? '');
+                $name = (string)($row['object_name'] ?? '');
+                $table = (string)($row['table_name'] ?? '');
+                $allowedObjectTypes = ['trigger', 'view', 'event', 'routine:FUNCTION', 'routine:PROCEDURE'];
+                if (in_array($type, $allowedObjectTypes, true)
+                    && preg_match('/^[a-zA-Z0-9_]{1,64}$/', $name)
+                    && preg_match('/^[a-zA-Z0-9_]{0,64}$/', $table)
+                ) {
+                    return "{$type}.{$name}.{$table}";
+                }
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    private function compareStructuralRecordFields(string $bucket, array $bRow, array $aRow): array
+    {
+        $changedFields = [];
+        $diff = [];
+
+        switch ($bucket) {
+            case 'tables':
+                foreach (['type', 'engine', 'collation'] as $field) {
+                    $bVal = (string)($bRow[$field] ?? '');
+                    $aVal = (string)($aRow[$field] ?? '');
+                    if ($bVal !== $aVal) {
+                        $changedFields[] = $field;
+                        $diff[$field] = [
+                            'baseline' => $this->sanitizeAlphaNumSpace($bVal, 32),
+                            'actual' => $this->sanitizeAlphaNumSpace($aVal, 32),
+                            'expected' => $this->sanitizeAlphaNumSpace($bVal, 32),
+                        ];
+                    }
+                }
+                break;
+
+            case 'columns':
+                foreach (['position', 'type', 'nullable', 'extra', 'charset_name', 'collation'] as $field) {
+                    $bVal = (string)($bRow[$field] ?? '');
+                    $aVal = (string)($aRow[$field] ?? '');
+                    if ($bVal !== $aVal) {
+                        $changedFields[] = $field;
+                        if ($field === 'position') {
+                            $diff[$field] = [
+                                'baseline' => (int)$bVal,
+                                'actual' => (int)$aVal,
+                                'expected' => (int)$bVal,
+                            ];
+                        } elseif ($field === 'type') {
+                            $diff[$field] = [
+                                'baseline' => $this->sanitizeSafeSqlType($bVal),
+                                'actual' => $this->sanitizeSafeSqlType($aVal),
+                                'expected' => $this->sanitizeSafeSqlType($bVal),
+                            ];
+                        } elseif ($field === 'nullable') {
+                            $diff[$field] = [
+                                'baseline' => $bVal === 'YES' ? 'YES' : 'NO',
+                                'actual' => $aVal === 'YES' ? 'YES' : 'NO',
+                                'expected' => $bVal === 'YES' ? 'YES' : 'NO',
+                            ];
+                        } else {
+                            $diff[$field] = [
+                                'baseline' => $this->sanitizeAlphaNumSpace($bVal, 64),
+                                'actual' => $this->sanitizeAlphaNumSpace($aVal, 64),
+                                'expected' => $this->sanitizeAlphaNumSpace($bVal, 64),
+                            ];
+                        }
+                    }
+                }
+                $bDef = $bRow['default_value'] ?? null;
+                $aDef = $aRow['default_value'] ?? null;
+                if ($bDef !== $aDef) {
+                    $changedFields[] = 'default_value';
+                    $diff['default_value'] = ['matches' => false];
+                }
+                break;
+
+            case 'indexes':
+                foreach (['non_unique', 'column_name', 'collation', 'sub_part', 'type'] as $field) {
+                    $bVal = $bRow[$field] ?? null;
+                    $aVal = $aRow[$field] ?? null;
+                    if ($bVal !== $aVal) {
+                        $changedFields[] = $field;
+                        if ($field === 'sub_part') {
+                            $diff[$field] = [
+                                'baseline' => is_numeric($bVal) ? (int)$bVal : null,
+                                'actual' => is_numeric($aVal) ? (int)$aVal : null,
+                                'expected' => is_numeric($bVal) ? (int)$bVal : null,
+                            ];
+                        } else {
+                            $diff[$field] = [
+                                'baseline' => $this->sanitizeAlphaNum((string)$bVal, 64),
+                                'actual' => $this->sanitizeAlphaNum((string)$aVal, 64),
+                                'expected' => $this->sanitizeAlphaNum((string)$bVal, 64),
+                            ];
+                        }
+                    }
+                }
+                break;
+
+            case 'keys':
+                foreach (['referenced_table', 'referenced_column'] as $field) {
+                    $bVal = (string)($bRow[$field] ?? '');
+                    $aVal = (string)($aRow[$field] ?? '');
+                    if ($bVal !== $aVal) {
+                        $changedFields[] = $field;
+                        $diff[$field] = [
+                            'baseline' => $this->sanitizeAlphaNum($bVal, 64),
+                            'actual' => $this->sanitizeAlphaNum($aVal, 64),
+                            'expected' => $this->sanitizeAlphaNum($bVal, 64),
+                        ];
+                    }
+                }
+                break;
+
+            case 'references':
+                foreach (['referenced_table', 'update_rule', 'delete_rule', 'match_option'] as $field) {
+                    $bVal = (string)($bRow[$field] ?? '');
+                    $aVal = (string)($aRow[$field] ?? '');
+                    if ($bVal !== $aVal) {
+                        $changedFields[] = $field;
+                        $diff[$field] = [
+                            'baseline' => $this->sanitizeAlphaSpace($bVal, 32),
+                            'actual' => $this->sanitizeAlphaSpace($aVal, 32),
+                            'expected' => $this->sanitizeAlphaSpace($bVal, 32),
+                        ];
+                    }
+                }
+                break;
+
+            case 'checks':
+                $bClause = (string)($bRow['clause_text'] ?? '');
+                $aClause = (string)($aRow['clause_text'] ?? '');
+                if ($bClause !== $aClause) {
+                    $changedFields[] = 'clause_text';
+                    $diff['clause_text'] = ['matches' => false];
+                }
+                break;
+
+            case 'objects':
+                $bCtx = (string)($bRow['context'] ?? '');
+                $aCtx = (string)($aRow['context'] ?? '');
+                if ($bCtx !== $aCtx) {
+                    $changedFields[] = 'context';
+                    $diff['context'] = [
+                        'baseline' => $this->sanitizeAlphaNumSpace($bCtx, 64),
+                        'actual' => $this->sanitizeAlphaNumSpace($aCtx, 64),
+                        'expected' => $this->sanitizeAlphaNumSpace($bCtx, 64),
+                    ];
+                }
+                $bDef = (string)($bRow['definition'] ?? '');
+                $aDef = (string)($aRow['definition'] ?? '');
+                if ($bDef !== $aDef) {
+                    $changedFields[] = 'definition';
+                    $diff['definition'] = ['matches' => false];
+                }
+                break;
+        }
+
+        return [
+            'changed_fields' => $changedFields,
+            'diff' => !empty($diff) ? $diff : (object)[],
+        ];
+    }
+
+    private function buildMissingFieldDiff(string $bucket, array $row): array|object
+    {
+        if ($bucket === 'columns') {
+            $diff = [];
+            if (isset($row['position'])) {
+                $diff['position'] = ['expected' => (int)$row['position']];
+            }
+            if (isset($row['type'])) {
+                $type = $this->sanitizeSafeSqlType((string)$row['type']);
+                if ($type !== null) {
+                    $diff['type'] = ['expected' => $type];
+                }
+            }
+            return !empty($diff) ? $diff : (object)[];
+        }
+        return (object)[];
+    }
+
+    private function buildAddedFieldDiff(string $bucket, array $row): array|object
+    {
+        if ($bucket === 'columns') {
+            $diff = [];
+            if (isset($row['position'])) {
+                $diff['position'] = ['actual' => (int)$row['position']];
+            }
+            if (isset($row['type'])) {
+                $type = $this->sanitizeSafeSqlType((string)$row['type']);
+                if ($type !== null) {
+                    $diff['type'] = ['actual' => $type];
+                }
+            }
+            return !empty($diff) ? $diff : (object)[];
+        }
+        return (object)[];
+    }
+
+    private function sanitizeSafeSqlType(?string $type): ?string
+    {
+        if ($type === null) return null;
+        $trimmed = trim($type);
+        if (strlen($trimmed) === 0 || strlen($trimmed) > 64) return null;
+        if (preg_match('/^[a-zA-Z0-9_(),\s]{1,64}$/', $trimmed)) {
+            return $trimmed;
+        }
+        return null;
+    }
+
+    private function sanitizeAlphaNum(?string $val, int $maxLen = 64): ?string
+    {
+        if ($val === null) return null;
+        $trimmed = trim($val);
+        if (strlen($trimmed) === 0 || strlen($trimmed) > $maxLen) return null;
+        if (preg_match('/^[a-zA-Z0-9_]{1,' . $maxLen . '}$/', $trimmed)) {
+            return $trimmed;
+        }
+        return null;
+    }
+
+    private function sanitizeAlphaSpace(?string $val, int $maxLen = 32): ?string
+    {
+        if ($val === null) return null;
+        $trimmed = trim($val);
+        if (strlen($trimmed) === 0 || strlen($trimmed) > $maxLen) return null;
+        if (preg_match('/^[a-zA-Z\s]{1,' . $maxLen . '}$/', $trimmed)) {
+            return $trimmed;
+        }
+        return null;
+    }
+
+    private function sanitizeAlphaNumSpace(?string $val, int $maxLen = 64): ?string
+    {
+        if ($val === null) return null;
+        $trimmed = trim($val);
+        if (strlen($trimmed) === 0 || strlen($trimmed) > $maxLen) return null;
+        if (preg_match('/^[a-zA-Z0-9_\s]{1,' . $maxLen . '}$/', $trimmed)) {
+            return $trimmed;
+        }
+        return null;
     }
 
     private function assertOwnershipReceipt(): array
@@ -2151,6 +2725,8 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'auth-path:',
         'output-path:',
         'contract-path:',
+        'baseline-path:',
+        'baseline:',
     ]);
 
     $action = (string)($options['action'] ?? '');
@@ -2294,11 +2870,21 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;
 
+            case 'capture-legacy-v025-schema-baseline':
+                $result = $helper->captureLegacyV025SchemaBaseline(
+                    (string)($options['config-dir'] ?? ''),
+                    (string)($options['contract-path'] ?? $options['contract'] ?? ''),
+                    (string)($options['output-path'] ?? $options['output'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
             case 'verify-legacy-v025-upgrade':
                 $result = $helper->verifyLegacyV025Upgrade(
                     (string)($options['config-dir'] ?? ''),
                     (string)($options['auth-path'] ?? ''),
-                    (string)($options['contract-path'] ?? $options['contract'] ?? '')
+                    (string)($options['contract-path'] ?? $options['contract'] ?? ''),
+                    (string)($options['baseline-path'] ?? $options['baseline'] ?? '')
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

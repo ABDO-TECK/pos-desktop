@@ -1331,6 +1331,156 @@ function persistSetup12Diagnostic(patch = {}) {
   fs.writeFileSync(path.join(evidence, 'diagnostic-setup12-restore-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
 }
 
+const ALLOWED_STRUCTURAL_BUCKETS = new Set([
+  'tables',
+  'columns',
+  'indexes',
+  'keys',
+  'references',
+  'checks',
+  'objects',
+  'ledger',
+]);
+
+const ALLOWED_RECORD_STATUSES = new Set(['added', 'missing', 'changed']);
+
+function isValidStructuralIdentity(bucket, identity) {
+  if (typeof identity !== 'string' || identity.length === 0 || identity.length > 256) return false;
+  switch (bucket) {
+    case 'tables':
+      return /^[a-zA-Z0-9_]{1,64}$/.test(identity);
+    case 'columns':
+    case 'references':
+    case 'checks':
+      return /^[a-zA-Z0-9_]{1,64}\.[a-zA-Z0-9_]{1,64}$/.test(identity);
+    case 'indexes':
+      return /^[a-zA-Z0-9_]{1,64}\.[a-zA-Z0-9_]{1,64}\.[0-9]{1,5}$/.test(identity);
+    case 'keys':
+      return /^[a-zA-Z0-9_]{1,64}\.[a-zA-Z0-9_]{1,64}\.[a-zA-Z0-9_]{1,64}\.[0-9]{1,5}$/.test(identity);
+    case 'objects':
+      return /^(?:trigger|view|event|routine:FUNCTION|routine:PROCEDURE)\.[a-zA-Z0-9_]{1,64}\.[a-zA-Z0-9_]{0,64}$/.test(identity);
+    case 'ledger':
+      return /^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/.test(identity);
+    default:
+      return false;
+  }
+}
+
+function sanitizeStructuralDiff(diff) {
+  if (!diff || typeof diff !== 'object' || Array.isArray(diff)) return null;
+
+  const schemaMatches = typeof diff.schema_matches_contract === 'boolean' ? diff.schema_matches_contract : null;
+  const ledgerMatches = typeof diff.ledger_matches_contract === 'boolean' ? diff.ledger_matches_contract : null;
+
+  const changedBuckets = Array.isArray(diff.changed_buckets)
+    ? diff.changed_buckets.filter((b) => typeof b === 'string' && ALLOWED_STRUCTURAL_BUCKETS.has(b))
+    : [];
+
+  const bucketCounts = {};
+  if (diff.bucket_counts && typeof diff.bucket_counts === 'object') {
+    for (const [bucket, counts] of Object.entries(diff.bucket_counts)) {
+      if (ALLOWED_STRUCTURAL_BUCKETS.has(bucket) && counts && typeof counts === 'object') {
+        bucketCounts[bucket] = {
+          baseline: typeof counts.baseline === 'number' && Number.isInteger(counts.baseline) && counts.baseline >= 0 ? counts.baseline : 0,
+          actual: typeof counts.actual === 'number' && Number.isInteger(counts.actual) && counts.actual >= 0 ? counts.actual : 0,
+        };
+      }
+    }
+  }
+
+  const rawRecords = Array.isArray(diff.records) ? diff.records : [];
+  const safeRecords = [];
+
+  for (const rec of rawRecords) {
+    if (!rec || typeof rec !== 'object') continue;
+    const bucket = typeof rec.bucket === 'string' && ALLOWED_STRUCTURAL_BUCKETS.has(rec.bucket) ? rec.bucket : null;
+    if (!bucket) continue;
+
+    const identity = typeof rec.identity === 'string' && isValidStructuralIdentity(bucket, rec.identity) ? rec.identity : null;
+    if (!identity) continue;
+
+    const status = typeof rec.status === 'string' && ALLOWED_RECORD_STATUSES.has(rec.status) ? rec.status : null;
+    if (!status) continue;
+
+    const changedFields = Array.isArray(rec.changed_fields)
+      ? rec.changed_fields.filter((f) => typeof f === 'string' && /^[a-zA-Z0-9_]{1,32}$/.test(f))
+      : [];
+
+    const safeDiff = {};
+    if (rec.diff && typeof rec.diff === 'object') {
+      for (const [field, fieldDiff] of Object.entries(rec.diff)) {
+        if (!/^[a-zA-Z0-9_]{1,32}$/.test(field)) continue;
+        if (!fieldDiff || typeof fieldDiff !== 'object') continue;
+
+        if (field === 'default_value' || field === 'clause_text' || field === 'definition') {
+          if (fieldDiff.matches === false) {
+            safeDiff[field] = { matches: false };
+          }
+        } else if (field === 'position') {
+          const entry = {};
+          if (typeof fieldDiff.baseline === 'number' && Number.isInteger(fieldDiff.baseline)) entry.baseline = fieldDiff.baseline;
+          if (typeof fieldDiff.actual === 'number' && Number.isInteger(fieldDiff.actual)) entry.actual = fieldDiff.actual;
+          if (typeof fieldDiff.expected === 'number' && Number.isInteger(fieldDiff.expected)) entry.expected = fieldDiff.expected;
+          if (Object.keys(entry).length > 0) safeDiff[field] = entry;
+        } else if (field === 'type' && (bucket === 'columns' || bucket === 'tables')) {
+          const entry = {};
+          if (typeof fieldDiff.baseline === 'string' && /^[a-zA-Z0-9_(),\s]{1,64}$/.test(fieldDiff.baseline)) entry.baseline = fieldDiff.baseline.trim();
+          if (typeof fieldDiff.actual === 'string' && /^[a-zA-Z0-9_(),\s]{1,64}$/.test(fieldDiff.actual)) entry.actual = fieldDiff.actual.trim();
+          if (typeof fieldDiff.expected === 'string' && /^[a-zA-Z0-9_(),\s]{1,64}$/.test(fieldDiff.expected)) entry.expected = fieldDiff.expected.trim();
+          if (Object.keys(entry).length > 0) safeDiff[field] = entry;
+        } else if (field === 'nullable') {
+          const entry = {};
+          if (fieldDiff.baseline === 'YES' || fieldDiff.baseline === 'NO') entry.baseline = fieldDiff.baseline;
+          if (fieldDiff.actual === 'YES' || fieldDiff.actual === 'NO') entry.actual = fieldDiff.actual;
+          if (fieldDiff.expected === 'YES' || fieldDiff.expected === 'NO') entry.expected = fieldDiff.expected;
+          if (Object.keys(entry).length > 0) safeDiff[field] = entry;
+        } else if (field === 'sub_part') {
+          const entry = {};
+          if (typeof fieldDiff.baseline === 'number' && Number.isInteger(fieldDiff.baseline)) entry.baseline = fieldDiff.baseline;
+          else if (fieldDiff.baseline === null) entry.baseline = null;
+          if (typeof fieldDiff.actual === 'number' && Number.isInteger(fieldDiff.actual)) entry.actual = fieldDiff.actual;
+          else if (fieldDiff.actual === null) entry.actual = null;
+          if (typeof fieldDiff.expected === 'number' && Number.isInteger(fieldDiff.expected)) entry.expected = fieldDiff.expected;
+          else if (fieldDiff.expected === null) entry.expected = null;
+          if (Object.keys(entry).length > 0) safeDiff[field] = entry;
+        } else {
+          const entry = {};
+          if (typeof fieldDiff.baseline === 'string' && /^[a-zA-Z0-9_\s]{1,64}$/.test(fieldDiff.baseline)) entry.baseline = fieldDiff.baseline.trim();
+          if (typeof fieldDiff.actual === 'string' && /^[a-zA-Z0-9_\s]{1,64}$/.test(fieldDiff.actual)) entry.actual = fieldDiff.actual.trim();
+          if (typeof fieldDiff.expected === 'string' && /^[a-zA-Z0-9_\s]{1,64}$/.test(fieldDiff.expected)) entry.expected = fieldDiff.expected.trim();
+          if (Object.keys(entry).length > 0) safeDiff[field] = entry;
+        }
+      }
+    }
+
+    safeRecords.push({
+      bucket,
+      identity,
+      status,
+      changed_fields: changedFields,
+      diff: safeDiff,
+    });
+
+    if (safeRecords.length >= 100) break;
+  }
+
+  const recordsCount = typeof diff.records_count === 'number' && Number.isInteger(diff.records_count) && diff.records_count >= 0
+    ? diff.records_count
+    : safeRecords.length;
+
+  const truncated = Boolean(diff.truncated) || (recordsCount > safeRecords.length);
+
+  return {
+    schema_matches_contract: schemaMatches,
+    ledger_matches_contract: ledgerMatches,
+    changed_buckets: changedBuckets,
+    bucket_counts: bucketCounts,
+    records_count: recordsCount,
+    truncated,
+    records: safeRecords,
+  };
+}
+
 let legacyDiagnostic = null;
 
 function persistLegacyDiagnostic(patch = {}) {
@@ -1359,6 +1509,13 @@ function persistLegacyDiagnostic(patch = {}) {
     protected_preserved: typeof legacyDiagnostic.protected_preserved === 'boolean' ? legacyDiagnostic.protected_preserved : null,
     failing_migration: typeof legacyDiagnostic.failing_migration === 'string' && KNOWN_MIGRATION_FILENAMES.has(legacyDiagnostic.failing_migration) ? legacyDiagnostic.failing_migration : null,
     driver_errno: typeof legacyDiagnostic.driver_errno === 'number' && Number.isInteger(legacyDiagnostic.driver_errno) && legacyDiagnostic.driver_errno > 0 && legacyDiagnostic.driver_errno < 100000 ? legacyDiagnostic.driver_errno : null,
+    legacy_retained_count: typeof legacyDiagnostic.legacy_retained_count === 'number' && Number.isInteger(legacyDiagnostic.legacy_retained_count) && legacyDiagnostic.legacy_retained_count >= 0 && legacyDiagnostic.legacy_retained_count <= 100 ? legacyDiagnostic.legacy_retained_count : null,
+    pending_applied_count: typeof legacyDiagnostic.pending_applied_count === 'number' && Number.isInteger(legacyDiagnostic.pending_applied_count) && legacyDiagnostic.pending_applied_count >= 0 && legacyDiagnostic.pending_applied_count <= 100 ? legacyDiagnostic.pending_applied_count : null,
+    admin_verified: typeof legacyDiagnostic.admin_verified === 'boolean' ? legacyDiagnostic.admin_verified : null,
+    data_preserved: typeof legacyDiagnostic.data_preserved === 'boolean' ? legacyDiagnostic.data_preserved : null,
+    schema_matches_contract: typeof legacyDiagnostic.schema_matches_contract === 'boolean' ? legacyDiagnostic.schema_matches_contract : null,
+    ledger_matches_contract: typeof legacyDiagnostic.ledger_matches_contract === 'boolean' ? legacyDiagnostic.ledger_matches_contract : null,
+    structural_diff: sanitizeStructuralDiff(legacyDiagnostic.structural_diff),
   };
   fs.writeFileSync(path.join(evidence, 'diagnostic-legacy-v025-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
 }
@@ -2894,6 +3051,13 @@ try {
       protected_preserved: null,
       failing_migration: null,
       driver_errno: null,
+      legacy_retained_count: null,
+      pending_applied_count: null,
+      admin_verified: null,
+      data_preserved: null,
+      schema_matches_contract: null,
+      ledger_matches_contract: null,
+      structural_diff: null,
     };
     persistLegacyDiagnostic({ phase: 'prepare' });
 
@@ -2926,6 +3090,18 @@ try {
     assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'Pre-Test5 POS Desktop.exe altered');
     assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'Pre-Test5 app.asar altered');
     verifyInventoryFiles(candidate13DeltaInv);
+
+    // Capture canonical pre-Test5 MariaDB schema and ledger baseline for safe structural diffing
+    console.log('[Test 5 Schema Baseline] Capturing canonical pre-Test5 schema and ledger baseline...');
+    const baselinePath = path.join(lab, 'legacy-v025-schema-baseline.json');
+    const baselineRes = runPhpFixture('capture-legacy-v025-schema-baseline', {
+      'config-dir': configDir,
+      'contract-path': contractPath,
+      'output-path': baselinePath,
+    });
+    assert.equal(baselineRes.ok, true, 'capture-legacy-v025-schema-baseline failed');
+    assert.ok(fs.existsSync(baselinePath), 'legacy-v025-schema-baseline.json missing after capture');
+    console.log(`[Test 5 Schema Baseline] Captured baseline successfully (tables: ${baselineRes.tables_count}, columns: ${baselineRes.columns_count}, ledger: ${baselineRes.ledger_count}).`);
 
     // Prepare legacy backup template with ephemeral fixture auth credentials
     const legacyBackupPath = path.join(lab, 'legacy-v025-backup.sql');
@@ -3055,14 +3231,31 @@ try {
       'config-dir': configDir,
       'auth-path': authPath,
       'contract-path': path.join(lab, 'data-contract.json'),
+      'baseline-path': baselinePath,
     });
     assert.equal(upgradeRes.ok, true, 'verify-legacy-v025-upgrade failed');
 
-    // Record probe counts and latest migration present before subsequent assertions may fail
+    // Record probe counts, verifications, and safe structural differences immediately before assertions may throw
     persistLegacyDiagnostic({
       completed_migrations_count: typeof upgradeRes.ledger_count === 'number' ? upgradeRes.ledger_count : null,
       latest_migration_present: upgradeRes.latest_migration_present === true || upgradeRes.exact_all_58_match === true,
+      legacy_retained_count: typeof upgradeRes.legacy_retained_count === 'number' ? upgradeRes.legacy_retained_count : null,
+      pending_applied_count: typeof upgradeRes.pending_applied_count === 'number' ? upgradeRes.pending_applied_count : null,
+      admin_verified: typeof upgradeRes.admin_verified === 'boolean' ? upgradeRes.admin_verified : null,
+      data_preserved: typeof upgradeRes.data_preserved === 'boolean' ? upgradeRes.data_preserved : null,
+      schema_matches_contract: typeof upgradeRes.schema_matches_contract === 'boolean' ? upgradeRes.schema_matches_contract : null,
+      ledger_matches_contract: typeof upgradeRes.ledger_matches_contract === 'boolean' ? upgradeRes.ledger_matches_contract : null,
+      structural_diff: upgradeRes.structural_diff || null,
     });
+
+    if (upgradeRes.structural_diff && (!upgradeRes.schema_matches_contract || !upgradeRes.ledger_matches_contract)) {
+      console.warn(`[Test 5 Structural Diff] Schema matches contract: ${upgradeRes.schema_matches_contract}, Ledger matches contract: ${upgradeRes.ledger_matches_contract}`);
+      console.warn(`[Test 5 Structural Diff] Changed buckets: ${JSON.stringify(upgradeRes.structural_diff.changed_buckets)}`);
+      console.warn(`[Test 5 Structural Diff] Total changed records: ${upgradeRes.structural_diff.records_count} (truncated: ${upgradeRes.structural_diff.truncated})`);
+      for (const rec of (upgradeRes.structural_diff.records || []).slice(0, 25)) {
+        console.warn(`  [${rec.bucket}] ${rec.identity} (${rec.status}): changed_fields=[${(rec.changed_fields || []).join(', ')}] diff=${JSON.stringify(rec.diff)}`);
+      }
+    }
 
     assert.equal(upgradeRes.ledger_count, 58, 'Upgraded ledger count must be 58');
     assert.equal(upgradeRes.legacy_retained_count, 24, 'Legacy retained versions count must be 24');
