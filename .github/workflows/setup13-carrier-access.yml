@@ -1,0 +1,244 @@
+name: Setup 13 Carrier Access Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - verify-setup13-public-proof
+      - setup13-carrier-publisher
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  register:
+    name: Register workflow
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Registration echo
+        run: echo "Workflow registered on ${{ github.repository }} ref ${{ github.ref }}"
+
+  probe:
+    name: Probe Setup 13 Carrier Artifact Access
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'ABDO-TECK/pos-desktop-updates'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify source workflow runs and tag via GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node --input-type=module - << 'EOF'
+          import assert from 'node:assert/strict';
+
+          const SOURCE_REPO = 'ABDO-TECK/pos-desktop';
+          const EXPECTED_SOURCE_SHA = 'ee5bf691c4acf6ffcd7730db1d7d0ed24f274787';
+          const EXPECTED_TAG = 'v0.0.13';
+          const SETUP_RUN_ID = '40939314357';
+          const ACCEPTANCE_RUN_ID = '40943059736';
+          const SETUP_WORKFLOW_PATH = '.github/workflows/windows-setup.yml';
+          const ACCEPTANCE_WORKFLOW_PATH = '.github/workflows/setup13-release-acceptance.yml';
+
+          async function githubApi(endpoint) {
+            const res = await fetch(`https://api.github.com${endpoint}`, {
+              headers: {
+                'User-Agent': 'Setup13CarrierAccessProbe',
+                'Accept': 'application/vnd.github+json',
+                'Authorization': `Bearer ${process.env.GH_TOKEN}`
+              }
+            });
+            if (!res.ok) {
+              throw new Error(`GitHub API fail-closed HTTP ${res.status} on ${endpoint}`);
+            }
+            return res.json();
+          }
+
+          async function getPeeledTagSha(repo, tag) {
+            const refData = await githubApi(`/repos/${repo}/git/ref/tags/${tag}`);
+            assert.ok(refData?.object?.sha, `Missing object SHA for tag ${tag}`);
+            let sha = refData.object.sha;
+            if (refData.object.type === 'tag') {
+              const tagObj = await githubApi(`/repos/${repo}/git/tags/${sha}`);
+              assert.ok(tagObj?.object?.sha, `Failed to peel tag ${tag}`);
+              sha = tagObj.object.sha;
+            }
+            return sha.toLowerCase();
+          }
+
+          function validateRun(run, expectedId, expectedPath, expectedSha, label) {
+            assert.ok(run && typeof run === 'object', `${label} data missing`);
+            assert.equal(String(run.id), expectedId, `${label} ID mismatch`);
+            assert.equal(run.status, 'completed', `${label} not completed`);
+            assert.equal(run.conclusion, 'success', `${label} not success`);
+            assert.equal(run.path, expectedPath, `${label} path mismatch`);
+            assert.equal(run.event, 'workflow_dispatch', `${label} event mismatch`);
+            assert.equal(run.repository?.full_name, SOURCE_REPO, `${label} repo mismatch`);
+            assert.equal(run.head_repository?.full_name, SOURCE_REPO, `${label} head_repo mismatch`);
+            assert.equal(run.head_sha?.toLowerCase(), expectedSha, `${label} head_sha mismatch`);
+          }
+
+          const [setupRun, accRun] = await Promise.all([
+            githubApi(`/repos/${SOURCE_REPO}/actions/runs/${SETUP_RUN_ID}`),
+            githubApi(`/repos/${SOURCE_REPO}/actions/runs/${ACCEPTANCE_RUN_ID}`)
+          ]);
+
+          validateRun(setupRun, SETUP_RUN_ID, SETUP_WORKFLOW_PATH, EXPECTED_SOURCE_SHA, 'setup_run');
+          validateRun(accRun, ACCEPTANCE_RUN_ID, ACCEPTANCE_WORKFLOW_PATH, EXPECTED_SOURCE_SHA, 'acceptance_run');
+
+          const tagSha = await getPeeledTagSha(SOURCE_REPO, EXPECTED_TAG);
+          assert.equal(tagSha, EXPECTED_SOURCE_SHA, `Tag ${EXPECTED_TAG} peeled SHA mismatch`);
+          console.log('[PROBE] Source runs and Tag v0.0.13 verified successfully via GitHub API.');
+          EOF
+
+      - name: Download Setup 13 release evidence
+        uses: actions/download-artifact@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          run-id: 40943059736
+          name: setup13-release-evidence
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Verify evidence binding and generate access report
+        shell: bash
+        run: |
+          node --input-type=module - << 'EOF'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import assert from 'node:assert/strict';
+
+          const SOURCE_REPO = 'ABDO-TECK/pos-desktop';
+          const EXPECTED_SOURCE_SHA = 'ee5bf691c4acf6ffcd7730db1d7d0ed24f274787';
+          const EXPECTED_TAG = 'v0.0.13';
+          const SETUP_RUN_ID = '40939314357';
+          const ACCEPTANCE_RUN_ID = '40943059736';
+
+          const REQUIRED_13_VERIFICATIONS = [
+            'bug1_candidate13_beta_to_stable_transition',
+            'bug1_candidate13_stable_to_beta_transition',
+            'bug1_setup12_source_inventory_mismatch_reproduced',
+            'bug2_desktop_sql_restore_rollback_and_error_classification',
+            'bug2_desktop_sql_restore_success',
+            'candidate13_shell_root_preserved',
+            'candidate13_silent_upgrade',
+            'database_integrity_verified',
+            'indexeddb_offline_preserved',
+            'legacy_v025_restore_migrations_verified',
+            'protected_state_preserved',
+            'repeated_channel_roundtrip_verified',
+            'session_preservation_on_error_verified'
+          ];
+
+          const EXACT_5_SETUP_ASSETS = [
+            'POS-Desktop-Setup-0.0.13.exe',
+            'POS-Desktop-Setup-0.0.13.exe.blockmap',
+            'latest.yml',
+            'deployment-inventory.json',
+            'SHA256SUMS.txt'
+          ];
+
+          const evidenceDir = path.resolve(process.env.RUNNER_TEMP, 'evidence');
+
+          function loadRootProof(name) {
+            const p = path.join(evidenceDir, name);
+            const st = fs.lstatSync(p);
+            assert.ok(st.isFile() && !st.isSymbolicLink(), `${name} must be a regular file, not a symlink`);
+            return JSON.parse(fs.readFileSync(p, 'utf8'));
+          }
+
+          const prov = loadRootProof('release-provenance.json');
+          const acc = loadRootProof('acceptance.json');
+          const receipt = loadRootProof('setup13-binding-receipt.json');
+
+          // 1. Strict string types and exact values for IDs and source_sha (no coercion)
+          assert.equal(typeof prov.setup_run_id, 'string', 'prov.setup_run_id must be string');
+          assert.equal(prov.setup_run_id, SETUP_RUN_ID, 'prov.setup_run_id mismatch');
+          assert.equal(typeof prov.acceptance_run_id, 'string', 'prov.acceptance_run_id must be string');
+          assert.equal(prov.acceptance_run_id, ACCEPTANCE_RUN_ID, 'prov.acceptance_run_id mismatch');
+          assert.equal(prov.source_sha, EXPECTED_SOURCE_SHA, 'prov.source_sha exact lower 40 mismatch');
+
+          assert.equal(typeof acc.run_id, 'string', 'acc.run_id must be string');
+          assert.equal(acc.run_id, ACCEPTANCE_RUN_ID, 'acc.run_id mismatch');
+
+          assert.equal(typeof receipt.setup_run_id, 'string', 'receipt.setup_run_id must be string');
+          assert.equal(receipt.setup_run_id, SETUP_RUN_ID, 'receipt.setup_run_id mismatch');
+          assert.equal(typeof receipt.acceptance_run_id, 'string', 'receipt.acceptance_run_id must be string');
+          assert.equal(receipt.acceptance_run_id, ACCEPTANCE_RUN_ID, 'receipt.acceptance_run_id mismatch');
+          assert.equal(receipt.source_sha, EXPECTED_SOURCE_SHA, 'receipt.source_sha exact lower 40 mismatch');
+
+          // 2. Verdicts, cleanup, artifact_binding
+          assert.equal(prov.schema_version, '1.0.0');
+          assert.equal(prov.verdict, 'PASSED');
+          assert.equal(prov.cleanup_verified, true);
+          assert.equal(prov.artifact_binding_verified, true);
+          assert.equal(acc.schema_version, '1.0.0');
+          assert.equal(acc.verdict, 'PASSED');
+          assert.equal(acc.cleanup_verified, true);
+          assert.equal(receipt.schema_version, '1.0.0');
+
+          // 3. run_token: 32 lower hex string, equality across all three
+          assert.match(prov.run_token, /^[a-f0-9]{32}$/, 'prov.run_token must be 32 lower hex');
+          assert.match(receipt.run_token, /^[a-f0-9]{32}$/, 'receipt.run_token must be 32 lower hex');
+          assert.equal(receipt.run_token, prov.run_token, 'receipt.run_token mismatch');
+          assert.equal(acc.run_token, prov.run_token, 'acc.run_token mismatch');
+
+          // 4. Exact 13 verifications map, all strictly true
+          const expected13 = REQUIRED_13_VERIFICATIONS.slice().sort();
+          assert.deepEqual(Object.keys(prov.verifications || {}).sort(), expected13);
+          assert.deepEqual(Object.keys(acc.verifications || {}).sort(), expected13);
+          for (const k of REQUIRED_13_VERIFICATIONS) {
+            assert.equal(prov.verifications[k], true, `prov.verifications.${k} must be true`);
+            assert.equal(acc.verifications[k], true, `acc.verifications.${k} must be true`);
+          }
+
+          // 5. Retained shell: REQUIRE both non-null objects (not arrays), then deepEqual
+          assert.ok(receipt.retained_shell && typeof receipt.retained_shell === 'object' && !Array.isArray(receipt.retained_shell), 'receipt.retained_shell must be object');
+          assert.ok(prov.retained_shell && typeof prov.retained_shell === 'object' && !Array.isArray(prov.retained_shell), 'prov.retained_shell must be object');
+          assert.deepEqual(receipt.retained_shell, prov.retained_shell, 'retained_shell deep equality mismatch');
+
+          // 6. Setup assets & mandatory installer_sha256 matching Setup 5 EXE
+          assert.deepEqual(Object.keys(receipt.setup_assets || {}).sort(), EXACT_5_SETUP_ASSETS.slice().sort());
+          assert.deepEqual(Object.keys(prov.setup_assets || {}).sort(), EXACT_5_SETUP_ASSETS.slice().sort());
+          for (const a of EXACT_5_SETUP_ASSETS) {
+            assert.equal(receipt.setup_assets[a].sha256, prov.setup_assets[a].sha256, `${a} sha256 mismatch`);
+            assert.equal(receipt.setup_assets[a].size, prov.setup_assets[a].size, `${a} size mismatch`);
+          }
+          assert.match(receipt.installer_sha256, /^[a-f0-9]{64}$/, 'receipt.installer_sha256 must be 64 lower hex');
+          assert.equal(receipt.installer_sha256, prov.setup_assets['POS-Desktop-Setup-0.0.13.exe'].sha256, 'installer_sha256 mismatch against setup_assets');
+
+          console.log('[PROBE] read-only access/evidence binding checked; release eligibility not evaluated');
+
+          // 7. Write access probe report
+          const report = {
+            report_name: 'setup13-carrier-access-report',
+            status: 'read-only access/evidence binding checked; release eligibility not evaluated',
+            generated_at: new Date().toISOString(),
+            tool_repo: process.env.GITHUB_REPOSITORY,
+            tool_repo_sha: process.env.GITHUB_SHA,
+            source_repo: SOURCE_REPO,
+            source_sha: EXPECTED_SOURCE_SHA,
+            source_tag: EXPECTED_TAG,
+            setup_run_id: SETUP_RUN_ID,
+            acceptance_run_id: ACCEPTANCE_RUN_ID,
+            artifact_name: 'setup13-release-evidence',
+            access_verified: true,
+            run_token: prov.run_token
+          };
+
+          fs.writeFileSync('setup13-carrier-access-report.json', JSON.stringify(report, null, 2) + '\n', 'utf8');
+          EOF
+
+      - name: Upload access probe report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-carrier-access-report
+          path: setup13-carrier-access-report.json
+          if-no-files-found: error
