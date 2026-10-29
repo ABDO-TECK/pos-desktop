@@ -1,0 +1,143 @@
+name: Setup 13 Carrier Stage and Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Carrier release mode: stage draft or publish existing draft'
+        required: true
+        default: 'stage'
+        type: choice
+        options:
+          - stage
+          - publish
+      release_id:
+        description: 'Existing draft release ID on pos-desktop-updates (required for publish mode)'
+        required: false
+        default: ''
+        type: string
+  push:
+    branches:
+      - verify-setup13-public-proof
+      - setup13-carrier-publisher
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  policy:
+    name: Carrier publish policy and syntax verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository at workflow commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify carrier publisher syntax and policy suite
+        run: |
+          node --check scripts/publish-setup13-carrier.mjs
+          node --check scripts/verify-setup13-carrier-publish-policy.mjs
+          node scripts/verify-setup13-carrier-publish-policy.mjs
+
+  carrier:
+    name: Stage or Publish Setup 13 Carrier
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'ABDO-TECK/pos-desktop-updates'
+    needs: [policy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: setup13-carrier-publish
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - name: Checkout carrier publisher tooling
+        uses: actions/checkout@v4
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - name: Checkout release source at fixed v0.0.13
+        uses: actions/checkout@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          ref: 'v0.0.13'
+          path: release-source
+          persist-credentials: false
+
+      - name: Checkout verification guard tooling at fixed commit
+        uses: actions/checkout@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          ref: '43cebef67292fa39badfd645149292d2371c0da2'
+          path: guard-tooling
+          persist-credentials: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download Windows Setup artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          run-id: 40939314357
+          name: windows-setup
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/windows-setup
+
+      - name: Download Setup 13 release evidence
+        uses: actions/download-artifact@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          run-id: 40943059736
+          name: setup13-release-evidence
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Download Setup 13 channel carrier
+        uses: actions/download-artifact@v4
+        with:
+          repository: 'ABDO-TECK/pos-desktop'
+          run-id: 40943059736
+          name: setup13-channel-carrier
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/carrier
+
+      - name: Execute carrier stage or publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CARRIER_MODE: ${{ inputs.mode }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TOOLING_DIR: tooling
+          RELEASE_SOURCE_DIR: release-source
+          GUARD_TOOLING_DIR: guard-tooling
+          SETUP_DIR: ${{ runner.temp }}/windows-setup
+          EVIDENCE_DIR: ${{ runner.temp }}/evidence
+          CARRIER_DIR: ${{ runner.temp }}/carrier
+        run: |
+          node tooling/scripts/publish-setup13-carrier.mjs \
+            --mode "$CARRIER_MODE" \
+            --release-id "$RELEASE_ID" \
+            --tooling-dir "$TOOLING_DIR" \
+            --release-source-dir "$RELEASE_SOURCE_DIR" \
+            --guard-tooling-dir "$GUARD_TOOLING_DIR" \
+            --setup-dir "$SETUP_DIR" \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --carrier-dir "$CARRIER_DIR"
+
+      - name: Upload carrier publish report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-carrier-publish-report
+          path: carrier-publish-report.json
+          if-no-files-found: ignore
