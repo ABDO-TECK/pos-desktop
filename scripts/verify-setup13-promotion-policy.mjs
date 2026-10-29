@@ -1300,7 +1300,7 @@ try {
           setupHashes,
           setupSizes
         }),
-        /setup13-binding-receipt source_sha must be 40-character lowercase hexadecimal/
+        /setup13-binding-receipt source_sha must be exactly 40 lowercase hex characters/
       );
     } finally {
       fs.writeFileSync(receiptPath, origReceipt);
@@ -1322,7 +1322,7 @@ try {
           setupHashes,
           setupSizes
         }),
-        /setup13-binding-receipt installer_sha256 must be 64-character lowercase hexadecimal/
+        /setup13-binding-receipt installer_sha256 must be exactly 64 lowercase hex characters/
       );
     } finally {
       fs.writeFileSync(receiptPath, origReceipt);
