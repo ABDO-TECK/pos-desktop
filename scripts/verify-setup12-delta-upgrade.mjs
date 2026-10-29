@@ -115,6 +115,7 @@ const repoRoot = process.cwd();
 const rootVersionMeta = JSON.parse(fs.readFileSync(path.join(repoRoot, 'version.json'), 'utf8'));
 const setupBaselineVersion = rootVersionMeta.installer_version || rootVersionMeta.version || '0.0.13';
 const setup12Version = setupBaselineVersion;
+const targetVersion = '0.0.14';
 const installerPath = path.join(repoRoot, 'dist-electron', `POS-Desktop-Setup-${setupBaselineVersion}.exe`);
 assert.ok(fs.existsSync(installerPath), `Setup ${setupBaselineVersion} installer missing at ${installerPath}`);
 
@@ -203,7 +204,6 @@ const storage = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'POS Sys
 const unpackedRoot = path.join(application, 'resources/app.asar.unpacked');
 const installedExe = path.join(application, 'POS Desktop.exe');
 const installedVersionJson = path.join(unpackedRoot, 'version.json');
-const targetVersion = '0.0.14';
 
 fs.mkdirSync(application, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
