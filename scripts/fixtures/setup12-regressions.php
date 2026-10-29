@@ -17,8 +17,10 @@ declare(strict_types=1);
  *  - mutate-db: Modifies sentinel business row to test restore reversion.
  *  - verify-restore-sql-preservation: Verifies byte-level SQL preservation in BackupService::validateUploadedSqlFile.
  *  - prepare-legacy-v025-backup: Prepares synthetic legacy v0.25 SQL backup injecting dynamic admin auth.
+ *  - prepare-legacy-v025-variant-backup: Prepares synthetic legacy v0.25 SQL backup variant for negative convergence testing.
  *  - capture-legacy-v025-schema-baseline: Captures pre-Test5 MariaDB schema and ledger canonical baseline.
  *  - verify-legacy-v025-upgrade: Verifies post-restore migration reconciliation from legacy v0.25 to candidate 13.
+ *  - verify-legacy-v025-fractional-capability: Verifies DECIMAL(10,3) fractional capabilities and constraints on converged schema.
  */
 
 require_once __DIR__ . '/../../backend/vendor/autoload.php';
@@ -1366,6 +1368,206 @@ final class Setup12RegressionsHelper
         ];
     }
 
+    public function prepareLegacyV025VariantBackup(string $variant, string $authPath, string $outputPath): array
+    {
+        $allowedVariants = [
+            'product_quantity_out_of_range',
+            'invoice_item_quantity_out_of_range',
+            'purchase_quantity_out_of_range',
+            'orphan_customer',
+            'unknown_schema',
+        ];
+        if (!in_array($variant, $allowedVariants, true)) {
+            throw new RuntimeException("Unauthorized legacy v025 variant: {$variant}");
+        }
+
+        $receipt = $this->assertOwnershipReceipt();
+
+        $canonicalLab = str_replace('\\', '/', $this->runnerTemp) . '/setup12-regression-lab';
+        $receiptLab = rtrim(str_replace('\\', '/', (string)($receipt['lab'] ?? '')), '/');
+        if (strtolower($receiptLab) !== strtolower($canonicalLab)) {
+            throw new RuntimeException('Ownership receipt lab is not canonical runnerTemp/setup12-regression-lab');
+        }
+
+        $safeAuth = $this->assertSafeRunnerTempPath($authPath, true);
+        $canonicalAuth = $canonicalLab . '/fixture-auth.json';
+        if (strtolower(str_replace('\\', '/', $safeAuth)) !== strtolower($canonicalAuth)) {
+            throw new RuntimeException('Fixture auth path must be EXACT canonical lab fixture-auth.json');
+        }
+
+        $safeOutput = $this->assertSafeRunnerTempPath($outputPath, false);
+        $normOutput = str_replace('\\', '/', $safeOutput);
+        if (!str_starts_with(strtolower($normOutput), strtolower($canonicalLab) . '/')) {
+            throw new RuntimeException('Variant output path must reside inside canonical lab');
+        }
+        if (!str_ends_with(strtolower($normOutput), '.sql')) {
+            throw new RuntimeException('Variant output path must end with .sql');
+        }
+        if (strtolower(basename($normOutput)) === 'legacy-v025-backup.sql') {
+            throw new RuntimeException('Variant output cannot overwrite canonical legacy-v025-backup.sql');
+        }
+        if (file_exists($safeOutput) || is_link($safeOutput)) {
+            throw new RuntimeException('Output path already exists; fresh output required');
+        }
+
+        $authRaw = (string)file_get_contents($safeAuth);
+        $auth = json_decode($authRaw, true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($auth) || empty($auth['email']) || empty($auth['password'])) {
+            throw new RuntimeException('Invalid fixture auth credentials');
+        }
+
+        $fixturePath = realpath(__DIR__ . '/legacy-v025-schema.sql');
+        if ($fixturePath === false || !is_file($fixturePath)) {
+            throw new RuntimeException('Missing legacy-v025-schema.sql template');
+        }
+
+        $sql = (string)file_get_contents($fixturePath);
+
+        if (substr_count($sql, "'__ADMIN_EMAIL__'") !== 1 || substr_count($sql, "'__ADMIN_PASSWORD_HASH__'") !== 1) {
+            throw new RuntimeException('Template must contain exactly one quoted admin email and password placeholder');
+        }
+        if (preg_match('/AUTO_INCREMENT=\d+/i', $sql)) {
+            throw new RuntimeException('Template must not contain table AUTO_INCREMENT=N options');
+        }
+        $ddlMatches = [];
+        preg_match_all('/CREATE TABLE `([a-zA-Z0-9_]+)`/i', $sql, $ddlMatches);
+        $tableCount = count($ddlMatches[1] ?? []);
+        if ($tableCount !== 27) {
+            throw new RuntimeException("Template must contain exactly 27 CREATE TABLE statements, found {$tableCount}");
+        }
+        if (preg_match('/0(?:2[6-9]|[3-9][0-9])_[a-zA-Z0-9_\-]+\.sql/i', $sql)) {
+            throw new RuntimeException('Template must not contain migrations 026 or above');
+        }
+
+        $schemaInsertMatches = [];
+        if (preg_match_all('/INSERT INTO `schema_versions`\s*\([^)]+\)\s*VALUES\s*([\s\S]+?);/i', $sql, $schemaInsertMatches) !== 1) {
+            throw new RuntimeException('Template must contain exactly one INSERT INTO `schema_versions` block');
+        }
+        $schemaValuesBlock = $schemaInsertMatches[1][0];
+
+        $versionRowMatches = [];
+        preg_match_all("/\(\s*(\d+)\s*,\s*'([0-9a-zA-Z_\.\-]+)'\s*,\s*'([^']+)'\s*\)/", $schemaValuesBlock, $versionRowMatches, PREG_SET_ORDER);
+        $versionCount = count($versionRowMatches);
+        if ($versionCount !== 25) {
+            throw new RuntimeException("Template must contain exactly 25 seed version rows in schema_versions, found {$versionCount}");
+        }
+
+        $migrationsDir = realpath(__DIR__ . '/../../database/migrations');
+        if ($migrationsDir === false || !is_dir($migrationsDir)) {
+            throw new RuntimeException('Migrations directory missing');
+        }
+        $expectedFiles = [];
+        foreach (scandir($migrationsDir) ?: [] as $file) {
+            if (str_ends_with($file, '.sql') && preg_match('/^[0-9]{3}_[a-zA-Z0-9_\-]+\.sql$/', $file)) {
+                $num = (int)substr($file, 0, 3);
+                if ($num >= 2 && $num <= 25) {
+                    $expectedFiles[] = $file;
+                }
+            }
+        }
+        sort($expectedFiles);
+        if (count($expectedFiles) !== 24) {
+            throw new RuntimeException('Expected 24 trusted migration files 002..025, found ' . count($expectedFiles));
+        }
+        $expectedLegacySet = array_merge($expectedFiles, ['016_add_refresh_tokens']);
+        sort($expectedLegacySet);
+
+        $actualVersionNames = [];
+        foreach ($versionRowMatches as $match) {
+            $vName = $match[2];
+            $vTime = $match[3];
+            if ($vTime !== '2000-01-01 00:00:00') {
+                throw new RuntimeException("Seed version {$vName} has invalid timestamp '{$vTime}', expected '2000-01-01 00:00:00'");
+            }
+            $actualVersionNames[] = $vName;
+        }
+        sort($actualVersionNames);
+
+        if ($actualVersionNames !== $expectedLegacySet) {
+            throw new RuntimeException('Seed versions in schema_versions block do not match trusted 002..025 + extensionless 016');
+        }
+
+        $passwordHash = password_hash((string)$auth['password'], PASSWORD_DEFAULT);
+        $escapedEmail = str_replace(["\\", "'", "\0", "\r", "\n"], ["\\\\", "\\'", '', '', ''], (string)$auth['email']);
+        $escapedHash = str_replace(["\\", "'", "\0", "\r", "\n"], ["\\\\", "\\'", '', '', ''], $passwordHash);
+
+        $sql = str_replace('__ADMIN_EMAIL__', $escapedEmail, $sql);
+        $sql = str_replace('__ADMIN_PASSWORD_HASH__', $escapedHash, $sql);
+
+        if (str_contains($sql, '__ADMIN_EMAIL__') || str_contains($sql, '__ADMIN_PASSWORD_HASH__')) {
+            throw new RuntimeException('Unsubstituted admin placeholders detected');
+        }
+
+        // Apply targeted negative variant mutation
+        switch ($variant) {
+            case 'product_quantity_out_of_range':
+                $search = "(1, 'codex_legacy_v025_product', '6220000000001', NULL, 10.00, 5.00, 50, 0, 5, 1, 1, '2000-01-01 00:00:00', '2000-01-01 00:00:00', NULL, 1);";
+                $replace = "(1, 'codex_legacy_v025_product', '6220000000001', NULL, 10.00, 5.00, 2147483647, 0, 5, 1, 1, '2000-01-01 00:00:00', '2000-01-01 00:00:00', NULL, 1);";
+                if (substr_count($sql, $search) !== 1) {
+                    throw new RuntimeException("Target product row for {$variant} not found uniquely");
+                }
+                $sql = str_replace($search, $replace, $sql);
+                break;
+
+            case 'invoice_item_quantity_out_of_range':
+                $search = "(1, 1, 1, 1, 10.00, 5.00, 10.00);";
+                $replace = "(1, 1, 1, 2147483647, 10.00, 5.00, 10.00);";
+                if (substr_count($sql, $search) !== 1) {
+                    throw new RuntimeException("Target invoice_item row for {$variant} not found uniquely");
+                }
+                $sql = str_replace($search, $replace, $sql);
+                break;
+
+            case 'purchase_quantity_out_of_range':
+                $search = "(1, 1, 1, 1, 10, 5.00, 50.00, NULL, '2000-01-01 00:00:00');";
+                $replace = "(1, 1, 1, 1, 2147483647, 5.00, 50.00, NULL, '2000-01-01 00:00:00');";
+                if (substr_count($sql, $search) !== 1) {
+                    throw new RuntimeException("Target purchase row for {$variant} not found uniquely");
+                }
+                $sql = str_replace($search, $replace, $sql);
+                break;
+
+            case 'orphan_customer':
+                $search = "(1, 1, 1, 10.00, 0.00, 0.00, 10.00, 'cash', 10.00, 0.00, 0.00, 'completed', '2000-01-01 00:00:00', NULL, 1);";
+                $replace = "(1, 1, 999999, 10.00, 0.00, 0.00, 10.00, 'cash', 10.00, 0.00, 0.00, 'completed', '2000-01-01 00:00:00', NULL, 1);";
+                if (substr_count($sql, $search) !== 1) {
+                    throw new RuntimeException("Target invoice row for {$variant} not found uniquely");
+                }
+                $sql = str_replace($search, $replace, $sql);
+                break;
+
+            case 'unknown_schema':
+                $search = "CREATE TABLE `categories` (\n  `id` int(10) NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) NOT NULL,";
+                $replace = "CREATE TABLE `categories` (\n  `id` int(10) NOT NULL AUTO_INCREMENT,\n  `name` varchar(100) NOT NULL,\n  `codex_unrecognized_column` varchar(255) DEFAULT NULL,";
+                if (substr_count($sql, $search) !== 1) {
+                    throw new RuntimeException("Target categories table DDL for {$variant} not found uniquely");
+                }
+                $sql = str_replace($search, $replace, $sql);
+                break;
+
+            default:
+                throw new RuntimeException("Unhandled variant: {$variant}");
+        }
+
+        $fh = @fopen($safeOutput, 'xb');
+        if ($fh === false) {
+            throw new RuntimeException('Failed to create output file exclusively');
+        }
+        $written = fwrite($fh, $sql);
+        fclose($fh);
+        if ($written !== strlen($sql)) {
+            throw new RuntimeException('Failed to write complete SQL backup');
+        }
+
+        return [
+            'ok' => true,
+            'variant' => $variant,
+            'bytes' => strlen($sql),
+            'table_count' => $tableCount,
+            'version_count' => $versionCount,
+        ];
+    }
+
     public function captureLegacyV025SchemaBaseline(string $configDir, string $contractPath, string $outputPath): array
     {
         $receipt = $this->assertOwnershipReceipt();
@@ -1736,6 +1938,177 @@ final class Setup12RegressionsHelper
             'structural_diff' => $structuralDiff,
             'observed_structural_profile' => $observedStructuralProfile,
             'observedstructuralProfile' => $observedStructuralProfile,
+        ];
+    }
+
+    public function verifyLegacyV025FractionalCapability(string $configDir): array
+    {
+        $db = $this->connectDatabase($configDir);
+
+        // 1. Column metadata inspection via information_schema
+        // products.quantity -> decimal(10,3) NOT NULL DEFAULT 0.000
+        $stmt = $db->prepare(
+            "SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE " .
+            "FROM information_schema.COLUMNS " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'quantity'"
+        );
+        $stmt->execute();
+        $prodQtyCol = $stmt->fetch(PDO::FETCH_ASSOC);
+        $prodQtyMetaOk = $prodQtyCol &&
+            strtolower((string)$prodQtyCol['DATA_TYPE']) === 'decimal' &&
+            (int)$prodQtyCol['NUMERIC_PRECISION'] === 10 &&
+            (int)$prodQtyCol['NUMERIC_SCALE'] === 3 &&
+            strtoupper((string)$prodQtyCol['IS_NULLABLE']) === 'NO';
+
+        // invoice_items.quantity -> decimal(10,3) NOT NULL DEFAULT 1.000
+        $stmt = $db->prepare(
+            "SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE " .
+            "FROM information_schema.COLUMNS " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoice_items' AND COLUMN_NAME = 'quantity'"
+        );
+        $stmt->execute();
+        $itemQtyCol = $stmt->fetch(PDO::FETCH_ASSOC);
+        $itemQtyMetaOk = $itemQtyCol &&
+            strtolower((string)$itemQtyCol['DATA_TYPE']) === 'decimal' &&
+            (int)$itemQtyCol['NUMERIC_PRECISION'] === 10 &&
+            (int)$itemQtyCol['NUMERIC_SCALE'] === 3 &&
+            strtoupper((string)$itemQtyCol['IS_NULLABLE']) === 'NO';
+
+        // purchases.quantity -> decimal(10,3) NOT NULL DEFAULT 1.000
+        $stmt = $db->prepare(
+            "SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE " .
+            "FROM information_schema.COLUMNS " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'purchases' AND COLUMN_NAME = 'quantity'"
+        );
+        $stmt->execute();
+        $purchQtyCol = $stmt->fetch(PDO::FETCH_ASSOC);
+        $purchQtyMetaOk = $purchQtyCol &&
+            strtolower((string)$purchQtyCol['DATA_TYPE']) === 'decimal' &&
+            (int)$purchQtyCol['NUMERIC_PRECISION'] === 10 &&
+            (int)$purchQtyCol['NUMERIC_SCALE'] === 3 &&
+            strtoupper((string)$purchQtyCol['IS_NULLABLE']) === 'NO';
+
+        // products.is_weighable -> tinyint(1) NOT NULL DEFAULT 0
+        $stmt = $db->prepare(
+            "SELECT DATA_TYPE, IS_NULLABLE " .
+            "FROM information_schema.COLUMNS " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'is_weighable'"
+        );
+        $stmt->execute();
+        $weighableCol = $stmt->fetch(PDO::FETCH_ASSOC);
+        $weighableMetaOk = $weighableCol &&
+            strtolower((string)$weighableCol['DATA_TYPE']) === 'tinyint' &&
+            strtoupper((string)$weighableCol['IS_NULLABLE']) === 'NO';
+
+        // invoices.fk_invoice_customer foreign key
+        $stmt = $db->prepare(
+            "SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME " .
+            "FROM information_schema.KEY_COLUMN_USAGE " .
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'customer_id' AND CONSTRAINT_NAME = 'fk_invoice_customer'"
+        );
+        $stmt->execute();
+        $fkUsage = $stmt->fetch(PDO::FETCH_ASSOC);
+        $fkMetaOk = $fkUsage &&
+            (string)$fkUsage['CONSTRAINT_NAME'] === 'fk_invoice_customer' &&
+            (string)$fkUsage['REFERENCED_TABLE_NAME'] === 'customers' &&
+            (string)$fkUsage['REFERENCED_COLUMN_NAME'] === 'id';
+
+        // 2. Transactional capability proofs (strictly rolled back)
+        $stmt = $db->query("SELECT COUNT(*) FROM invoices WHERE id = 1");
+        if ((int)$stmt->fetchColumn() !== 1) {
+            throw new RuntimeException('Expected existing invoice id 1 for FK proof');
+        }
+        $stmt = $db->query("SELECT COUNT(*) FROM customers WHERE id = 999999");
+        if ((int)$stmt->fetchColumn() !== 0) {
+            throw new RuntimeException('Expected customer 999999 to be absent for FK proof');
+        }
+
+        $db->beginTransaction();
+        $transactionRolledBack = false;
+        $prodUpdateOk = false;
+        $itemUpdateOk = false;
+        $purchUpdateOk = false;
+        $weighableUpdateOk = false;
+        $fkEnforced = false;
+
+        try {
+            // Test products.quantity decimal(10,3) & is_weighable update/readback
+            $stmt = $db->prepare("UPDATE products SET quantity = 50.125, is_weighable = 1 WHERE id = 1");
+            $stmt->execute();
+            $stmt = $db->query("SELECT quantity, is_weighable FROM products WHERE id = 1");
+            $prodRow = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($prodRow && (string)$prodRow['quantity'] === '50.125' && (int)$prodRow['is_weighable'] === 1) {
+                $prodUpdateOk = true;
+                $weighableUpdateOk = true;
+            }
+
+            // Test invoice_items.quantity decimal(10,3) update/readback
+            $stmt = $db->prepare("UPDATE invoice_items SET quantity = 1.125 WHERE id = 1");
+            $stmt->execute();
+            $stmt = $db->query("SELECT quantity FROM invoice_items WHERE id = 1");
+            $itemRow = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($itemRow && (string)$itemRow['quantity'] === '1.125') {
+                $itemUpdateOk = true;
+            }
+
+            // Test purchases.quantity decimal(10,3) update/readback
+            $stmt = $db->prepare("UPDATE purchases SET quantity = 10.125 WHERE id = 1");
+            $stmt->execute();
+            $stmt = $db->query("SELECT quantity FROM purchases WHERE id = 1");
+            $purchRow = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($purchRow && (string)$purchRow['quantity'] === '10.125') {
+                $purchUpdateOk = true;
+            }
+
+            // Test foreign key constraint enforcement: updating existing invoice id 1 to non-existent customer 999999 MUST fail with FK constraint error
+            try {
+                $db->exec("UPDATE invoices SET customer_id = 999999 WHERE id = 1");
+                $fkEnforced = false;
+            } catch (PDOException $fkErr) {
+                $sqlState = (string)($fkErr->errorInfo[0] ?? $fkErr->getCode());
+                $driverCode = (int)($fkErr->errorInfo[1] ?? 0);
+                $driverMsg = (string)($fkErr->errorInfo[2] ?? '');
+                if ($sqlState === '23000' && $driverCode === 1452 && str_contains($driverMsg, 'fk_invoice_customer')) {
+                    $fkEnforced = true;
+                } else {
+                    throw new RuntimeException('Foreign key violation did not match expected constraint error');
+                }
+            }
+        } finally {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+                $transactionRolledBack = true;
+            }
+        }
+
+        $prodQtyOk = $prodQtyMetaOk && $prodUpdateOk;
+        $itemQtyOk = $itemQtyMetaOk && $itemUpdateOk;
+        $purchQtyOk = $purchQtyMetaOk && $purchUpdateOk;
+        $weighableOk = $weighableMetaOk && $weighableUpdateOk;
+        $fkOk = $fkMetaOk && $fkEnforced;
+
+        $columnsCount = 0;
+        if ($prodQtyOk) $columnsCount++;
+        if ($itemQtyOk) $columnsCount++;
+        if ($purchQtyOk) $columnsCount++;
+        if ($weighableOk) $columnsCount++;
+
+        $constraintsCount = 0;
+        if ($fkOk) $constraintsCount++;
+
+        $allOk = $prodQtyOk && $itemQtyOk && $purchQtyOk && $weighableOk && $fkOk && $transactionRolledBack;
+
+        return [
+            'ok' => $allOk,
+            'products_quantity_fractional' => $prodQtyOk,
+            'invoice_items_quantity_fractional' => $itemQtyOk,
+            'purchases_quantity_fractional' => $purchQtyOk,
+            'products_is_weighable_present' => $weighableOk,
+            'invoice_customer_fk_enforced' => $fkOk,
+            'fractional_capability_verified' => $allOk,
+            'transaction_rolled_back' => $transactionRolledBack,
+            'columns_verified_count' => $columnsCount,
+            'constraints_verified_count' => $constraintsCount,
         ];
     }
 
@@ -2771,6 +3144,7 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'contract-path:',
         'baseline-path:',
         'baseline:',
+        'variant:',
     ]);
 
     $action = (string)($options['action'] ?? '');
@@ -2929,6 +3303,22 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                     (string)($options['auth-path'] ?? ''),
                     (string)($options['contract-path'] ?? $options['contract'] ?? ''),
                     (string)($options['baseline-path'] ?? $options['baseline'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'prepare-legacy-v025-variant-backup':
+                $result = $helper->prepareLegacyV025VariantBackup(
+                    (string)($options['variant'] ?? ''),
+                    (string)($options['auth-path'] ?? ''),
+                    (string)($options['output-path'] ?? $options['output'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
+            case 'verify-legacy-v025-fractional-capability':
+                $result = $helper->verifyLegacyV025FractionalCapability(
+                    (string)($options['config-dir'] ?? '')
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

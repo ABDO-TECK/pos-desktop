@@ -1211,7 +1211,11 @@ const ALLOWED_LEGACY_PHASES = new Set([
   'prepare',
   'nativeLegacy',
   'legacyVerify',
+  'fractionalCapability',
+  'legacyTransitionToBeta',
+  'legacyTransitionToDelta',
   'baselineBack',
+  'negativeConvergence',
   'finalVerify',
   'completed',
 ]);
@@ -1241,8 +1245,20 @@ const ALLOWED_LEGACY_STAGES = new Set([
   'prepare',
   'nativeLegacy',
   'legacyVerify',
+  'fractionalCapability',
+  'legacyTransitionToBeta',
+  'legacyTransitionToDelta',
   'baselineBack',
+  'negativeConvergence',
   'finalVerify',
+]);
+
+const ALLOWED_NEGATIVE_CONVERGENCE_VARIANTS = new Set([
+  'product_quantity_out_of_range',
+  'invoice_item_quantity_out_of_range',
+  'purchase_quantity_out_of_range',
+  'orphan_customer',
+  'unknown_schema',
 ]);
 
 const repoMigrations = path.join(process.cwd(), 'database/migrations');
@@ -1534,6 +1550,26 @@ function persistLegacyDiagnostic(patch = {}) {
     legacyDiagnostic.observed_structural_profile ?? legacyDiagnostic.observedstructuralProfile
   );
 
+  const safeNegativeScenarios = Array.isArray(legacyDiagnostic.negative_scenarios)
+    ? legacyDiagnostic.negative_scenarios.map((sc) => {
+        if (!sc || typeof sc !== 'object') return null;
+        const variant = typeof sc.variant === 'string' && ALLOWED_NEGATIVE_CONVERGENCE_VARIANTS.has(sc.variant) ? sc.variant : null;
+        if (!variant) return null;
+        return {
+          variant,
+          passed: typeof sc.passed === 'boolean' ? sc.passed : null,
+          code: typeof sc.code === 'string' && ALLOWED_RESTORE_CODES.has(sc.code) ? sc.code : null,
+          stage: typeof sc.stage === 'string' && ALLOWED_RESTORE_STAGES.has(sc.stage) ? sc.stage : null,
+          recovered: typeof sc.recovered === 'boolean' ? sc.recovered : null,
+          has_reference: typeof sc.has_reference === 'boolean' ? sc.has_reference : Boolean(typeof sc.reference === 'string' && /^[0-9a-f]{16}$/i.test(sc.reference)),
+        };
+      }).filter(Boolean)
+    : null;
+
+  const safePassedCount = safeNegativeScenarios
+    ? safeNegativeScenarios.filter((sc) => sc.passed === true).length
+    : (typeof legacyDiagnostic.negative_scenarios_passed_count === 'number' && Number.isInteger(legacyDiagnostic.negative_scenarios_passed_count) && legacyDiagnostic.negative_scenarios_passed_count >= 0 && legacyDiagnostic.negative_scenarios_passed_count <= 10 ? legacyDiagnostic.negative_scenarios_passed_count : null);
+
   const safe = {
     phase: typeof legacyDiagnostic.phase === 'string' && ALLOWED_LEGACY_PHASES.has(legacyDiagnostic.phase) ? legacyDiagnostic.phase : null,
     result: typeof legacyDiagnostic.result === 'string' && ALLOWED_LEGACY_RESULTS.has(legacyDiagnostic.result) ? legacyDiagnostic.result : null,
@@ -1556,6 +1592,19 @@ function persistLegacyDiagnostic(patch = {}) {
     structural_diff: sanitizeStructuralDiff(legacyDiagnostic.structural_diff),
     observed_structural_profile: safeProfile,
     observedstructuralProfile: safeProfile,
+    fractional_capability_verified: typeof legacyDiagnostic.fractional_capability_verified === 'boolean' ? legacyDiagnostic.fractional_capability_verified : null,
+    products_quantity_fractional: typeof legacyDiagnostic.products_quantity_fractional === 'boolean' ? legacyDiagnostic.products_quantity_fractional : null,
+    invoice_items_quantity_fractional: typeof legacyDiagnostic.invoice_items_quantity_fractional === 'boolean' ? legacyDiagnostic.invoice_items_quantity_fractional : null,
+    purchases_quantity_fractional: typeof legacyDiagnostic.purchases_quantity_fractional === 'boolean' ? legacyDiagnostic.purchases_quantity_fractional : null,
+    products_is_weighable_present: typeof legacyDiagnostic.products_is_weighable_present === 'boolean' ? legacyDiagnostic.products_is_weighable_present : null,
+    invoice_customer_fk_enforced: typeof legacyDiagnostic.invoice_customer_fk_enforced === 'boolean' ? legacyDiagnostic.invoice_customer_fk_enforced : null,
+    transaction_rolled_back: typeof legacyDiagnostic.transaction_rolled_back === 'boolean' ? legacyDiagnostic.transaction_rolled_back : null,
+    columns_verified_count: typeof legacyDiagnostic.columns_verified_count === 'number' && Number.isInteger(legacyDiagnostic.columns_verified_count) && legacyDiagnostic.columns_verified_count >= 0 && legacyDiagnostic.columns_verified_count <= 10 ? legacyDiagnostic.columns_verified_count : null,
+    constraints_verified_count: typeof legacyDiagnostic.constraints_verified_count === 'number' && Number.isInteger(legacyDiagnostic.constraints_verified_count) && legacyDiagnostic.constraints_verified_count >= 0 && legacyDiagnostic.constraints_verified_count <= 10 ? legacyDiagnostic.constraints_verified_count : null,
+    legacy_roundtrip_verified: typeof legacyDiagnostic.legacy_roundtrip_verified === 'boolean' ? legacyDiagnostic.legacy_roundtrip_verified : null,
+    baseline_reversion_verified: typeof legacyDiagnostic.baseline_reversion_verified === 'boolean' ? legacyDiagnostic.baseline_reversion_verified : null,
+    negative_scenarios_passed_count: safePassedCount,
+    negative_scenarios: safeNegativeScenarios,
   };
   fs.writeFileSync(path.join(evidence, 'diagnostic-legacy-v025-summary.json'), JSON.stringify(safe, null, 2), 'utf8');
 }
@@ -2291,6 +2340,7 @@ try {
 
     const witnessedReceiptIds = new Set();
     const witnessedNativeOwnerIds = new Set();
+    let legacyBaselineDb = null;
 
     async function executeTransition({
       stepName,
@@ -2303,6 +2353,8 @@ try {
       targetInv,
       baseInv,
       screenshotName,
+      isLegacy = false,
+      expectedBaseline = null,
     }) {
       if (schemaDiagnostics.carrier_matches_contract === null) {
         const sampleDesc = findCarrierDescriptor(lab, {
@@ -2736,15 +2788,47 @@ try {
       assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, `[${stepName}] POS Desktop.exe altered`);
       assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, `[${stepName}] app.asar altered`);
 
-      const dbAfter = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
-      assert.equal(dbAfter.customer?.name, SENTINEL, `[${stepName}] Sentinel lost`);
-      assert.equal(dbAfter.setting?.value, baselineDb.setting?.value, `[${stepName}] Setting lost`);
-      assert.equal(dbAfter.admin_digest, baselineDb.admin_digest, `[${stepName}] Admin credentials altered`);
-      assert.deepEqual(dbAfter.ledger_rows, baselineDb.ledger_rows, `[${stepName}] Schema versions rows altered`);
-      assert.equal(dbAfter.schema_sha256, baselineDb.schema_sha256, `[${stepName}] Schema altered`);
-      assert.equal(dbAfter.raw_schema_sha256, baselineDb.raw_schema_sha256, `[${stepName}] Raw schema altered`);
+      if (isLegacy) {
+        const targetBaseline = expectedBaseline || legacyBaselineDb;
+        assert.ok(targetBaseline, `[${stepName}] Expected legacy baseline must be captured before transition`);
 
-      assert.deepEqual(await pendingSale(transitionLab, 'get'), offlineBefore, `[${stepName}] Offline sale preserved`);
+        const legacyUpgradeRes = runPhpFixture('verify-legacy-v025-upgrade', {
+          'config-dir': configDir,
+          'auth-path': authPath,
+          'contract-path': path.join(lab, 'data-contract.json'),
+          'baseline-path': path.join(lab, 'legacy-v025-schema-baseline.json'),
+        });
+        assert.equal(legacyUpgradeRes.ok, true, `[${stepName}] Legacy v025 upgrade verification failed`);
+        assert.equal(legacyUpgradeRes.schema_matches_contract, true, `[${stepName}] Legacy schema must match contract`);
+        assert.equal(legacyUpgradeRes.ledger_matches_contract, true, `[${stepName}] Legacy ledger must match contract`);
+        assert.equal(legacyUpgradeRes.admin_verified, true, `[${stepName}] Legacy admin credentials altered`);
+        assert.equal(legacyUpgradeRes.data_preserved, true, `[${stepName}] Legacy data lost`);
+
+        const dbAfter = runPhpFixture('inspect-db', {
+          'config-dir': configDir,
+          sentinel: 'codex_legacy_v025_customer',
+          'setting-key': 'store_name',
+        });
+        assert.equal(dbAfter.ok, true, `[${stepName}] inspect-db failed`);
+        assert.deepEqual(dbAfter.customer, targetBaseline.customer, `[${stepName}] Legacy customer record altered`);
+        assert.deepEqual(dbAfter.setting, targetBaseline.setting, `[${stepName}] Legacy store setting altered`);
+        assert.equal(dbAfter.admin_digest, targetBaseline.admin_digest, `[${stepName}] Admin credentials altered`);
+        assert.deepEqual(dbAfter.ledger_rows, targetBaseline.ledger_rows, `[${stepName}] Full raw schema_versions rows altered`);
+        assert.equal(dbAfter.schema_sha256, targetBaseline.schema_sha256, `[${stepName}] Canonical schema SHA256 altered`);
+        assert.equal(dbAfter.raw_schema_sha256, targetBaseline.raw_schema_sha256, `[${stepName}] Raw schema SHA256 altered`);
+        assert.equal(dbAfter.ledger_sha256, targetBaseline.ledger_sha256, `[${stepName}] Ledger SHA256 altered`);
+
+        assert.deepEqual(await pendingSale(transitionLab, 'get'), offlineBefore, `[${stepName}] Offline sale preserved`);
+      } else {
+        const dbAfter = runPhpFixture('inspect-db', { 'config-dir': configDir, sentinel: SENTINEL });
+        assert.equal(dbAfter.customer?.name, SENTINEL, `[${stepName}] Sentinel lost`);
+        assert.equal(dbAfter.setting?.value, baselineDb.setting?.value, `[${stepName}] Setting lost`);
+        assert.equal(dbAfter.admin_digest, baselineDb.admin_digest, `[${stepName}] Admin credentials altered`);
+        assert.deepEqual(dbAfter.ledger_rows, baselineDb.ledger_rows, `[${stepName}] Schema versions rows altered`);
+        assert.equal(dbAfter.schema_sha256, baselineDb.schema_sha256, `[${stepName}] Schema altered`);
+        assert.equal(dbAfter.raw_schema_sha256, baselineDb.raw_schema_sha256, `[${stepName}] Raw schema altered`);
+        assert.deepEqual(await pendingSale(transitionLab, 'get'), offlineBefore, `[${stepName}] Offline sale preserved`);
+      }
 
       const protectedAfter = await getSystemProtectedState(transitionLab);
       assertProtectedStatePreserved(baselineProtected, protectedAfter, stepName);
@@ -3100,6 +3184,19 @@ try {
       structural_diff: null,
       observed_structural_profile: null,
       observedstructuralProfile: null,
+      fractional_capability_verified: null,
+      products_quantity_fractional: null,
+      invoice_items_quantity_fractional: null,
+      purchases_quantity_fractional: null,
+      products_is_weighable_present: null,
+      invoice_customer_fk_enforced: null,
+      transaction_rolled_back: null,
+      columns_verified_count: null,
+      constraints_verified_count: null,
+      legacy_roundtrip_verified: null,
+      baseline_reversion_verified: null,
+      negative_scenarios_passed_count: null,
+      negative_scenarios: null,
     };
     persistLegacyDiagnostic({ phase: 'prepare' });
 
@@ -3333,13 +3430,116 @@ try {
     await transitionLab.until("Boolean(document.querySelector(\"a[href='/settings']\"))", 'authenticated navigation after legacy restore', 60000);
     await transitionLab.screenshot('legacy-v025-upgraded');
 
+    // 5B: Fractional capability proof on converged legacy schema
+    persistLegacyDiagnostic({ phase: 'fractionalCapability', stage: 'restore_verify' });
+    console.log('[Test 5B] Verifying DECIMAL(10,3) fractional capabilities and constraints on converged schema...');
+    const fracRes = runPhpFixture('verify-legacy-v025-fractional-capability', {
+      'config-dir': configDir,
+    });
+    // Immediately persist actual typed bools/counts from fracRes BEFORE asserts
+    persistLegacyDiagnostic({
+      fractional_capability_verified: typeof fracRes?.fractional_capability_verified === 'boolean' ? fracRes.fractional_capability_verified : (typeof fracRes?.ok === 'boolean' ? fracRes.ok : null),
+      products_quantity_fractional: typeof fracRes?.products_quantity_fractional === 'boolean' ? fracRes.products_quantity_fractional : null,
+      invoice_items_quantity_fractional: typeof fracRes?.invoice_items_quantity_fractional === 'boolean' ? fracRes.invoice_items_quantity_fractional : null,
+      purchases_quantity_fractional: typeof fracRes?.purchases_quantity_fractional === 'boolean' ? fracRes.purchases_quantity_fractional : null,
+      products_is_weighable_present: typeof fracRes?.products_is_weighable_present === 'boolean' ? fracRes.products_is_weighable_present : null,
+      invoice_customer_fk_enforced: typeof fracRes?.invoice_customer_fk_enforced === 'boolean' ? fracRes.invoice_customer_fk_enforced : null,
+      transaction_rolled_back: typeof fracRes?.transaction_rolled_back === 'boolean' ? fracRes.transaction_rolled_back : null,
+      columns_verified_count: typeof fracRes?.columns_verified_count === 'number' && Number.isInteger(fracRes.columns_verified_count) && fracRes.columns_verified_count >= 0 && fracRes.columns_verified_count <= 10 ? fracRes.columns_verified_count : null,
+      constraints_verified_count: typeof fracRes?.constraints_verified_count === 'number' && Number.isInteger(fracRes.constraints_verified_count) && fracRes.constraints_verified_count >= 0 && fracRes.constraints_verified_count <= 10 ? fracRes.constraints_verified_count : null,
+    });
+
+    assert.equal(fracRes.ok, true, 'Fractional capability verification failed');
+    assert.equal(fracRes.products_quantity_fractional, true, 'products.quantity fractional verification failed');
+    assert.equal(fracRes.invoice_items_quantity_fractional, true, 'invoice_items.quantity fractional verification failed');
+    assert.equal(fracRes.purchases_quantity_fractional, true, 'purchases.quantity fractional verification failed');
+    assert.equal(fracRes.products_is_weighable_present, true, 'products.is_weighable verification failed');
+    assert.equal(fracRes.invoice_customer_fk_enforced, true, 'fk_invoice_customer enforcement verification failed');
+    assert.equal(fracRes.transaction_rolled_back, true, 'Transactional fractional proof must rollback');
+    assert.equal(fracRes.columns_verified_count, 4, 'Expected 4 verified fractional/weighable columns');
+    assert.equal(fracRes.constraints_verified_count, 1, 'Expected 1 verified foreign key constraint');
+    console.log('PASS [Test 5B] Fractional capabilities, weighable flag, and foreign keys verified on converged schema.');
+
+    // 5C: Channel transition roundtrip while legacy data is canonical
+    console.log('[Test 5C Baseline Capture] Capturing actual legacy database baseline after fractional proof rollback...');
+    legacyBaselineDb = runPhpFixture('inspect-db', {
+      'config-dir': configDir,
+      sentinel: 'codex_legacy_v025_customer',
+      'setting-key': 'store_name',
+    });
+    assert.equal(legacyBaselineDb.ok, true, 'Capturing legacy baseline via inspect-db failed');
+    assert.equal(legacyBaselineDb.customer?.name, 'codex_legacy_v025_customer', 'Legacy baseline customer name mismatch');
+    assert.equal(legacyBaselineDb.setting?.key, 'store_name', 'Legacy baseline setting key mismatch');
+    assert.equal(legacyBaselineDb.setting?.value, 'codex_legacy_v025_store', 'Legacy baseline setting value mismatch');
+    assert.equal(legacyBaselineDb.schema_sha256, contract.schema_sha256, 'Legacy baseline schema SHA256 must match contract');
+    assert.equal(legacyBaselineDb.ledger_sha256, contract.ledger_sha256, 'Legacy baseline ledger SHA256 must match contract');
+    assert.equal(legacyBaselineDb.ledger_count, 58, 'Legacy baseline ledger count must be 58');
+
+    console.log('[Test 5C] Attaching transition transport for legacy channel roundtrip...');
+    if (!transitionTransport) {
+      transitionTransport = await attachTransitionTransport({
+        ui: transitionLab,
+        application,
+        storage: storageDir,
+        evidence,
+        fixture: roundtripFixturePath,
+        auth,
+      });
+    }
+
+    // Seed offline pending sale for transition preservation verification
+    offlineBefore = await seedOfflinePendingSale(transitionLab);
+
+    persistLegacyDiagnostic({ phase: 'legacyTransitionToBeta', stage: 'prepare' });
+    console.log('[Test 5C] Transitioning legacy database: Delta 13 -> Beta 12.1...');
+    await executeTransition({
+      stepName: 'Test 5C (Legacy Delta 13 -> Beta 12.1)',
+      channel: 'beta',
+      expectedFromVersion: '0.0.13',
+      expectedTargetVersion: '0.0.12-beta.1',
+      expectedFromChannel: 'stable',
+      expectedSourceInvHash: candidate13DeltaInvHash,
+      expectedTargetInvHash: beta12InvHash,
+      targetInv: beta12Inv,
+      baseInv: candidate13DeltaInv,
+      isLegacy: true,
+      expectedBaseline: legacyBaselineDb,
+    });
+
+    persistLegacyDiagnostic({ phase: 'legacyTransitionToDelta', stage: 'prepare' });
+    console.log('[Test 5C] Transitioning legacy database back: Beta 12.1 -> Delta 13...');
+    await executeTransition({
+      stepName: 'Test 5C (Legacy Beta 12.1 -> Delta 13)',
+      channel: 'stable',
+      expectedFromVersion: '0.0.12-beta.1',
+      expectedTargetVersion: '0.0.13',
+      expectedFromChannel: 'beta',
+      expectedSourceInvHash: beta12InvHash,
+      expectedTargetInvHash: candidate13DeltaInvHash,
+      targetInv: candidate13DeltaInv,
+      baseInv: beta12Inv,
+      isLegacy: true,
+      expectedBaseline: legacyBaselineDb,
+    });
+
+    assert.equal(witnessedReceiptIds.size, 6, 'All 6 transitions must have produced unique receipt IDs');
+    assert.equal(witnessedNativeOwnerIds.size, 6, 'All 6 transitions must have used distinct native lease owner IDs');
+
+    if (transitionTransport) {
+      console.log('Closing channel transition transport after Test 5C...');
+      await transitionTransport.close().catch(() => {});
+      transitionTransport = null;
+    }
+    persistLegacyDiagnostic({ legacy_roundtrip_verified: true });
+    console.log('PASS [Test 5C] Legacy channel transition roundtrip verified.');
+
     // Clean up: Restore fresh baseline backup using same strict patterns to revert database
-    persistLegacyDiagnostic({ phase: 'baselineBack' });
+    persistLegacyDiagnostic({ phase: 'baselineBack', stage: 'restore_snapshot' });
     console.log('[Test 5 Baseline Reversion] Restoring fresh pre-Test5 baseline backup to revert database...');
     const baselineRestoreResult = await executeTest5NativeRestore('baseline_cleanup', pre5BackupPath, false);
     console.log('[Test 5 Baseline Reversion] Baseline restore completed; context lost:', baselineRestoreResult.contextLost);
 
-    persistLegacyDiagnostic({ phase: 'finalVerify' });
+    persistLegacyDiagnostic({ phase: 'finalVerify', stage: 'restore_finalize' });
     await transitionLab.login(auth.email, auth.password);
     await transitionLab.until("Boolean(document.querySelector(\"a[href='/settings']\"))", 'authenticated navigation after baseline cleanup', 60000);
 
@@ -3362,6 +3562,158 @@ try {
     assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, 'POS Desktop.exe altered during baseline recovery');
     assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, 'app.asar altered during baseline recovery');
     verifyInventoryFiles(candidate13DeltaInv);
+    persistLegacyDiagnostic({ baseline_reversion_verified: true });
+    console.log('PASS [Test 5 Baseline Reversion] Database reverted to pre-Test5 baseline.');
+
+    // 5D: Negative convergence restore scenarios
+    console.log('\n[Test 5D] Testing 5 negative convergence variants triggering restore_migrations rollback...');
+    const negativeVariants = [
+      'product_quantity_out_of_range',
+      'invoice_item_quantity_out_of_range',
+      'purchase_quantity_out_of_range',
+      'orphan_customer',
+      'unknown_schema',
+    ];
+    const negativeScenarios = negativeVariants.map((variant) => ({
+      variant,
+      passed: null,
+      code: null,
+      stage: null,
+      recovered: null,
+      has_reference: false,
+    }));
+
+    persistLegacyDiagnostic({
+      phase: 'negativeConvergence',
+      stage: 'restore_migrations',
+      negative_scenarios_passed_count: 0,
+      negative_scenarios: negativeScenarios,
+    });
+
+    for (const variant of negativeVariants) {
+      console.log(`[Test 5D Negative Convergence] Testing variant: ${variant}...`);
+      const sc = negativeScenarios.find((s) => s.variant === variant);
+      assert.ok(sc, `Scenario tracker missing for variant ${variant}`);
+
+      const variantBackupPath = path.join(lab, `legacy-variant-${variant}.sql`);
+      const prepVariantRes = runPhpFixture('prepare-legacy-v025-variant-backup', {
+        variant,
+        'auth-path': authPath,
+        'output-path': variantBackupPath,
+      });
+      assert.equal(prepVariantRes.ok, true, `prepare-legacy-v025-variant-backup failed for ${variant}`);
+      assert.ok(fs.existsSync(variantBackupPath), `Variant backup missing for ${variant}`);
+
+      const preExistingSafetyNeg = new Set(fs.existsSync(safetyDir5) ? fs.readdirSync(safetyDir5) : []);
+      const offlineBeforeNeg = await seedOfflinePendingSale(transitionLab);
+      const protectedBeforeNeg = await getSystemProtectedState(transitionLab);
+
+      await transitionLab.mockOpenDialog(variantBackupPath);
+
+      // Persist scenario state before native call
+      sc.stage = 'restore_migrations';
+      persistLegacyDiagnostic({
+        negative_scenarios_passed_count: negativeScenarios.filter((s) => s.passed === true).length,
+        negative_scenarios: negativeScenarios,
+      });
+
+      const failurePromise = transitionLab.evaluate('window.electronAPI.backup.restore()')
+        .catch((err) => ({ success: false, code: 'IPC_TRANSPORT_UNKNOWN', error: err?.message || '' }));
+
+      const snapshotNeg = await observeMigrationSafetySnapshot(safetyDir5, preExistingSafetyNeg);
+      const failureResult = await failurePromise;
+
+      console.log(`[Test 5D ${variant}] Failure code:`, failureResult?.code, 'stage:', failureResult?.stage, 'recovered:', failureResult?.recovered);
+
+      // Immediately record actual failure result fields before asserts
+      sc.code = typeof failureResult?.code === 'string' ? failureResult.code : null;
+      sc.stage = typeof failureResult?.stage === 'string' ? failureResult.stage : null;
+      sc.recovered = typeof failureResult?.recovered === 'boolean' ? failureResult.recovered : null;
+      sc.has_reference = Boolean(typeof failureResult?.reference === 'string' && /^[0-9a-f]{16}$/i.test(failureResult.reference));
+      sc.ref = typeof failureResult?.reference === 'string' ? failureResult.reference : null;
+
+      persistLegacyDiagnostic({
+        negative_scenarios_passed_count: negativeScenarios.filter((s) => s.passed === true).length,
+        negative_scenarios: negativeScenarios,
+      });
+
+      try {
+        assert.equal(failureResult?.success, false, `Negative variant ${variant} must return success: false`);
+        assert.equal(failureResult?.code, 'DATABASE_RESTORE_FAILED_RECOVERED', `Negative variant ${variant} code mismatch`);
+        assert.equal(failureResult?.stage, 'restore_migrations', `Negative variant ${variant} stage must be restore_migrations`);
+        assert.equal(failureResult?.recovered, true, `Negative variant ${variant} recovered must be true`);
+        assert.ok(typeof failureResult?.reference === 'string' && /^[a-f0-9]{16}$/i.test(failureResult.reference), `Negative variant ${variant} reference must be 16 hex chars`);
+        assert.ok(failureResult?.error.includes(failureResult.reference), `Negative variant ${variant} error message must include reference`);
+        assert.ok(failureResult?.error.includes('restore_migrations'), `Negative variant ${variant} error message must include stage`);
+        assert.ok(failureResult?.error.includes('recovered successfully'), `Negative variant ${variant} error message must confirm database recovered`);
+        assert.ok(!failureResult?.error.includes('\\') && !failureResult?.error.includes('/'), `Negative variant ${variant} error message must not leak file paths`);
+
+        // Safety snapshot retention
+        assert.equal(fs.existsSync(snapshotNeg.sqlPath), true, `Safety snapshot .sql must be retained for ${variant}`);
+        assert.equal(fs.existsSync(snapshotNeg.jsonPath), true, `Safety snapshot .sql.json must be retained for ${variant}`);
+        const retainedBytes = fs.readFileSync(snapshotNeg.sqlPath);
+        const retainedSha = crypto.createHash('sha256').update(retainedBytes).digest('hex');
+        assert.equal(retainedSha, snapshotNeg.metadata.sha256, `Retained SQL sha256 mismatch for ${variant}`);
+        assert.equal(retainedBytes.length, snapshotNeg.metadata.size, `Retained SQL size mismatch for ${variant}`);
+
+        for (const f of preExistingSafetyNeg) {
+          assert.ok(fs.existsSync(path.join(safetyDir5, f)), `Preexisting safety snapshot ${f} must be preserved for ${variant}`);
+        }
+
+        // User session preserved (not logged out)
+        const stillAuthenticated = await transitionLab.evaluate("Boolean(document.querySelector(\"a[href='/settings']\"))");
+        assert.equal(stillAuthenticated, true, `User session must be preserved on restore_migrations error for ${variant}`);
+
+        // Offline sale preserved in IndexedDB
+        const offlineAfterNeg = await pendingSale(transitionLab, 'get');
+        assert.deepEqual(offlineAfterNeg, offlineBeforeNeg, `Offline sale fixture in IndexedDB must be preserved for ${variant}`);
+
+        // Protected state preserved
+        const protectedAfterNeg = await getSystemProtectedState(transitionLab);
+        assertProtectedStatePreserved(protectedBeforeNeg, protectedAfterNeg, `Negative Variant ${variant}`);
+
+        // Database integrity: reverted to baseline
+        const dbAfterRollback = runPhpFixture('inspect-db', {
+          'config-dir': configDir,
+          sentinel: SENTINEL,
+          'setting-key': baselineDb.setting.key,
+        });
+        assert.equal(dbAfterRollback.ok, true, `Database inspect-db failed after rollback for ${variant}`);
+        assert.deepEqual(dbAfterRollback.customer, pre5Db.customer, `Customer record must be restored to baseline after rollback for ${variant}`);
+        assert.deepEqual(dbAfterRollback.setting, pre5Db.setting, `Setting record must be restored to baseline after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.customer?.name, SENTINEL, `Sentinel customer must be preserved after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.schema_sha256, pre5Db.schema_sha256, `Database schema must match baseline after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.raw_schema_sha256, pre5Db.raw_schema_sha256, `Database raw schema must match baseline after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.ledger_sha256, pre5Db.ledger_sha256, `Database ledger SHA256 must match baseline after rollback for ${variant}`);
+        assert.deepEqual(dbAfterRollback.ledger_rows, pre5Db.ledger_rows, `Full raw schema_versions rows altered after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.setting?.value, pre5Db.setting.value, `Database setting value must match baseline after rollback for ${variant}`);
+        assert.equal(dbAfterRollback.admin_digest, pre5Db.admin_digest, `Database admin digest must match baseline after rollback for ${variant}`);
+
+        // Binaries and inventory files unaltered
+        assert.equal(hasher(installedExePath), owned.candidate_exe_sha256, `POS Desktop.exe altered during negative variant ${variant}`);
+        assert.equal(hasher(installedAsarPath), owned.candidate_asar_sha256, `app.asar altered during negative variant ${variant}`);
+        verifyInventoryFiles(candidate13DeltaInv);
+
+        sc.passed = true;
+      } catch (variantErr) {
+        sc.passed = false;
+        persistLegacyDiagnostic({
+          negative_scenarios_passed_count: negativeScenarios.filter((s) => s.passed === true).length,
+          negative_scenarios: negativeScenarios,
+        });
+        throw variantErr;
+      }
+
+      persistLegacyDiagnostic({
+        negative_scenarios_passed_count: negativeScenarios.filter((s) => s.passed === true).length,
+        negative_scenarios: negativeScenarios,
+      });
+    }
+
+    assert.equal(negativeScenarios.length, 5, 'All 5 negative convergence variants must be evaluated');
+    assert.equal(negativeScenarios.filter((s) => s.passed === true).length, 5, 'All 5 negative convergence variants must pass');
+    assert.ok(negativeScenarios.every((s) => s.passed === true), 'Every negative scenario must have passed: true');
+    console.log('PASS [Test 5D] All 5 negative convergence variants successfully rolled back and verified.');
 
     persistLegacyDiagnostic({
       phase: 'completed',
@@ -3384,6 +3736,10 @@ try {
       migrations_table_dropped: upgradeRes.legacy_migrations_table_dropped,
       schema_matches_contract: upgradeRes.schema_matches_contract,
       ledger_matches_contract: upgradeRes.ledger_matches_contract,
+      fractional_capability_verified: fracRes.ok,
+      legacy_roundtrip_verified: true,
+      baseline_reversion_verified: true,
+      negative_scenarios_passed_count: negativeScenarios.filter((s) => s.passed === true).length,
     };
     console.log('PASS [Test 5] Legacy v0.25 database backup restore and full migration upgrade verified.');
   } finally {

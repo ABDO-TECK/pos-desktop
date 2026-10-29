@@ -535,6 +535,7 @@ async function restoreDesktopBackup(filePath) {
         dbCredentials,
         apiPort: phpPort,
         force: true,
+        restoreConvergence: true,
       });
     },
     verifyDb: async () => {

@@ -39,6 +39,15 @@ class MigrationService {
     }
 
     /**
+     * Explicit restore migration entry point. Applies pending migrations,
+     * reconciles legacy metadata/ledger, and runs targeted schema convergence
+     * under the migration advisory lock.
+     */
+    public function runRestoreMigrations(bool $force = false): array {
+        return $this->runLockedMigrations(null, $force, true);
+    }
+
+    /**
      * Execute only the canonical migration filenames declared by a verified
      * Delta manifest. A Delta must never opportunistically run unrelated
      * pending migrations.
@@ -46,11 +55,16 @@ class MigrationService {
      * @param list<string>|null $declaredMigrations null retains normal startup behaviour
      */
     public function runMigrations(?array $declaredMigrations, bool $force = false): array {
+        return $this->runLockedMigrations($declaredMigrations, $force, false);
+    }
+
+    private function runLockedMigrations(?array $declaredMigrations, bool $force, bool $restoreConvergence): array {
         if (!is_dir($this->migrationsPath)) {
             return [
                 'executed' => 0,
                 'errors' => ["Migrations directory not found: {$this->migrationsPath}"],
                 'skipped' => false,
+                'converged' => false,
             ];
         }
 
@@ -59,28 +73,29 @@ class MigrationService {
                 'executed' => 0,
                 'errors' => ['Timed out waiting for the database migration lock.'],
                 'skipped' => false,
+                'converged' => false,
             ];
         }
 
         try {
-            return $this->runPendingMigrations($force, $declaredMigrations);
+            return $this->runPendingMigrations($force, $declaredMigrations, $restoreConvergence);
         } finally {
             $this->releaseMigrationLock();
         }
     }
 
-    private function runPendingMigrations(bool $force, ?array $declaredMigrations = null): array {
+    private function runPendingMigrations(bool $force, ?array $declaredMigrations = null, bool $restoreConvergence = false): array {
 
         // ── Smart skip: لا حاجة للتنفيذ إذا لم تتغير الملفات ──
-        if (!$force && $this->isUpToDate()) {
+        if (!$force && !$restoreConvergence && $this->isUpToDate()) {
             $reconciliationErrors = $this->reconcileLegacyArtifacts();
             if (!empty($reconciliationErrors)) {
                 if (is_file($this->flagFile)) {
                     @unlink($this->flagFile);
                 }
-                return ['executed' => 0, 'errors' => $reconciliationErrors, 'skipped' => true];
+                return ['executed' => 0, 'errors' => $reconciliationErrors, 'skipped' => true, 'converged' => false];
             }
-            return ['executed' => 0, 'errors' => [], 'skipped' => true];
+            return ['executed' => 0, 'errors' => [], 'skipped' => true, 'converged' => false];
         }
 
         $this->createMigrationsTableIfNotExists();
@@ -128,6 +143,37 @@ class MigrationService {
             }
         }
 
+        $converged = false;
+        if ($restoreConvergence && empty($errors)) {
+            try {
+                $convergenceService = new RestoreSchemaConvergenceService($this->db);
+                $migrationCallback = function (): void {
+                    $relFile = 'restore/025_legacy_schema_convergence.sql';
+                    $fullPath = $this->migrationsPath . $relFile;
+                    if (!is_file($fullPath)) {
+                        throw new \RuntimeException("Restore convergence SQL file not found: {$relFile}");
+                    }
+                    $success = $this->executeMigration($relFile);
+                    if (!$success) {
+                        throw new \RuntimeException("Failed to execute restore convergence migration: {$relFile}");
+                    }
+                };
+                $convergenceResult = $convergenceService->converge($migrationCallback);
+                $converged = !empty($convergenceResult['converged']);
+            } catch (\Throwable $e) {
+                $reference = bin2hex(random_bytes(8));
+                Logger::error('Restore schema convergence failed', [
+                    'reference' => $reference,
+                    'exception' => get_class($e),
+                    'message' => $e->getMessage(),
+                ]);
+                $errors[] = "Restore schema convergence failed. Reference: {$reference}";
+                if (is_file($this->flagFile)) {
+                    @unlink($this->flagFile);
+                }
+            }
+        }
+
         if (empty($errors)) {
             $this->updateFlag();
         }
@@ -135,7 +181,8 @@ class MigrationService {
         return [
             'executed' => $executed,
             'errors' => $errors,
-            'skipped' => false
+            'skipped' => false,
+            'converged' => $converged,
         ];
     }
 

@@ -249,7 +249,10 @@ function createPhpProcessError(code, message, details, cause) {
   return error;
 }
 
-function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations = null, force = false, spawnProcess = spawnRuntimeProcess }) {
+function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations = null, force = false, restoreConvergence = false, spawnProcess = spawnRuntimeProcess }) {
+  if (restoreConvergence && Array.isArray(migrations)) {
+    return Promise.reject(new Error('Cannot combine declared migrations with restore convergence.'));
+  }
   const {
     getBackendDir,
     getLogsDir,
@@ -270,6 +273,9 @@ function runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort, migrations =
       const flagPath = path.join(getDataDir(), 'migrations_hash.flag');
       if (fs.existsSync(flagPath)) fs.unlinkSync(flagPath);
     } catch {}
+  }
+  if (restoreConvergence) {
+    migrationArgs.push('--restore-convergence');
   }
   if (Array.isArray(migrations)) {
     if (!migrations.every((migration) => typeof migration === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/.test(migration))) {

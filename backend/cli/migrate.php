@@ -17,6 +17,7 @@ echo "=====================\n";
 require_once __DIR__ . '/../Services/MigrationService.php';
 
 $force = in_array('--force', $argv, true);
+$restoreConvergence = in_array('--restore-convergence', $argv, true);
 $declared = null;
 foreach ($argv as $argument) {
     if (str_starts_with($argument, '--migrations=')) {
@@ -25,8 +26,16 @@ foreach ($argv as $argument) {
         break;
     }
 }
+
+if ($restoreConvergence && $declared !== null) {
+    echo "\nError: Cannot combine --restore-convergence with --migrations.\n";
+    exit(1);
+}
+
 $service = new App\Services\MigrationService();
-$result = $service->runMigrations($declared, $force);
+$result = $restoreConvergence
+    ? $service->runRestoreMigrations($force)
+    : $service->runMigrations($declared, $force);
 
 if (!empty($result['errors'])) {
     echo "\nErrors encountered:\n";
