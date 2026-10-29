@@ -592,8 +592,8 @@ if ($Phase -eq 'prepare') {
     # Verify tracked database migrations, seeders, and pos_schema.sql exist
     $migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/migrations') -Filter '*.sql' -Recurse -File)
     $seederFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/seeders') -Filter '*.sql' -Recurse -File)
-    if ($migrationFiles.Count -ne 66) {
-        throw "database/migrations missing or incomplete in candidate source (expected 66, found $($migrationFiles.Count))"
+    if ($migrationFiles.Count -ne 67) {
+        throw "database/migrations missing or incomplete in candidate source (expected 67, found $($migrationFiles.Count))"
     }
     if ($seederFiles.Count -ne 3) {
         throw "database/seeders missing or incomplete in candidate source (expected 3, found $($seederFiles.Count))"
