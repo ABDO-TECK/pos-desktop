@@ -1038,6 +1038,7 @@ if ($Phase -eq 'prepare') {
     # Write late owned lab marker before contract phase
     $ownedLabMarker = Join-Path $lab 'owned-lab.json'
     $ownedData = [ordered]@{
+        external_setup_mode = $false
         github_run_id = $env:GITHUB_RUN_ID
         github_run_attempt = $env:GITHUB_RUN_ATTEMPT
         run_token = $runToken
