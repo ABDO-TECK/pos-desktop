@@ -144,7 +144,7 @@ export async function precheckRunsAndRefs(opts) {
 
   const [srcMain, srcTag12, updMain] = await Promise.all([
     githubApi(`/repos/${FROZEN_REFS.source_repo}/git/ref/heads/main`, token),
-    getPeeledTagSha(FROZEN_REFS.source_repo, 'v0.0.12', token),
+    githubApi(`/repos/${FROZEN_REFS.source_repo}/git/ref/tags/v0.0.12`, token).then((ref) => ref.object?.sha?.toLowerCase()),
     githubApi(`/repos/${FROZEN_REFS.updates_repo}/git/ref/heads/main`, token)
   ]);
   assert.equal(srcMain.object?.sha?.toLowerCase(), FROZEN_REFS.source_main_sha, 'Frozen source main ref mutated');
