@@ -3389,6 +3389,7 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'candidate-source:',
         'candidate-setup-inventory:',
         'provided-setup-inventory:',
+        'external-mode',
         'candidate-delta-app:',
         'candidate-delta-inventory:',
         'repo-source:',
