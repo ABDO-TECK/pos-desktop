@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish verified Setup (leave false for validation)
+        description: 'Legacy direct publish is disabled (Setup 13 requires promote-setup13.yml)'
         type: boolean
         default: false
 
@@ -40,6 +40,12 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
+      - name: Refuse legacy direct publication input
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        run: |
+          Write-Error "Direct publication from windows-setup.yml is disabled. All Setup 0.0.13 releases must be promoted through promote-setup13.yml after release acceptance."
+          exit 1
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -57,6 +63,9 @@ jobs:
           coverage: none
       - name: Install locked dependencies
         shell: pwsh
+        env:
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
         run: |
           npm ci
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -67,11 +76,13 @@ jobs:
       - name: Validate release readiness and source
         shell: pwsh
         run: |
-          node scripts/verify-setup12-release-readiness.mjs
+          node scripts/verify-setup13-release-readiness.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-setup13-promotion-policy.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/validate-release-source.mjs --mode working-tree --root .
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          if ($env:GITHUB_REF_TYPE -eq 'tag' -or '${{ inputs.publish }}' -eq 'true') {
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
             node scripts/validate-release-source.mjs --mode full --root . --tag '${{ needs.metadata.outputs.tag }}' --release-channel '${{ needs.metadata.outputs.channel }}'
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
@@ -248,27 +259,3 @@ jobs:
             dist-electron/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
-
-  publish:
-    if: inputs.publish
-    needs: [metadata, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-setup
-          path: release-assets
-      - name: Publish verified Setup on its release channel
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
-          REPOSITORY: ${{ github.repository }}
-          SOURCE_SHA: ${{ github.sha }}
-          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
-        run: |
-          set -euo pipefail
-          node scripts/write-setup-release-notes.mjs > release-notes.md
-          node scripts/publish-setup-release.mjs release-assets

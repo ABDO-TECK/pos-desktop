@@ -1,0 +1,202 @@
+name: Setup 13 Release Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      setup_run_id:
+        description: 'Successful windows-setup.yml workflow run ID'
+        required: true
+        type: string
+  push:
+    branches:
+      - fix-setup12-channel-and-restore
+      - main
+    paths:
+      - '.github/workflows/setup13-release-acceptance.yml'
+      - 'scripts/finalize-setup13-release-evidence.mjs'
+      - 'scripts/verify-setup13-evidence-policy.mjs'
+      - 'scripts/prepare-setup12-regressions.ps1'
+      - 'scripts/fixtures/setup12-regressions.php'
+      - 'scripts/verify-setup12-regressions.mjs'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: setup13-release-acceptance-${{ github.ref }}-${{ inputs.setup_run_id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Setup 13 Evidence Policy Suite
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run policy regression suite
+        shell: pwsh
+        run: |
+          node scripts/verify-setup13-evidence-policy.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  acceptance:
+    name: Setup 13 Actual-Byte Acceptance and Carrier Export
+    needs: [policy]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked dependencies
+        shell: pwsh
+        env:
+          COMPOSER_MAX_PARALLEL_HTTP: "1"
+          COMPOSER_MAX_PARALLEL_PROCESSES: "1"
+          COMPOSER_PROCESS_TIMEOUT: "600"
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Cache pinned vendor archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-tools/desktop-runtime-downloads
+            build-tools/qz-tray-2.2.6-x86_64.exe
+          key: windows-portable-${{ hashFiles('scripts/desktop-runtime.json') }}
+
+      - name: Prepare portable desktop runtime
+        shell: pwsh
+        run: |
+          npm run prepare:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run prepare:print-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run verify:desktop-runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Download Windows Setup 13 build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-setup
+          path: ${{ runner.temp }}/setup13-artifact
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare Setup 13 actual-byte regressions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          SETUP_ARTIFACT_DIR: ${{ runner.temp }}/setup13-artifact
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase prepare -SetupRunId "$env:SETUP_RUN_ID" -SetupArtifactDir "$env:SETUP_ARTIFACT_DIR"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Sign Setup 13 bidirectional transition packages
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase sign
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Execute Setup 13 actual-byte acceptance
+        shell: pwsh
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase acceptance
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Stage tested production channel carrier
+        shell: pwsh
+        env:
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          ACCEPTANCE_RUN_ID: ${{ github.run_id }}
+          SETUP_ARTIFACT_DIR: ${{ runner.temp }}/setup13-artifact
+          CARRIER_DIR: ${{ runner.temp }}/setup13-channel-carrier
+        run: |
+          node scripts/finalize-setup13-release-evidence.mjs --stage `
+            --setup-run-id "$env:SETUP_RUN_ID" `
+            --acceptance-run-id "$env:ACCEPTANCE_RUN_ID" `
+            --setup-artifact-dir "$env:SETUP_ARTIFACT_DIR" `
+            --carrier-dir "$env:CARRIER_DIR"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Cleanup regression resources and finalize acceptance
+        if: always()
+        shell: pwsh
+        run: |
+          ./scripts/prepare-setup12-regressions.ps1 -Phase cleanup
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Finalize release evidence and verify provenance
+        shell: pwsh
+        env:
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          ACCEPTANCE_RUN_ID: ${{ github.run_id }}
+          SETUP_ARTIFACT_DIR: ${{ runner.temp }}/setup13-artifact
+          CARRIER_DIR: ${{ runner.temp }}/setup13-channel-carrier
+        run: |
+          node scripts/finalize-setup13-release-evidence.mjs --finalize `
+            --setup-run-id "$env:SETUP_RUN_ID" `
+            --acceptance-run-id "$env:ACCEPTANCE_RUN_ID" `
+            --setup-artifact-dir "$env:SETUP_ARTIFACT_DIR" `
+            --carrier-dir "$env:CARRIER_DIR"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload release acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-release-evidence
+          path: |
+            ${{ runner.temp }}/setup12-regression-evidence/release-provenance.json
+            ${{ runner.temp }}/setup12-regression-evidence/acceptance.json
+            ${{ runner.temp }}/setup12-regression-evidence/candidate-results.json
+            ${{ runner.temp }}/setup12-regression-evidence/carrier-staging-manifest.json
+            ${{ runner.temp }}/setup12-regression-evidence/setup13-binding-receipt.json
+            ${{ runner.temp }}/setup12-regression-evidence/*.png
+            ${{ runner.temp }}/setup12-regression-evidence/diagnostic-*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload production channel carrier
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-channel-carrier
+          path: ${{ runner.temp }}/setup13-channel-carrier
+          retention-days: 14

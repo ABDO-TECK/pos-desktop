@@ -1,20 +1,20 @@
 {
-  "version": "0.0.12",
-  "application_version": "0.0.12",
+  "version": "0.0.13",
+  "application_version": "0.0.13",
   "update_engine_version": "1.0.0",
   "channel": "stable",
   "minimum_supported_version": "0.0.1",
   "release_series": "v0",
-  "release_generation": 3,
-  "released_at": "2026-10-27",
+  "release_generation": 4,
+  "released_at": "2026-10-29",
   "changelog": [
-    "Root release catalog resolution discovers signed bidirectional channel transitions independently of version ordering.",
-    "Strict protected certificate classification distinguishes packaged CA roots from mutable local device certificates in tooling and acceptance.",
-    "Hardened channel transition protocol reconciles bound native handoff across renderer restarts with honest error details.",
-    "Strict bound native-completion reconciliation protects running services and local data."
+    "Full Windows Setup installation required for updated native Electron shell runtime and dependencies.",
+    "Trusted installed Setup and Delta source-inventory variants eliminate packaging discrepancy regressions.",
+    "Protected native SQL restore and recovery preserves session data, database integrity, and rollback on error.",
+    "Exact known migration025-era schema convergence delivers deterministic reconciliation with preflight and rollback."
   ],
   "requires_npm_install": false,
   "update_channel": "stable",
   "release_type": "setup",
-  "installer_version": "0.0.12"
+  "installer_version": "0.0.13"
 }

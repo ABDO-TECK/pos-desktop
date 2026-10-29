@@ -1,6 +1,6 @@
 {
   "name": "pos-desktop",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Desktop point of sale with embedded PHP, MariaDB and receipt printing",
   "author": "ABDO-TECK",
   "main": "electron/main.js",

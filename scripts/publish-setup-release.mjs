@@ -2,18 +2,18 @@
 /**
  * scripts/publish-setup-release.mjs
  *
- * Hardened GitHub Actions publisher for Setup 0.0.12.
+ * Hardened GitHub Actions publisher for Setup 0.0.13.
  *
  * Enforces:
  *   1. Restricted strictly to ephemeral GitHub Actions under ABDO-TECK/pos-desktop.
- *   2. Synchronized metadata guard (version 0.0.12, channel stable, release_type setup).
+ *   2. Synchronized metadata guard (version 0.0.13, channel stable, release_type setup).
  *   3. Expected source commit SHA binding: GITHUB_SHA required; SOURCE_SHA if present must equal GITHUB_SHA.
  *   4. Reparse/symlink rejection on assetsDir, runnerTemp, and download views.
  *   5. Pre-check: remote tag MUST pre-exist on GitHub and peel to exact expected commit (fail 404 and drift).
  *   6. Pre-check: ANY pre-existing release (draft or published) REFUSES to proceed (fail-closed, 0 DELETE paths).
  *   7. Exact 5-asset set verification in release-assets:
- *      - POS-Desktop-Setup-0.0.12.exe
- *      - POS-Desktop-Setup-0.0.12.exe.blockmap
+ *      - POS-Desktop-Setup-0.0.13.exe
+ *      - POS-Desktop-Setup-0.0.13.exe.blockmap
  *      - latest.yml
  *      - deployment-inventory.json
  *      - SHA256SUMS.txt
@@ -83,12 +83,19 @@ assert.ok(token && token.trim().length > 0, 'GH_TOKEN or GITHUB_TOKEN environmen
 
 // 2. Metadata Guards
 const versionMeta = JSON.parse(fs.readFileSync('version.json', 'utf8'));
-assert.equal(versionMeta.version, '0.0.12', 'version.json version must be 0.0.12');
+assert.equal(versionMeta.version, '0.0.13', 'version.json version must be 0.0.13');
+assert.equal(versionMeta.application_version, '0.0.13', 'version.json application_version must be 0.0.13');
+assert.equal(versionMeta.installer_version, '0.0.13', 'version.json installer_version must be 0.0.13');
 assert.equal(versionMeta.channel, 'stable', 'version.json channel must be stable');
 assert.equal(versionMeta.release_type, 'setup', 'version.json release_type must be setup');
 
-const tag = process.env.RELEASE_TAG || 'v0.0.12';
-assert.equal(tag, 'v0.0.12', `RELEASE_TAG must be v0.0.12 (got: ${tag})`);
+if (fs.existsSync('package.json')) {
+  const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  assert.equal(rootPkg.version, '0.0.13', 'package.json version must be 0.0.13');
+}
+
+const tag = process.env.RELEASE_TAG || 'v0.0.13';
+assert.equal(tag, 'v0.0.13', `RELEASE_TAG must be v0.0.13 (got: ${tag})`);
 
 const githubSha = process.env.GITHUB_SHA;
 assert.ok(
@@ -107,19 +114,19 @@ if (sourceSha) {
 const expectedSha = githubSha;
 
 const isPrerelease = process.env.PRERELEASE === 'true';
-assert.equal(isPrerelease, false, 'Setup 0.0.12 is a stable release; PRERELEASE must be false');
+assert.equal(isPrerelease, false, 'Setup 0.0.13 is a stable release; PRERELEASE must be false');
 
 const assetsDir = path.resolve(process.argv[2] || 'release-assets');
 assert.ok(fs.existsSync(assetsDir), `Assets directory missing: ${assetsDir}`);
 assertNoReparse(assetsDir);
 
 // 3. Exact 5-Asset Set & Case-Collision Checks
-console.log('--- Hardened Setup Release Publisher for 0.0.12 (Stable) ---');
+console.log('--- Hardened Setup Release Publisher for 0.0.13 (Stable) ---');
 console.log(`[1/7] Verifying exact 5-asset artifact set in ${assetsDir}...`);
 
 const EXPECTED_PAYLOAD_ASSETS = [
-  'POS-Desktop-Setup-0.0.12.exe',
-  'POS-Desktop-Setup-0.0.12.exe.blockmap',
+  'POS-Desktop-Setup-0.0.13.exe',
+  'POS-Desktop-Setup-0.0.13.exe.blockmap',
   'latest.yml',
   'deployment-inventory.json'
 ];
@@ -192,7 +199,7 @@ const apiBase = 'https://api.github.com';
 const defaultHeaders = {
   'Authorization': `Bearer ${token}`,
   'Accept': 'application/vnd.github+json',
-  'User-Agent': 'pos-desktop-publisher-setup12',
+  'User-Agent': 'pos-desktop-publisher-setup13',
   'X-GitHub-Api-Version': '2022-11-28'
 };
 
@@ -290,7 +297,7 @@ for (const file of EXACT_5_ASSETS) {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/octet-stream',
       'Content-Length': fileSize.toString(),
-      'User-Agent': 'pos-desktop-publisher-setup12'
+      'User-Agent': 'pos-desktop-publisher-setup13'
     },
     body: fileBytes
   });
@@ -324,7 +331,7 @@ for (const remoteAsset of assetsListRes.data) {
     headers: {
       'Authorization': `Bearer ${token}`,
       'Accept': 'application/octet-stream',
-      'User-Agent': 'pos-desktop-publisher-setup12'
+      'User-Agent': 'pos-desktop-publisher-setup13'
     }
   });
   assert.ok(downloadRes.ok, `Failed downloading draft asset ${remoteAsset.name}: HTTP ${downloadRes.status}`);
@@ -387,7 +394,7 @@ assert.equal(patchRes.data.prerelease, false, 'Published release prerelease must
 
 // Step 13: Final Public Download Verification into unique owned mkdtemp view in RUNNER_TEMP
 console.log('      Verifying public download URLs for all 5 assets into fresh RUNNER_TEMP view...');
-const publicViewDir = fs.mkdtempSync(path.join(runnerTemp, 'setup12-public-view-'));
+const publicViewDir = fs.mkdtempSync(path.join(runnerTemp, 'setup13-public-view-'));
 assertNoReparse(publicViewDir);
 
 const publicCheckRes = await apiRequest(`/repos/${repository}/releases/tags/${tag}`);
@@ -414,7 +421,7 @@ for (const publicAsset of publicAssets) {
   assert.ok(publicAsset.browser_download_url, `Asset missing browser_download_url: ${publicAsset.name}`);
 
   const publicDownRes = await fetch(publicAsset.browser_download_url, {
-    headers: { 'User-Agent': 'pos-desktop-publisher-setup12' }
+    headers: { 'User-Agent': 'pos-desktop-publisher-setup13' }
   });
   assert.ok(publicDownRes.ok, `Public download failed for ${publicAsset.name}: HTTP ${publicDownRes.status}`);
   const publicBuf = Buffer.from(await publicDownRes.arrayBuffer());
@@ -429,6 +436,6 @@ for (const publicAsset of publicAssets) {
 fs.rmSync(publicViewDir, { recursive: true, force: true });
 
 console.log('\n===============================================================');
-console.log(` SETUP 0.0.12 PUBLISHED AND CRYPTOGRAPHICALLY VERIFIED!`);
+console.log(` SETUP 0.0.13 PUBLISHED AND CRYPTOGRAPHICALLY VERIFIED!`);
 console.log(` Release URL: ${publicCheckRes.data.html_url}`);
 console.log('===============================================================');

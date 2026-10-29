@@ -112,14 +112,16 @@ assert.ok(
 );
 
 const repoRoot = process.cwd();
-const setup12Version = '0.0.12';
-const installerPath = path.join(repoRoot, 'dist-electron', `POS-Desktop-Setup-${setup12Version}.exe`);
-assert.ok(fs.existsSync(installerPath), `Setup 12 installer missing at ${installerPath}`);
+const rootVersionMeta = JSON.parse(fs.readFileSync(path.join(repoRoot, 'version.json'), 'utf8'));
+const setupBaselineVersion = rootVersionMeta.installer_version || rootVersionMeta.version || '0.0.13';
+const setup12Version = setupBaselineVersion;
+const installerPath = path.join(repoRoot, 'dist-electron', `POS-Desktop-Setup-${setupBaselineVersion}.exe`);
+assert.ok(fs.existsSync(installerPath), `Setup ${setupBaselineVersion} installer missing at ${installerPath}`);
 
 const inventoryPath = path.join(repoRoot, 'dist-electron/deployment-inventory.json');
-assert.ok(fs.existsSync(inventoryPath), `Setup 12 deployment inventory missing: ${inventoryPath}`);
+assert.ok(fs.existsSync(inventoryPath), `Setup ${setupBaselineVersion} deployment inventory missing: ${inventoryPath}`);
 const setup12Inventory = JSON.parse(fs.readFileSync(inventoryPath, 'utf8'));
-assert.equal(setup12Inventory.version, setup12Version, 'Setup 12 inventory version must be 0.0.12');
+assert.equal(setup12Inventory.version, setupBaselineVersion, `Setup inventory version must be ${setupBaselineVersion}`);
 
 // Canonical 8 pre-existing POS data targets
 const posTargets = [
@@ -134,7 +136,7 @@ const posTargets = [
 ].map(p => path.resolve(p));
 
 // 2. Strict Pre-existing Data & Reparse Point Assertions
-console.log('--- Setup 12 Future Delta Upgrade (0.0.12 -> 0.0.14) Smoke Test ---');
+console.log(`--- Setup ${setupBaselineVersion} Future Delta Upgrade (${setupBaselineVersion} -> ${targetVersion}) Smoke Test ---`);
 console.log('[1/7] Asserting canonical POS data targets are clean before install...');
 
 for (const target of posTargets) {
@@ -712,7 +714,7 @@ try {
   assert.ok(fs.existsSync(installedExe), `Installed executable missing at ${installedExe}`);
   assert.ok(fs.existsSync(installedVersionJson), `Installed version.json missing at ${installedVersionJson}`);
   const initialInstalledMeta = JSON.parse(fs.readFileSync(installedVersionJson, 'utf8'));
-  assert.equal(initialInstalledMeta.version, setup12Version, 'Initial installed version must be 0.0.12');
+  assert.equal(initialInstalledMeta.version, setupBaselineVersion, `Initial installed version must be ${setupBaselineVersion}`);
 
   const initialExeHash = sha256File(installedExe);
   const initialAsarHash = sha256File(path.join(application, 'resources/app.asar'));
@@ -911,18 +913,18 @@ try {
   safeDeleteInFreshSource('backend/storage');
   safeDeleteInFreshSource('frontend/dist');
 
-  // Verify static package and package-lock versions retain 0.0.12 (never mutate to 0.0.14)
+  // Verify static package and package-lock versions retain setupBaselineVersion (never mutate to 0.0.14)
   const rootPkg = JSON.parse(fs.readFileSync(path.join(freshSourceDir, 'package.json'), 'utf8'));
-  assert.equal(rootPkg.version, setup12Version, 'Root package.json version in fixture source must retain 0.0.12');
+  assert.equal(rootPkg.version, setupBaselineVersion, `Root package.json version in fixture source must retain ${setupBaselineVersion}`);
   const fPkg = JSON.parse(fs.readFileSync(path.join(freshSourceDir, 'frontend/package.json'), 'utf8'));
-  assert.equal(fPkg.version, setup12Version, 'frontend/package.json version in fixture source must retain 0.0.12');
+  assert.equal(fPkg.version, setupBaselineVersion, `frontend/package.json version in fixture source must retain ${setupBaselineVersion}`);
   if (fs.existsSync(path.join(freshSourceDir, 'package-lock.json'))) {
     const rootPkgLock = JSON.parse(fs.readFileSync(path.join(freshSourceDir, 'package-lock.json'), 'utf8'));
-    assert.equal(rootPkgLock.version, setup12Version, 'package-lock.json version in fixture source must retain 0.0.12');
+    assert.equal(rootPkgLock.version, setupBaselineVersion, `package-lock.json version in fixture source must retain ${setupBaselineVersion}`);
   }
   if (fs.existsSync(path.join(freshSourceDir, 'frontend/package-lock.json'))) {
     const fPkgLock = JSON.parse(fs.readFileSync(path.join(freshSourceDir, 'frontend/package-lock.json'), 'utf8'));
-    assert.equal(fPkgLock.version, setup12Version, 'frontend/package-lock.json version in fixture source must retain 0.0.12');
+    assert.equal(fPkgLock.version, setupBaselineVersion, `frontend/package-lock.json version in fixture source must retain ${setupBaselineVersion}`);
   }
 
   // Root version.json 14 feeds build app version metadata
@@ -933,15 +935,15 @@ try {
     channel: 'stable',
     minimum_supported_version: '0.0.1',
     release_series: 'v0',
-    release_generation: 3,
-    released_at: '2026-10-28',
+    release_generation: 5,
+    released_at: '2026-10-30',
     changelog: [
-      'Automated future delta smoke test validating Setup 12 native runtime handoff',
+      `Automated future delta smoke test validating Setup ${setupBaselineVersion} native runtime handoff`,
     ],
     requires_npm_install: false,
     update_channel: 'stable',
     release_type: 'delta',
-    installer_version: setup12Version
+    installer_version: setupBaselineVersion
   }, null, 2) + '\n';
   fs.writeFileSync(path.join(freshSourceDir, 'version.json'), targetVersionJsonContent, 'utf8');
 
@@ -1238,7 +1240,7 @@ final class DeltaFixtureMarker0014
   scanDist(v14DistDir, 'frontend/dist');
 
   // Create delta zip using PHP ZipArchive
-  const deltaZipPath = path.join(fixtureAssetsDir, `delta-0.0.12-to-${targetVersion}.zip`);
+  const deltaZipPath = path.join(fixtureAssetsDir, `delta-${setupBaselineVersion}-to-${targetVersion}.zip`);
   const genericDeltaZipPath = path.join(fixtureAssetsDir, 'delta.zip');
 
   const zipScriptEntries = filesToPackage.map(
@@ -1299,9 +1301,9 @@ final class DeltaFixtureMarker0014
     baseline_files: baselineFilesMap,
     update_engine_version: '1.0.0',
     channel: 'stable',
-    released_at: '2026-10-28',
+    released_at: '2026-10-30',
     changelog: [
-      'Automated future delta smoke test validating Setup 12 native runtime handoff',
+      `Automated future delta smoke test validating Setup ${setupBaselineVersion} native runtime handoff`,
     ],
     files: manifestFiles,
     deleted_files: deletedFiles,
@@ -1410,15 +1412,15 @@ final class DeltaFixtureMarker0014
   };
 
   const setup12Release = {
-    tag_name: 'v0.0.12',
+    tag_name: `v${setupBaselineVersion}`,
     draft: false,
     prerelease: false,
-    name: 'POS Desktop Setup v0.0.12',
-    published_at: '2026-10-27T00:00:00Z',
+    name: `POS Desktop Setup v${setupBaselineVersion}`,
+    published_at: '2026-10-29T00:00:00Z',
     body: 'Published setup release',
     assets: [{
       name: 'deployment-inventory.json',
-      browser_download_url: 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json',
+      browser_download_url: `https://github.com/ABDO-TECK/pos-desktop/releases/download/v${setupBaselineVersion}/deployment-inventory.json`,
       size: fs.statSync(inventoryPath).size
     }]
   };
@@ -1435,10 +1437,10 @@ final class DeltaFixtureMarker0014
       'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases?per_page=100&page=1': [v14Release],
       'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/tags/v0.0.14': v14Release,
       'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/latest': v14Release,
-      'https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/tags/v0.0.12': notFoundSentinel,
+      [`https://api.github.com/repos/ABDO-TECK/pos-desktop-updates/releases/tags/v${setupBaselineVersion}`]: notFoundSentinel,
 
       'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases?per_page=100&page=1': [setup12Release],
-      'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/tags/v0.0.12': setup12Release,
+      [`https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/tags/v${setupBaselineVersion}`]: setup12Release,
       'https://api.github.com/repos/ABDO-TECK/pos-desktop/releases/tags/v0.0.14': notFoundSentinel
     },
     assets: {
@@ -1448,7 +1450,7 @@ final class DeltaFixtureMarker0014
       'https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.14/manifest.json': genericManifestPath,
       'https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.14/manifest.sig': sigPath,
       'https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.14/delta.zip': genericDeltaZipPath,
-      'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.12/deployment-inventory.json': inventoryPath
+      [`https://github.com/ABDO-TECK/pos-desktop/releases/download/v${setupBaselineVersion}/deployment-inventory.json`]: inventoryPath
     },
     trace: path.join(evidence, 'transport-trace.jsonl')
   };
@@ -1608,7 +1610,7 @@ final class DeltaFixtureMarker0014
       path.resolve(stagingDir).toLowerCase(),
       'Plan staging_dir must match expected staging dir'
     );
-    assert.equal(handoffPlanSnapshot.manifest?.from_version, setup12Version, 'Plan from_version must be 0.0.12');
+    assert.equal(handoffPlanSnapshot.manifest?.from_version, setup12Version, `Plan from_version must be ${setupBaselineVersion}`);
     assert.equal(handoffPlanSnapshot.version, targetVersion, 'Plan version must be 0.0.14');
     assert.equal(handoffPlanSnapshot.manifest?.version, targetVersion, 'Plan manifest version must be 0.0.14');
 
@@ -1740,12 +1742,12 @@ final class DeltaFixtureMarker0014
   assert.equal(handoffPlanSnapshot.version, targetVersion, 'Plan target version mismatch');
   assert.equal(handoffPlanSnapshot.manifest?.version, targetVersion, 'Plan manifest version mismatch');
 
-  // C. Retained native shell 0.0.12
+  // C. Retained native shell
   const postExeHash = sha256File(installedExe);
   const postAsarHash = sha256File(path.join(application, 'resources/app.asar'));
   assert.equal(postExeHash, initialExeHash, 'POS Desktop.exe hash must not change during delta update');
   assert.equal(postAsarHash, initialAsarHash, 'resources/app.asar hash must not change during delta update');
-  console.log('      PASS: Native shell 0.0.12 strictly retained (EXE and ASAR hashes unchanged).');
+  console.log(`      PASS: Native shell ${setupBaselineVersion} strictly retained (EXE and ASAR hashes unchanged).`);
 
   // D. Genuine updated backend.phar
   const postPharHash = sha256File(path.join(unpackedRoot, 'backend/backend.phar'));

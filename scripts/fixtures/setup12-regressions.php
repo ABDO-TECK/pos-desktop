@@ -571,6 +571,138 @@ final class Setup12RegressionsHelper
         ];
     }
 
+    public function prepareExternalVariants(
+        string $candidateUnpackedApp,
+        string $repoSourceRoot,
+        string $providedSetupInventory,
+        string $outputSetupInventory,
+        string $deltaAppDir,
+        string $outputDeltaInventory
+    ): array {
+        $candidateUnpackedApp = $this->assertSafeRunnerTempPath($candidateUnpackedApp, true);
+        $providedSetupInventory = $this->assertSafeRunnerTempPath($providedSetupInventory, true);
+        $outputSetupInventory = $this->assertSafeRunnerTempPath($outputSetupInventory, false);
+        $deltaAppDir = $this->assertSafeRunnerTempPath($deltaAppDir, false);
+        $outputDeltaInventory = $this->assertSafeRunnerTempPath($outputDeltaInventory, false);
+
+        $repoSourceRoot = realpath($repoSourceRoot);
+        if ($repoSourceRoot === false || !is_dir($repoSourceRoot)) {
+            throw new RuntimeException("Invalid repo source root: {$repoSourceRoot}");
+        }
+        $repoSourceNorm = rtrim(str_replace('\\', '/', $repoSourceRoot), '/');
+
+        // 1. Verify provided Setup 13 inventory
+        $setupInvRaw = (string)file_get_contents($providedSetupInventory);
+        $setup13Inventory = json_decode($setupInvRaw, true, 512, JSON_THROW_ON_ERROR);
+        if (($setup13Inventory['version'] ?? '') !== '0.0.13') {
+            throw new RuntimeException("Provided Setup inventory version must be 0.0.13, got: " . ($setup13Inventory['version'] ?? 'null'));
+        }
+        if (($setup13Inventory['format'] ?? 0) !== 1) {
+            throw new RuntimeException("Provided Setup inventory format must be 1, got: " . ($setup13Inventory['format'] ?? 'null'));
+        }
+
+        // Verify shell fingerprint matches repo source root
+        $expectedShellHash = desktopShellFingerprint($repoSourceNorm);
+        if (($setup13Inventory['shell_sha256'] ?? '') !== $expectedShellHash) {
+            throw new RuntimeException("Provided Setup inventory shell_sha256 mismatch against repo fingerprint ({$setup13Inventory['shell_sha256']} vs {$expectedShellHash})");
+        }
+
+        // Validate canonical relative paths and lack of backslashes/drive/traversal/casefold in inventory files
+        $files = $setup13Inventory['files'] ?? [];
+        if (empty($files) || !is_array($files)) {
+            throw new RuntimeException('Provided Setup inventory files list is empty or invalid.');
+        }
+
+        $lowerKeys = [];
+        foreach ($files as $relPath => $expectedMeta) {
+            if ($relPath === '' || str_starts_with($relPath, '/') || str_starts_with($relPath, '\\')) {
+                throw new RuntimeException("Invalid absolute or leading slash path in inventory: {$relPath}");
+            }
+            if (str_contains($relPath, '\\')) {
+                throw new RuntimeException("Inventory path contains backslash: {$relPath}");
+            }
+            if (preg_match('/^[a-zA-Z]:/', $relPath)) {
+                throw new RuntimeException("Inventory path contains drive letter: {$relPath}");
+            }
+            $segments = explode('/', $relPath);
+            foreach ($segments as $seg) {
+                if ($seg === '' || $seg === '.' || $seg === '..') {
+                    throw new RuntimeException("Inventory path contains non-canonical dot or empty segment: {$relPath}");
+                }
+            }
+            $lower = strtolower($relPath);
+            if (isset($lowerKeys[$lower])) {
+                throw new RuntimeException("Casefold duplicate path in inventory: {$relPath}");
+            }
+            $lowerKeys[$lower] = true;
+        }
+
+        // Validate unpacked version.json declares 0.0.13 application/installer and stable/setup
+        $unpackedVerPath = $candidateUnpackedApp . '/version.json';
+        if (!is_file($unpackedVerPath) || is_link($unpackedVerPath)) {
+            throw new RuntimeException("Missing or link version.json in unpacked candidate app");
+        }
+        $unpackedVer = json_decode((string)file_get_contents($unpackedVerPath), true, 32, JSON_THROW_ON_ERROR);
+        if (($unpackedVer['version'] ?? '') !== '0.0.13') {
+            throw new RuntimeException("Unpacked version.json 'version' must be 0.0.13, got: " . ($unpackedVer['version'] ?? 'null'));
+        }
+        if (($unpackedVer['application_version'] ?? '') !== '0.0.13') {
+            throw new RuntimeException("Unpacked version.json 'application_version' must be 0.0.13, got: " . ($unpackedVer['application_version'] ?? 'null'));
+        }
+        if (($unpackedVer['installer_version'] ?? '') !== '0.0.13') {
+            throw new RuntimeException("Unpacked version.json 'installer_version' must be 0.0.13, got: " . ($unpackedVer['installer_version'] ?? 'null'));
+        }
+        if (($unpackedVer['channel'] ?? '') !== 'stable') {
+            throw new RuntimeException("Unpacked version.json 'channel' must be stable, got: " . ($unpackedVer['channel'] ?? 'null'));
+        }
+        if (($unpackedVer['release_type'] ?? '') !== 'setup') {
+            throw new RuntimeException("Unpacked version.json 'release_type' must be setup, got: " . ($unpackedVer['release_type'] ?? 'null'));
+        }
+
+        // Use existing global deploymentFiles($candidateUnpackedApp) full actual managed map and exact equality .files (not 4 subset)
+        $actualManagedFiles = deploymentFiles($candidateUnpackedApp);
+        ksort($files, SORT_STRING);
+        ksort($actualManagedFiles, SORT_STRING);
+        if ($files !== $actualManagedFiles) {
+            throw new RuntimeException("Provided setup inventory files does not exactly match actual managed files from unpacked app.");
+        }
+
+        // Write output setup inventory directly preserving exact raw bytes
+        file_put_contents($outputSetupInventory, $setupInvRaw);
+
+        // 2. Prepare Delta 13 compatibility slot app files (identical copy of canonical Setup 13)
+        if (!is_dir($deltaAppDir)) {
+            mkdir($deltaAppDir, 0755, true);
+        }
+        $realDeltaApp = realpath($deltaAppDir);
+        if ($realDeltaApp === false) {
+            throw new RuntimeException("Cannot resolve delta app directory: {$deltaAppDir}");
+        }
+        $deltaAppNorm = rtrim(str_replace('\\', '/', $realDeltaApp), '/');
+
+        $this->copyDirectoryRecursive($candidateUnpackedApp, $deltaAppNorm);
+
+        // Preserve identical raw bytes and version.json in Delta slot (no forced release_type mutation)
+        file_put_contents($outputDeltaInventory, $setupInvRaw);
+
+        $setupHash = hash_file('sha256', $outputSetupInventory);
+        $deltaHash = hash_file('sha256', $outputDeltaInventory);
+        if ($setupHash !== $deltaHash) {
+            throw new RuntimeException('Candidate Setup 13 and Delta slot inventories must have identical SHA256 hashes in external mode.');
+        }
+
+        return [
+            'ok' => true,
+            'version' => '0.0.13',
+            'setup_inventory_sha256' => $setupHash,
+            'delta_inventory_sha256' => $deltaHash,
+            'setup_inventory' => $outputSetupInventory,
+            'delta_inventory' => $outputDeltaInventory,
+            'shell_source' => $repoSourceNorm,
+            'external_mode' => true,
+        ];
+    }
+
     public function captureContract(string $configDir, string $outputPath): array
     {
         $db = $this->connectDatabase($configDir);
@@ -604,7 +736,8 @@ final class Setup12RegressionsHelper
         string $beta12Inventory,
         string $contractPath,
         string $shellRoot,
-        string $privateKey
+        string $privateKey,
+        bool $externalMode = false
     ): array {
         $assetsDir = $this->assertSafeRunnerTempPath($assetsDir, false);
         if (!is_dir($assetsDir)) {
@@ -634,7 +767,93 @@ final class Setup12RegressionsHelper
         }
 
         $builder = new ChannelTransitionBuilder();
+        $pubKeyPath = dirname(__DIR__, 2) . '/backend/certs/update_public_key.pem';
+        $sigService = new ManifestSignatureService();
 
+        $isExternal = $externalMode;
+
+        if ($isExternal) {
+            // In external mode: pos-desktop contains ONLY setup assets (no channel index).
+            // Clean up any stray index in pos-desktop:
+            if (is_file($posDesktopDir . '/channel-transitions.json')) {
+                unlink($posDesktopDir . '/channel-transitions.json');
+            }
+            if (is_file($posDesktopDir . '/channel-transitions.sig')) {
+                unlink($posDesktopDir . '/channel-transitions.sig');
+            }
+
+            // Export exact 4 canonical pairs into pos-desktop-updates:
+            // 1. Candidate Setup 13 -> Public Beta 0.0.12-beta.1 (delta + full)
+            $res1 = $builder->build([
+                'carrier-tag' => 'v0.0.13',
+                'target-repo' => 'pos-desktop-updates',
+                'target-tag' => 'v0.0.12-beta.1',
+                'source-root' => $candidateApp,
+                'source-inventory' => $candidateSetupInventory,
+                'target-root' => $beta12App,
+                'target-inventory' => $beta12Inventory,
+                'shell-root' => $shellRoot,
+                'contract' => $contractPath,
+                'output' => $posDesktopUpdatesDir,
+            ], $privateKey);
+
+            if (!$res1['ok']) {
+                throw new RuntimeException("Failed to build transition Setup 13 -> beta 12.1 in pos-desktop-updates: {$res1['message']}");
+            }
+
+            // 2. Public Beta 0.0.12-beta.1 -> Candidate Setup 13 (delta + full, appended)
+            $res2 = $builder->build([
+                'carrier-tag' => 'v0.0.13',
+                'target-repo' => 'pos-desktop-updates',
+                'target-tag' => 'v0.0.13',
+                'source-root' => $beta12App,
+                'source-inventory' => $beta12Inventory,
+                'target-root' => $candidateApp,
+                'target-inventory' => $candidateSetupInventory,
+                'shell-root' => $shellRoot,
+                'contract' => $contractPath,
+                'output' => $posDesktopUpdatesDir,
+                'append' => '1',
+            ], $privateKey);
+
+            if (!$res2['ok']) {
+                throw new RuntimeException("Failed to build transition beta 12.1 -> Setup 13 in pos-desktop-updates: {$res2['message']}");
+            }
+
+            // Assert pos-desktop does not contain channel-transitions
+            if (is_file($posDesktopDir . '/channel-transitions.json') || is_file($posDesktopDir . '/channel-transitions.sig')) {
+                throw new RuntimeException("pos-desktop must not contain channel-transitions index or signature in external mode.");
+            }
+
+            // Assert exact 4 entries in pos-desktop-updates transition index
+            $updatesIndexPath = $posDesktopUpdatesDir . '/channel-transitions.json';
+            $updatesSigPath = $posDesktopUpdatesDir . '/channel-transitions.sig';
+            if (!is_file($updatesIndexPath) || !is_file($updatesSigPath)) {
+                throw new RuntimeException("Channel transitions index or signature missing in {$posDesktopUpdatesDir}");
+            }
+            $updatesIndexRaw = (string)file_get_contents($updatesIndexPath);
+            $updatesSigRaw = (string)file_get_contents($updatesSigPath);
+            if (!$sigService->verifySignature($updatesIndexRaw, $updatesSigRaw, $pubKeyPath)) {
+                throw new RuntimeException('pos-desktop-updates channel-transitions index signature failed public key verification.');
+            }
+            $updatesIndexData = json_decode($updatesIndexRaw, true, 64, JSON_THROW_ON_ERROR);
+            $updatesCount = count($updatesIndexData['entries'] ?? []);
+            if ($updatesCount !== 4) {
+                throw new RuntimeException("Expected exactly 4 entries in pos-desktop-updates transition index, got {$updatesCount}");
+            }
+
+            return [
+                'ok' => true,
+                'carrier_tag' => 'v0.0.13',
+                'pos_desktop_entries_count' => 0,
+                'pos_desktop_updates_entries_count' => 4,
+                'pos_desktop_dir' => $posDesktopDir,
+                'pos_desktop_updates_dir' => $posDesktopUpdatesDir,
+                'external_mode' => true,
+            ];
+        }
+
+        // Private mode: Pair 1 in pos-desktop (2 entries), Pair 2 + 3 in pos-desktop-updates (4 entries)
         // Pair 1 (pos-desktop): Candidate Setup 13 -> Public Beta 0.0.12-beta.1 (delta + full)
         $res1 = $builder->build([
             'carrier-tag' => 'v0.0.13',
@@ -689,10 +908,6 @@ final class Setup12RegressionsHelper
         if (!$res3['ok']) {
             throw new RuntimeException("Failed to build transition beta 12.1 -> Delta 13 in pos-desktop-updates: {$res3['message']}");
         }
-
-        // Verify index files exist and verify against public key
-        $pubKeyPath = dirname(__DIR__, 2) . '/backend/certs/update_public_key.pem';
-        $sigService = new ManifestSignatureService();
 
         // 1. pos-desktop index verification (must have exactly 2 entries)
         $desktopIndexPath = $posDesktopDir . '/channel-transitions.json';
@@ -824,40 +1039,85 @@ final class Setup12RegressionsHelper
             $posDesktopDir = is_dir($assetsDir . '/pos-desktop') ? ($assetsDir . '/pos-desktop') : $assetsDir;
             $posDesktopUpdatesDir = is_dir($assetsDir . '/pos-desktop-updates') ? ($assetsDir . '/pos-desktop-updates') : $assetsDir;
 
-            // Assert exact 2 entries in pos-desktop transition index
-            $setup13IndexPath = $posDesktopDir . '/channel-transitions.json';
-            if (is_file($setup13IndexPath)) {
-                $idxData = json_decode((string)file_get_contents($setup13IndexPath), true, 64, JSON_THROW_ON_ERROR);
-                $entryCount = count($idxData['entries'] ?? []);
-                if ($entryCount !== 2) {
-                    throw new RuntimeException("Assertion failed: pos-desktop channel-transitions.json must have exactly 2 entries, found {$entryCount}");
-                }
-            }
+            $ownedLabMarker = $labDir . '/owned-lab.json';
+            $ownedData = is_file($ownedLabMarker) ? json_decode((string)file_get_contents($ownedLabMarker), true, 64, JSON_THROW_ON_ERROR) : [];
+            $isExternal = !empty($ownedData['external_setup_mode']);
 
-            // Assert exact 4 entries in pos-desktop-updates transition index
+            $setup13IndexPath = $posDesktopDir . '/channel-transitions.json';
             $updatesIndexPath = $posDesktopUpdatesDir . '/channel-transitions.json';
-            if (is_file($updatesIndexPath)) {
+
+            if ($isExternal) {
+                // In external mode, pos-desktop must NOT contain channel index
+                if (is_file($setup13IndexPath)) {
+                    throw new RuntimeException("Assertion failed: pos-desktop channel-transitions.json must not exist in external mode");
+                }
+
+                // Assert exact 4 entries in pos-desktop-updates transition index
+                if (!is_file($updatesIndexPath)) {
+                    throw new RuntimeException("Assertion failed: pos-desktop-updates channel-transitions.json missing in external mode");
+                }
                 $idxData = json_decode((string)file_get_contents($updatesIndexPath), true, 64, JSON_THROW_ON_ERROR);
                 $entryCount = count($idxData['entries'] ?? []);
                 if ($entryCount !== 4) {
                     throw new RuntimeException("Assertion failed: pos-desktop-updates channel-transitions.json must have exactly 4 entries, found {$entryCount}");
                 }
-            }
 
-            // Setup 13 release in pos-desktop (carrier release with 2 transition entries: Setup 13 -> Beta 12.1 delta + full)
-            $setup13Assets = [
-                'deployment-inventory.json' => $candidateSetupInv,
-            ];
-            if (is_file($setup13IndexPath)) {
-                $setup13Assets['channel-transitions.json'] = $setup13IndexPath;
-            }
-            if (is_file($posDesktopDir . '/channel-transitions.sig')) {
-                $setup13Assets['channel-transitions.sig'] = $posDesktopDir . '/channel-transitions.sig';
-            }
-            if (is_dir($posDesktopDir)) {
-                foreach (scandir($posDesktopDir) as $file) {
-                    if (str_starts_with($file, 'transition-') && (str_ends_with($file, '.zip') || str_ends_with($file, '.json') || str_ends_with($file, '.sig'))) {
-                        $setup13Assets[$file] = $posDesktopDir . '/' . $file;
+                // Setup 13 release in pos-desktop contains ONLY setup assets (no channel index)
+                $setupArtifactDir = $ownedData['setup_artifact_dir'] ?? ($labDir . '/assets/pos-desktop');
+                $setup13Assets = [];
+                $expected5 = [
+                    'POS-Desktop-Setup-0.0.13.exe',
+                    'POS-Desktop-Setup-0.0.13.exe.blockmap',
+                    'latest.yml',
+                    'deployment-inventory.json',
+                    'SHA256SUMS.txt',
+                ];
+                foreach ($expected5 as $af) {
+                    $p = $setupArtifactDir . '/' . $af;
+                    if (!is_file($p)) {
+                        $p = $labDir . '/' . $af;
+                    }
+                    if ($af === 'deployment-inventory.json' && !is_file($p)) {
+                        $p = $candidateSetupInv;
+                    }
+                    if (is_file($p)) {
+                        $setup13Assets[$af] = $p;
+                    }
+                }
+            } else {
+                // Private mode: Assert exact 2 entries in pos-desktop transition index
+                if (is_file($setup13IndexPath)) {
+                    $idxData = json_decode((string)file_get_contents($setup13IndexPath), true, 64, JSON_THROW_ON_ERROR);
+                    $entryCount = count($idxData['entries'] ?? []);
+                    if ($entryCount !== 2) {
+                        throw new RuntimeException("Assertion failed: pos-desktop channel-transitions.json must have exactly 2 entries, found {$entryCount}");
+                    }
+                }
+
+                // Assert exact 4 entries in pos-desktop-updates transition index
+                if (is_file($updatesIndexPath)) {
+                    $idxData = json_decode((string)file_get_contents($updatesIndexPath), true, 64, JSON_THROW_ON_ERROR);
+                    $entryCount = count($idxData['entries'] ?? []);
+                    if ($entryCount !== 4) {
+                        throw new RuntimeException("Assertion failed: pos-desktop-updates channel-transitions.json must have exactly 4 entries, found {$entryCount}");
+                    }
+                }
+
+                // Setup 13 release in pos-desktop (carrier release with 2 transition entries: Setup 13 -> Beta 12.1 delta + full)
+                $setup13Assets = [
+                    'deployment-inventory.json' => $candidateSetupInv,
+                ];
+                if (is_file($setup13IndexPath)) {
+                    $setup13Assets['channel-transitions.json'] = $setup13IndexPath;
+                }
+                if (is_file($posDesktopDir . '/channel-transitions.sig')) {
+                    $setup13Assets['channel-transitions.sig'] = $posDesktopDir . '/channel-transitions.sig';
+                }
+                if (is_dir($posDesktopDir)) {
+                    foreach (scandir($posDesktopDir) as $file) {
+                        if (str_starts_with($file, 'transition-') && (str_ends_with($file, '.zip') || str_ends_with($file, '.json') || str_ends_with($file, '.sig'))) {
+                            $setup13Assets[$file] = $posDesktopDir . '/' . $file;
+                        }
                     }
                 }
             }
@@ -3128,6 +3388,7 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
         'candidate-app:',
         'candidate-source:',
         'candidate-setup-inventory:',
+        'provided-setup-inventory:',
         'candidate-delta-app:',
         'candidate-delta-inventory:',
         'repo-source:',
@@ -3197,6 +3458,18 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;
 
+            case 'prepare-external-variants':
+                $result = $helper->prepareExternalVariants(
+                    (string)($options['candidate-unpacked'] ?? ''),
+                    (string)($options['repo-source'] ?? $options['repo-root'] ?? ''),
+                    (string)($options['provided-setup-inventory'] ?? ''),
+                    (string)($options['candidate-setup-inventory'] ?? ''),
+                    (string)($options['candidate-delta-app'] ?? ''),
+                    (string)($options['candidate-delta-inventory'] ?? '')
+                );
+                echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+                break;
+
             case 'capture-contract':
                 $result = $helper->captureContract(
                     (string)($options['config-dir'] ?? ''),
@@ -3217,7 +3490,8 @@ if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'] ?? '')) {
                     (string)($options['beta12-inventory'] ?? ''),
                     (string)($options['contract'] ?? ''),
                     (string)($options['shell-root'] ?? ''),
-                    $key
+                    $key,
+                    isset($options['external-mode'])
                 );
                 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
                 break;

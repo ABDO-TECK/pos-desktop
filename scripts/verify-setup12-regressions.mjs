@@ -142,7 +142,24 @@ function hasher(filePath) {
 }
 
 function findCarrierDescriptor(labDir, { fromVersion, targetVersion, channel, sourceInventorySha256, targetInventorySha256 }) {
-  const searchDirs = [
+  let isExternal = false;
+  try {
+    if (typeof owned !== 'undefined' && owned?.external_setup_mode) {
+      isExternal = true;
+    } else {
+      const ownedMarker = path.join(labDir, 'owned-lab.json');
+      if (fs.existsSync(ownedMarker)) {
+        const marker = JSON.parse(fs.readFileSync(ownedMarker, 'utf8'));
+        isExternal = Boolean(marker.external_setup_mode);
+      }
+    }
+  } catch {}
+
+  const searchDirs = isExternal ? [
+    path.join(labDir, 'assets', 'pos-desktop-updates'),
+    path.join(labDir, 'assets'),
+    labDir,
+  ] : [
     path.join(labDir, 'assets', 'pos-desktop'),
     path.join(labDir, 'assets', 'pos-desktop-updates'),
     path.join(labDir, 'assets'),
@@ -1171,6 +1188,19 @@ const candidate13DeltaInv = JSON.parse(fs.readFileSync(path.join(lab, 'candidate
 const candidate13SetupInvHash = hasher(path.join(lab, 'candidate13-setup-inventory.json'));
 const candidate13DeltaInvHash = hasher(path.join(lab, 'candidate13-delta-inventory.json'));
 const beta12InvHash = hasher(path.join(lab, 'beta12-inventory.json'));
+
+if (owned.external_setup_mode) {
+  assert.equal(
+    candidate13SetupInvHash,
+    candidate13DeltaInvHash,
+    'External mode requires Candidate Setup 13 and Delta slot inventories to have identical SHA256 hashes'
+  );
+  assert.deepEqual(
+    candidate13SetupInv,
+    candidate13DeltaInv,
+    'External mode requires Candidate Setup 13 and Delta slot inventory objects to be identical'
+  );
+}
 
 // Prepare PHP INI scan dir for mock transport router
 const phpIniDir = path.join(lab, 'php-ini');

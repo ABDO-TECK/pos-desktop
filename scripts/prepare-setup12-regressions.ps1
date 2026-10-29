@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidateSet('prepare', 'sign', 'acceptance', 'cleanup')]
-    [string]$Phase = 'prepare'
+    [string]$Phase = 'prepare',
+    [string]$SetupRunId = $env:SETUP_RUN_ID,
+    [string]$SetupArtifactDir = $env:SETUP_ARTIFACT_DIR
 )
 
 Set-StrictMode -Version Latest
@@ -567,212 +569,200 @@ if ($Phase -eq 'prepare') {
         "--output=$beta12App"
     if ($LASTEXITCODE -ne 0) { throw 'Beta 12.1 reconstruction failed.' }
 
-    # 7. Candidate 0.0.13 assembly in isolated RUNNER_TEMP
-    Write-Host 'Assembling Candidate 0.0.13 in isolated source copy...'
-    Assert-SafeDirectory $candidateSource | Out-Null
-    New-Item -ItemType Directory -Path $candidateSource -Force | Out-Null
+    # 7. Candidate 0.0.13 preparation (External Setup artifact mode vs isolated source assembly)
+    $candidateInstaller = $null
+    $candidateShellRoot = $null
+    $candidateExeHash = $null
+    $candidateAsarHash = $null
+    $candidateUnpackedApp = $null
+    $candidateDeltaApp = $null
 
-    # Copy Git-tracked files only, excluding sensitive keys/certs/env
-    $trackedFiles = & $git -C $repo ls-files
-    if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
-    foreach ($file in $trackedFiles) {
-        if ($file -match '(\.env|\.key|\.pem$|\.p12$)') {
-            if ($file -ne 'backend/certs/cacert.pem' -and $file -ne 'backend/certs/update_public_key.pem') {
-                continue
+    if (-not [string]::IsNullOrWhiteSpace($SetupRunId)) {
+        Write-Host "External Setup Artifact Mode enabled (SetupRunId: $SetupRunId)"
+        if ($SetupRunId -notmatch '^\d+$') {
+            throw "Invalid SetupRunId format: '$SetupRunId'. Must be a positive integer GitHub Actions run ID."
+        }
+
+        $gh = Get-Command gh -ErrorAction SilentlyContinue
+        if (-not $gh) {
+            throw "GitHub CLI ('gh') is required in external setup mode."
+        }
+
+        Write-Host "Verifying Windows Setup run $SetupRunId with GitHub CLI API..."
+        $runJsonRaw = & gh api "repos/ABDO-TECK/pos-desktop/actions/runs/$SetupRunId" 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not $runJsonRaw) {
+            throw "Failed to query GitHub Actions run ${SetupRunId} via gh api repos/ABDO-TECK/pos-desktop/actions/runs/${SetupRunId} - output: $runJsonRaw"
+        }
+        $runInfo = $runJsonRaw | ConvertFrom-Json
+        if (-not $runInfo.id -or "$($runInfo.id)" -ne $SetupRunId) {
+            throw "Windows Setup run $SetupRunId ID mismatch in API response (got '$($runInfo.id)')."
+        }
+        if ($runInfo.status -ne 'completed') {
+            throw "Windows Setup run $SetupRunId is not completed (status: '$($runInfo.status)')."
+        }
+        if ($runInfo.conclusion -ne 'success') {
+            throw "Windows Setup run $SetupRunId did not succeed (conclusion: '$($runInfo.conclusion)')."
+        }
+        if ($runInfo.path -ne '.github/workflows/windows-setup.yml') {
+            throw "Windows Setup run $SetupRunId workflow path mismatch: expected EXACT .github/workflows/windows-setup.yml, got '$($runInfo.path)'."
+        }
+        $expectedRepo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'ABDO-TECK/pos-desktop' }
+        if ($runInfo.repository.full_name -ne $expectedRepo -or $runInfo.head_repository.full_name -ne $expectedRepo) {
+            throw "Windows Setup run $SetupRunId repository mismatch (expected $expectedRepo, got repo='$($runInfo.repository.full_name)', head_repo='$($runInfo.head_repository.full_name)')."
+        }
+
+        $currentHeadSha = (& $git -C $repo rev-parse HEAD).Trim().ToLowerInvariant()
+        $runHeadSha = "$($runInfo.head_sha)".Trim().ToLowerInvariant()
+        if ($runHeadSha -ne $currentHeadSha) {
+            throw "Windows Setup run $SetupRunId head SHA mismatch ($runHeadSha vs current git HEAD $currentHeadSha)."
+        }
+        if (-not $env:GITHUB_SHA -or [string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
+            throw 'Mandatory GITHUB_SHA environment variable is missing.'
+        }
+        $envSha = $env:GITHUB_SHA.Trim().ToLowerInvariant()
+        if ($runHeadSha -ne $envSha) {
+            throw "Windows Setup run $SetupRunId head SHA mismatch ($runHeadSha vs mandatory GITHUB_SHA $envSha)."
+        }
+        if ($currentHeadSha -ne $envSha) {
+            throw "Current git HEAD mismatch ($currentHeadSha vs mandatory GITHUB_SHA $envSha)."
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SetupArtifactDir)) {
+            $SetupArtifactDir = Join-Path $env:RUNNER_TEMP 'setup13-artifact'
+        }
+        $SetupArtifactDir = [IO.Path]::GetFullPath($SetupArtifactDir)
+        Assert-SafeDirectory $SetupArtifactDir | Out-Null
+        if (-not (Test-Path -LiteralPath $SetupArtifactDir)) {
+            New-Item -ItemType Directory -Path $SetupArtifactDir -Force | Out-Null
+        }
+
+        $expectedArtifactFiles = @(
+            'POS-Desktop-Setup-0.0.13.exe',
+            'POS-Desktop-Setup-0.0.13.exe.blockmap',
+            'latest.yml',
+            'deployment-inventory.json',
+            'SHA256SUMS.txt'
+        )
+
+        $missingArtifactFiles = @()
+        foreach ($f in $expectedArtifactFiles) {
+            $fp = Join-Path $SetupArtifactDir $f
+            if (-not (Test-Path -LiteralPath $fp -PathType Leaf)) {
+                $missingArtifactFiles += $f
             }
         }
-        $dest = Join-Path $candidateSource $file
-        $parent = Split-Path $dest -Parent
-        if (-not (Test-Path -LiteralPath $parent)) {
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        }
-        Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $dest -Force
-    }
 
-    # Verify tracked database migrations, seeders, and pos_schema.sql exist
-    $migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/migrations') -Filter '*.sql' -Recurse -File)
-    $seederFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/seeders') -Filter '*.sql' -Recurse -File)
-    if ($migrationFiles.Count -ne 67) {
-        throw "database/migrations missing or incomplete in candidate source (expected 67, found $($migrationFiles.Count))"
-    }
-    if ($seederFiles.Count -ne 3) {
-        throw "database/seeders missing or incomplete in candidate source (expected 3, found $($seederFiles.Count))"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $candidateSource 'database/pos_schema.sql'))) {
-        throw "database/pos_schema.sql missing in candidate source"
-    }
-
-    # Create dependency junctions
-    New-Item -ItemType Junction -Path (Join-Path $candidateSource 'node_modules') -Target (Join-Path $repo 'node_modules') | Out-Null
-    New-Item -ItemType Junction -Path (Join-Path $candidateSource 'frontend/node_modules') -Target (Join-Path $repo 'frontend/node_modules') | Out-Null
-    New-Item -ItemType Junction -Path (Join-Path $candidateSource 'backend/vendor') -Target (Join-Path $repo 'backend/vendor') | Out-Null
-    New-Item -ItemType Junction -Path (Join-Path $candidateSource 'portable') -Target (Join-Path $repo 'portable') | Out-Null
-
-    # Copy prepared original repository NSIS build prerequisites into private candidate source
-    $desktopManifestPath = Join-Path $repo 'scripts/desktop-runtime.json'
-    if (-not (Test-Path -LiteralPath $desktopManifestPath -PathType Leaf)) {
-        throw "Desktop runtime manifest missing: $desktopManifestPath"
-    }
-    $desktopManifest = Get-Content -LiteralPath $desktopManifestPath -Raw | ConvertFrom-Json
-    $expectedPrereqName = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.archiveName) { [string]$desktopManifest.vcredist.archiveName } else { 'vc_redist.x64.exe' }
-    $expectedPrereqHash = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.sha256) { ([string]$desktopManifest.vcredist.sha256).ToLowerInvariant() } else { $null }
-
-    $sourcePrereqDir = [IO.Path]::GetFullPath((Join-Path $repo 'build/prerequisites'))
-    $expectedSourcePrereq = [IO.Path]::GetFullPath((Join-Path $sourcePrereqDir $expectedPrereqName))
-    if (-not (Test-Path -LiteralPath $expectedSourcePrereq -PathType Leaf)) {
-        throw "Prepared NSIS prerequisite missing in source repository: $expectedSourcePrereq"
-    }
-    if ($expectedPrereqHash) {
-        $sourcePrereqHash = (Get-FileHash -LiteralPath $expectedSourcePrereq -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($sourcePrereqHash -ne $expectedPrereqHash) {
-            throw "Source prerequisite SHA-256 mismatch against pinned manifest ($sourcePrereqHash vs $expectedPrereqHash)"
-        }
-    }
-
-    $targetPrereqDir = [IO.Path]::GetFullPath((Join-Path $candidateSource 'build/prerequisites'))
-    if (-not $targetPrereqDir.StartsWith($candidateSource.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Candidate prerequisite target directory outside candidate source: $targetPrereqDir"
-    }
-    Assert-SafeDirectory $targetPrereqDir | Out-Null
-    New-Item -ItemType Directory -Path $targetPrereqDir -Force | Out-Null
-    Assert-SafeDirectory $targetPrereqDir | Out-Null
-    if ((Get-Item -LiteralPath $targetPrereqDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw "Candidate prerequisite target directory cannot be a reparse point: $targetPrereqDir"
-    }
-
-    $prereqFiles = @(Get-ChildItem -LiteralPath $sourcePrereqDir -File)
-    if ($prereqFiles.Count -eq 0) {
-        throw "No prerequisite files found in source directory: $sourcePrereqDir"
-    }
-    foreach ($pFile in $prereqFiles) {
-        $destFile = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $pFile.Name))
-        if (-not $destFile.StartsWith($targetPrereqDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Prerequisite target file outside prerequisite directory: $destFile"
-        }
-        Copy-Item -LiteralPath $pFile.FullName -Destination $destFile -Force
-        if (-not (Test-Path -LiteralPath $destFile -PathType Leaf)) {
-            throw "Failed to copy prerequisite file to $destFile"
-        }
-        $srcHash = (Get-FileHash -LiteralPath $pFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        $dstHash = (Get-FileHash -LiteralPath $destFile -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($srcHash -ne $dstHash) {
-            throw "Prerequisite file hash mismatch after copy: $destFile ($dstHash vs $srcHash)"
-        }
-        if ((Get-Item -LiteralPath $destFile).Length -ne $pFile.Length) {
-            throw "Prerequisite file size mismatch after copy: $destFile"
-        }
-    }
-
-    $expectedTargetPrereq = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $expectedPrereqName))
-    if (-not (Test-Path -LiteralPath $expectedTargetPrereq -PathType Leaf)) {
-        throw "Candidate prerequisite $expectedPrereqName missing after copy: $expectedTargetPrereq"
-    }
-    if ($expectedPrereqHash) {
-        $targetPrereqHash = (Get-FileHash -LiteralPath $expectedTargetPrereq -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($targetPrereqHash -ne $expectedPrereqHash) {
-            throw "Candidate prerequisite SHA-256 mismatch against pinned manifest ($targetPrereqHash vs $expectedPrereqHash)"
-        }
-    }
-
-    # Normalize versions to 0.0.13 in candidate-source only (preserving lock dependencies and version metadata)
-    $cPkgPath = Join-Path $candidateSource 'package.json'
-    $cPkg = Get-Content -LiteralPath $cPkgPath -Raw | ConvertFrom-Json
-    $cPkg.version = '0.0.13'
-    $cPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cPkgPath
-
-    $cLockPath = Join-Path $candidateSource 'package-lock.json'
-    $cLock = Get-Content -LiteralPath $cLockPath -Raw | ConvertFrom-Json -AsHashtable
-    if (-not ($cLock -and ($cLock['packages'] -is [System.Collections.IDictionary]) -and ($cLock['packages'][''] -is [System.Collections.IDictionary]))) {
-        throw "Candidate package-lock.json missing required root package entry in packages['']."
-    }
-    $cLock['version'] = '0.0.13'
-    $cLock['packages']['']['version'] = '0.0.13'
-    $cLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cLockPath
-
-    $cFEndPkgPath = Join-Path $candidateSource 'frontend/package.json'
-    $cFEndPkg = Get-Content -LiteralPath $cFEndPkgPath -Raw | ConvertFrom-Json
-    $cFEndPkg.version = '0.0.13'
-    $cFEndPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cFEndPkgPath
-
-    $cFEndLockPath = Join-Path $candidateSource 'frontend/package-lock.json'
-    $cFEndLock = Get-Content -LiteralPath $cFEndLockPath -Raw | ConvertFrom-Json -AsHashtable
-    if (-not ($cFEndLock -and ($cFEndLock['packages'] -is [System.Collections.IDictionary]) -and ($cFEndLock['packages'][''] -is [System.Collections.IDictionary]))) {
-        throw "Candidate frontend/package-lock.json missing required root package entry in packages['']."
-    }
-    $cFEndLock['version'] = '0.0.13'
-    $cFEndLock['packages']['']['version'] = '0.0.13'
-    $cFEndLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cFEndLockPath
-
-    # Clone repository version.json preserving all engine metadata, updating only version fields
-    $cVerPath = Join-Path $candidateSource 'version.json'
-    $cVer = Get-Content -LiteralPath (Join-Path $repo 'version.json') -Raw | ConvertFrom-Json
-    $cVer.version = '0.0.13'
-    $cVer.application_version = '0.0.13'
-    $cVer.installer_version = '0.0.13'
-    $cVer.channel = 'stable'
-    $cVer.update_channel = 'stable'
-    $cVer.release_type = 'setup'
-    $cVer | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cVerPath
-
-    Write-Host 'Building Candidate 0.0.13 artifacts...'
-    $gitDir = (& $git -C $repo rev-parse --absolute-git-dir).Trim()
-    $oldGitDir = $env:GIT_DIR
-    $oldGitWorkTree = $env:GIT_WORK_TREE
-    $env:GIT_DIR = $gitDir
-    $env:GIT_WORK_TREE = $candidateSource
-
-    # Write gitdir file in candidate-source so subprocess git calls resolve safely
-    $cGitFile = Join-Path $candidateSource '.git'
-    Set-Content -LiteralPath $cGitFile -Value "gitdir: $gitDir"
-
-    try {
-        Push-Location $candidateSource
-        try {
-            & npm.cmd run frontend:build
-            if ($LASTEXITCODE -ne 0) { throw 'npm run frontend:build failed.' }
-
-            & npm.cmd run build:phar
-            if ($LASTEXITCODE -ne 0) { throw 'npm run build:phar failed.' }
-
-            $candidatePhar = Join-Path $candidateSource 'backend/backend.phar'
-            if (-not (Test-Path -LiteralPath $candidatePhar)) {
-                throw "Candidate backend.phar missing after build: $candidatePhar"
+        if ($missingArtifactFiles.Count -gt 0) {
+            Write-Host "Setup artifact directory is missing $($missingArtifactFiles.Count) files; downloading windows-setup from run $SetupRunId..."
+            & gh run download $SetupRunId --name windows-setup --dir $SetupArtifactDir
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to download windows-setup artifact from run $SetupRunId."
             }
-
-            # Verify PHAR layout (SQL SET, hash/sizes, restore CLI) inside PHAR
-            & $php (Join-Path $repo 'scripts/fixtures/setup12-regressions.php') `
-                --action=verify-phar-layout `
-                "--phar=$candidatePhar" `
-                "--repo-root=$repo"
-            if ($LASTEXITCODE -ne 0) { throw 'Candidate PHAR layout verification failed.' }
-
-            & npm.cmd run verify:desktop-runtime
-            if ($LASTEXITCODE -ne 0) { throw 'npm run verify:desktop-runtime failed.' }
-
-            & npm.cmd run electron:build -- --x64
-            if ($LASTEXITCODE -ne 0) { throw 'npm run electron:build failed.' }
-        }
-        finally {
-            Pop-Location
         }
 
-        # Output directory configured in package.json is 'dist-electron'
-        $candidateExeSrc = Join-Path $candidateSource 'dist-electron/POS-Desktop-Setup-0.0.13.exe'
-        if (-not (Test-Path -LiteralPath $candidateExeSrc)) {
-            throw "Candidate installer missing after build: $candidateExeSrc"
+        # Verify exact 5 files
+        foreach ($fname in $expectedArtifactFiles) {
+            $fpath = Join-Path $SetupArtifactDir $fname
+            if (-not (Test-Path -LiteralPath $fpath -PathType Leaf)) {
+                throw "Missing expected setup artifact file: $fname in $SetupArtifactDir"
+            }
+            if ((Get-Item -LiteralPath $fpath).Length -le 0) {
+                throw "Setup artifact file $fname is empty (0 bytes)."
+            }
+            if ((Get-Item -LiteralPath $fpath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Reparse point detected in setup artifact: $fpath"
+            }
         }
+        $actualArtifactFiles = @(Get-ChildItem -LiteralPath $SetupArtifactDir -File | ForEach-Object { $_.Name })
+        foreach ($af in $actualArtifactFiles) {
+            if ($af -notin $expectedArtifactFiles) {
+                throw "Unexpected extra file in setup artifact directory: $af"
+            }
+        }
+
+        # Verify SHA256SUMS.txt in setup artifact
+        $checksumsPath = Join-Path $SetupArtifactDir 'SHA256SUMS.txt'
+        $checksumLines = Get-Content -LiteralPath $checksumsPath -Raw
+        $checksumMap = @{}
+        foreach ($line in ($checksumLines -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if ($trimmed -match '^([a-fA-F0-9]{64})\s+\*?(.+)$') {
+                $checksumMap[$Matches[2].Trim()] = $Matches[1].ToLowerInvariant()
+            }
+        }
+        foreach ($fname in @('POS-Desktop-Setup-0.0.13.exe', 'POS-Desktop-Setup-0.0.13.exe.blockmap', 'latest.yml', 'deployment-inventory.json')) {
+            if (-not $checksumMap.ContainsKey($fname)) {
+                throw "SHA256SUMS.txt missing checksum entry for $fname"
+            }
+            $fpath = Join-Path $SetupArtifactDir $fname
+            $computedHash = (Get-FileHash -LiteralPath $fpath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($computedHash -ne $checksumMap[$fname]) {
+                throw "SHA256 mismatch for $fname ($computedHash vs $($checksumMap[$fname]))"
+            }
+        }
+
+        # Verify latest.yml
+        $latestContent = Get-Content -LiteralPath (Join-Path $SetupArtifactDir 'latest.yml') -Raw
+        if ($latestContent -notmatch 'version:\s*0\.0\.13') {
+            throw "latest.yml does not declare version 0.0.13"
+        }
+        if ($latestContent -notmatch 'path:\s*POS-Desktop-Setup-0\.0\.13\.exe') {
+            throw "latest.yml does not reference POS-Desktop-Setup-0.0.13.exe"
+        }
+
+        # Verify deployment-inventory.json
+        $setupInvPath = Join-Path $SetupArtifactDir 'deployment-inventory.json'
+        $setupInv = Get-Content -LiteralPath $setupInvPath -Raw | ConvertFrom-Json
+        if ($setupInv.version -ne '0.0.13') {
+            throw "deployment-inventory.json version mismatch: expected 0.0.13, got '$($setupInv.version)'"
+        }
+        if ($setupInv.format -ne 1) {
+            throw "deployment-inventory.json format mismatch: expected 1, got '$($setupInv.format)'"
+        }
+
+        # Record binding receipt in evidence outside payload before cleanup
+        $setup5Map = [ordered]@{}
+        foreach ($fname in $expectedArtifactFiles) {
+            $fpath = Join-Path $SetupArtifactDir $fname
+            $setup5Map[$fname] = [ordered]@{
+                sha256 = (Get-FileHash -LiteralPath $fpath -Algorithm SHA256).Hash.ToLowerInvariant()
+                size = (Get-Item -LiteralPath $fpath).Length
+            }
+        }
+
+        $bindingReceipt = [ordered]@{
+            schema_version = '1.0.0'
+            setup_run_id = [string]$SetupRunId
+            acceptance_run_id = [string]$env:GITHUB_RUN_ID
+            source_sha = $currentHeadSha
+            installer_sha256 = $checksumMap['POS-Desktop-Setup-0.0.13.exe']
+            setup_assets = $setup5Map
+            run_token = $runToken
+            created_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        $bindingReceiptPath = Join-Path $evidence 'setup13-binding-receipt.json'
+        $tmpBinding = $bindingReceiptPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+        $bindingReceipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmpBinding -Encoding utf8
+        Move-Item -LiteralPath $tmpBinding -Destination $bindingReceiptPath -Force
+        Write-Host "Recorded setup13 binding receipt in evidence: $bindingReceiptPath"
+
+        # Copy verified installer to lab
         $candidateInstaller = Join-Path $lab 'POS-Desktop-Setup-0.0.13.exe'
-        Copy-Item -LiteralPath $candidateExeSrc -Destination $candidateInstaller -Force
+        Copy-Item -LiteralPath (Join-Path $SetupArtifactDir 'POS-Desktop-Setup-0.0.13.exe') -Destination $candidateInstaller -Force
+        $copiedHash = (Get-FileHash -LiteralPath $candidateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($copiedHash -ne $checksumMap['POS-Desktop-Setup-0.0.13.exe']) {
+            throw "Candidate installer copy hash mismatch."
+        }
 
-        # Extract Candidate app payload to unpack resources
-        Write-Host 'Extracting candidate application files...'
+        # Extract external setup application files
+        Write-Host 'Extracting application payload from external candidate installer...'
         $candidateExtract = Join-Path $lab 'candidate-extract'
         & $seven e $candidateInstaller '$PLUGINSDIR\app-64.7z' "-o$candidateExtract" -y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Failed to extract app-64.7z from candidate installer.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to extract app-64.7z from external candidate installer.' }
 
         $candidateUnpacked = Join-Path $lab 'candidate-unpacked'
         & $seven x (Join-Path $candidateExtract 'app-64.7z') "-o$candidateUnpacked" -y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Failed to unpack candidate installer files.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to unpack external candidate installer files.' }
 
         $candidateShellRoot = $candidateUnpacked
         $candidateExe = Join-Path $candidateShellRoot 'POS Desktop.exe'
@@ -788,24 +778,261 @@ if ($Phase -eq 'prepare') {
             throw "Candidate unpacked resources missing: $candidateUnpackedApp"
         }
 
-        # 8. Prepare candidate variants (Setup 13 inventory vs Delta 13 inventory)
-        Write-Host 'Preparing candidate Setup 13 and Delta 13 variant inventories...'
+        # Prepare external candidate variants (Setup 13 inventory vs Delta 13 inventory)
+        Write-Host 'Preparing candidate Setup 13 and Delta 13 variant inventories from external setup...'
         $candidateSetupInv = Join-Path $lab 'candidate13-setup-inventory.json'
         $candidateDeltaApp = Join-Path $lab 'candidate13-delta-app'
         $candidateDeltaInv = Join-Path $lab 'candidate13-delta-inventory.json'
         & $php (Join-Path $repo 'scripts/fixtures/setup12-regressions.php') `
-            --action=prepare-candidate-variants `
+            --action=prepare-external-variants `
             "--candidate-unpacked=$candidateUnpackedApp" `
             "--repo-root=$repo" `
-            "--candidate-source=$candidateSource" `
+            "--provided-setup-inventory=$setupInvPath" `
             "--candidate-setup-inventory=$candidateSetupInv" `
             "--candidate-delta-app=$candidateDeltaApp" `
             "--candidate-delta-inventory=$candidateDeltaInv"
-        if ($LASTEXITCODE -ne 0) { throw 'Candidate variant preparation failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'External candidate variant preparation failed.' }
     }
-    finally {
-        $env:GIT_DIR = $oldGitDir
-        $env:GIT_WORK_TREE = $oldGitWorkTree
+    else {
+        Write-Host 'Assembling Candidate 0.0.13 in isolated source copy...'
+        Assert-SafeDirectory $candidateSource | Out-Null
+        New-Item -ItemType Directory -Path $candidateSource -Force | Out-Null
+
+        # Copy Git-tracked files only, excluding sensitive keys/certs/env
+        $trackedFiles = & $git -C $repo ls-files
+        if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
+        foreach ($file in $trackedFiles) {
+            if ($file -match '(\.env|\.key|\.pem$|\.p12$)') {
+                if ($file -ne 'backend/certs/cacert.pem' -and $file -ne 'backend/certs/update_public_key.pem') {
+                    continue
+                }
+            }
+            $dest = Join-Path $candidateSource $file
+            $parent = Split-Path $dest -Parent
+            if (-not (Test-Path -LiteralPath $parent)) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $dest -Force
+        }
+
+        # Verify tracked database migrations, seeders, and pos_schema.sql exist
+        $migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/migrations') -Filter '*.sql' -Recurse -File)
+        $seederFiles = @(Get-ChildItem -LiteralPath (Join-Path $candidateSource 'database/seeders') -Filter '*.sql' -Recurse -File)
+        if ($migrationFiles.Count -ne 67) {
+            throw "database/migrations missing or incomplete in candidate source (expected 67, found $($migrationFiles.Count))"
+        }
+        if ($seederFiles.Count -ne 3) {
+            throw "database/seeders missing or incomplete in candidate source (expected 3, found $($seederFiles.Count))"
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $candidateSource 'database/pos_schema.sql'))) {
+            throw "database/pos_schema.sql missing in candidate source"
+        }
+
+        # Create dependency junctions
+        New-Item -ItemType Junction -Path (Join-Path $candidateSource 'node_modules') -Target (Join-Path $repo 'node_modules') | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $candidateSource 'frontend/node_modules') -Target (Join-Path $repo 'frontend/node_modules') | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $candidateSource 'backend/vendor') -Target (Join-Path $repo 'backend/vendor') | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $candidateSource 'portable') -Target (Join-Path $repo 'portable') | Out-Null
+
+        # Copy prepared original repository NSIS build prerequisites into private candidate source
+        $desktopManifestPath = Join-Path $repo 'scripts/desktop-runtime.json'
+        if (-not (Test-Path -LiteralPath $desktopManifestPath -PathType Leaf)) {
+            throw "Desktop runtime manifest missing: $desktopManifestPath"
+        }
+        $desktopManifest = Get-Content -LiteralPath $desktopManifestPath -Raw | ConvertFrom-Json
+        $expectedPrereqName = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.archiveName) { [string]$desktopManifest.vcredist.archiveName } else { 'vc_redist.x64.exe' }
+        $expectedPrereqHash = if ($desktopManifest.vcredist -and $desktopManifest.vcredist.sha256) { ([string]$desktopManifest.vcredist.sha256).ToLowerInvariant() } else { $null }
+
+        $sourcePrereqDir = [IO.Path]::GetFullPath((Join-Path $repo 'build/prerequisites'))
+        $expectedSourcePrereq = [IO.Path]::GetFullPath((Join-Path $sourcePrereqDir $expectedPrereqName))
+        if (-not (Test-Path -LiteralPath $expectedSourcePrereq -PathType Leaf)) {
+            throw "Prepared NSIS prerequisite missing in source repository: $expectedSourcePrereq"
+        }
+        if ($expectedPrereqHash) {
+            $sourcePrereqHash = (Get-FileHash -LiteralPath $expectedSourcePrereq -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($sourcePrereqHash -ne $expectedPrereqHash) {
+                throw "Source prerequisite SHA-256 mismatch against pinned manifest ($sourcePrereqHash vs $expectedPrereqHash)"
+            }
+        }
+
+        $targetPrereqDir = [IO.Path]::GetFullPath((Join-Path $candidateSource 'build/prerequisites'))
+        if (-not $targetPrereqDir.StartsWith($candidateSource.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Candidate prerequisite target directory outside candidate source: $targetPrereqDir"
+        }
+        Assert-SafeDirectory $targetPrereqDir | Out-Null
+        New-Item -ItemType Directory -Path $targetPrereqDir -Force | Out-Null
+        Assert-SafeDirectory $targetPrereqDir | Out-Null
+        if ((Get-Item -LiteralPath $targetPrereqDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Candidate prerequisite target directory cannot be a reparse point: $targetPrereqDir"
+        }
+
+        $prereqFiles = @(Get-ChildItem -LiteralPath $sourcePrereqDir -File)
+        if ($prereqFiles.Count -eq 0) {
+            throw "No prerequisite files found in source directory: $sourcePrereqDir"
+        }
+        foreach ($pFile in $prereqFiles) {
+            $destFile = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $pFile.Name))
+            if (-not $destFile.StartsWith($targetPrereqDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Prerequisite target file outside prerequisite directory: $destFile"
+            }
+            Copy-Item -LiteralPath $pFile.FullName -Destination $destFile -Force
+            if (-not (Test-Path -LiteralPath $destFile -PathType Leaf)) {
+                throw "Failed to copy prerequisite file to $destFile"
+            }
+            $srcHash = (Get-FileHash -LiteralPath $pFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $dstHash = (Get-FileHash -LiteralPath $destFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($srcHash -ne $dstHash) {
+                throw "Prerequisite file hash mismatch after copy: $destFile ($dstHash vs $srcHash)"
+            }
+            if ((Get-Item -LiteralPath $destFile).Length -ne $pFile.Length) {
+                throw "Prerequisite file size mismatch after copy: $destFile"
+            }
+        }
+
+        $expectedTargetPrereq = [IO.Path]::GetFullPath((Join-Path $targetPrereqDir $expectedPrereqName))
+        if (-not (Test-Path -LiteralPath $expectedTargetPrereq -PathType Leaf)) {
+            throw "Candidate prerequisite $expectedPrereqName missing after copy: $expectedTargetPrereq"
+        }
+        if ($expectedPrereqHash) {
+            $targetPrereqHash = (Get-FileHash -LiteralPath $expectedTargetPrereq -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($targetPrereqHash -ne $expectedPrereqHash) {
+                throw "Candidate prerequisite SHA-256 mismatch against pinned manifest ($targetPrereqHash vs $expectedPrereqHash)"
+            }
+        }
+
+        # Normalize versions to 0.0.13 in candidate-source only (preserving lock dependencies and version metadata)
+        $cPkgPath = Join-Path $candidateSource 'package.json'
+        $cPkg = Get-Content -LiteralPath $cPkgPath -Raw | ConvertFrom-Json
+        $cPkg.version = '0.0.13'
+        $cPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cPkgPath
+
+        $cLockPath = Join-Path $candidateSource 'package-lock.json'
+        $cLock = Get-Content -LiteralPath $cLockPath -Raw | ConvertFrom-Json -AsHashtable
+        if (-not ($cLock -and ($cLock['packages'] -is [System.Collections.IDictionary]) -and ($cLock['packages'][''] -is [System.Collections.IDictionary]))) {
+            throw "Candidate package-lock.json missing required root package entry in packages['']."
+        }
+        $cLock['version'] = '0.0.13'
+        $cLock['packages']['']['version'] = '0.0.13'
+        $cLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cLockPath
+
+        $cFEndPkgPath = Join-Path $candidateSource 'frontend/package.json'
+        $cFEndPkg = Get-Content -LiteralPath $cFEndPkgPath -Raw | ConvertFrom-Json
+        $cFEndPkg.version = '0.0.13'
+        $cFEndPkg | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cFEndPkgPath
+
+        $cFEndLockPath = Join-Path $candidateSource 'frontend/package-lock.json'
+        $cFEndLock = Get-Content -LiteralPath $cFEndLockPath -Raw | ConvertFrom-Json -AsHashtable
+        if (-not ($cFEndLock -and ($cFEndLock['packages'] -is [System.Collections.IDictionary]) -and ($cFEndLock['packages'][''] -is [System.Collections.IDictionary]))) {
+            throw "Candidate frontend/package-lock.json missing required root package entry in packages['']."
+        }
+        $cFEndLock['version'] = '0.0.13'
+        $cFEndLock['packages']['']['version'] = '0.0.13'
+        $cFEndLock | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $cFEndLockPath
+
+        # Clone repository version.json preserving all engine metadata, updating only version fields
+        $cVerPath = Join-Path $candidateSource 'version.json'
+        $cVer = Get-Content -LiteralPath (Join-Path $repo 'version.json') -Raw | ConvertFrom-Json
+        $cVer.version = '0.0.13'
+        $cVer.application_version = '0.0.13'
+        $cVer.installer_version = '0.0.13'
+        $cVer.channel = 'stable'
+        $cVer.update_channel = 'stable'
+        $cVer.release_type = 'setup'
+        $cVer | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $cVerPath
+
+        Write-Host 'Building Candidate 0.0.13 artifacts...'
+        $gitDir = (& $git -C $repo rev-parse --absolute-git-dir).Trim()
+        $oldGitDir = $env:GIT_DIR
+        $oldGitWorkTree = $env:GIT_WORK_TREE
+        $env:GIT_DIR = $gitDir
+        $env:GIT_WORK_TREE = $candidateSource
+
+        # Write gitdir file in candidate-source so subprocess git calls resolve safely
+        $cGitFile = Join-Path $candidateSource '.git'
+        Set-Content -LiteralPath $cGitFile -Value "gitdir: $gitDir"
+
+        try {
+            Push-Location $candidateSource
+            try {
+                & npm.cmd run frontend:build
+                if ($LASTEXITCODE -ne 0) { throw 'npm run frontend:build failed.' }
+
+                & npm.cmd run build:phar
+                if ($LASTEXITCODE -ne 0) { throw 'npm run build:phar failed.' }
+
+                $candidatePhar = Join-Path $candidateSource 'backend/backend.phar'
+                if (-not (Test-Path -LiteralPath $candidatePhar)) {
+                    throw "Candidate backend.phar missing after build: $candidatePhar"
+                }
+
+                # Verify PHAR layout (SQL SET, hash/sizes, restore CLI) inside PHAR
+                & $php (Join-Path $repo 'scripts/fixtures/setup12-regressions.php') `
+                    --action=verify-phar-layout `
+                    "--phar=$candidatePhar" `
+                    "--repo-root=$repo"
+                if ($LASTEXITCODE -ne 0) { throw 'Candidate PHAR layout verification failed.' }
+
+                & npm.cmd run verify:desktop-runtime
+                if ($LASTEXITCODE -ne 0) { throw 'npm run verify:desktop-runtime failed.' }
+
+                & npm.cmd run electron:build -- --x64
+                if ($LASTEXITCODE -ne 0) { throw 'npm run electron:build failed.' }
+            }
+            finally {
+                Pop-Location
+            }
+
+            # Output directory configured in package.json is 'dist-electron'
+            $candidateExeSrc = Join-Path $candidateSource 'dist-electron/POS-Desktop-Setup-0.0.13.exe'
+            if (-not (Test-Path -LiteralPath $candidateExeSrc)) {
+                throw "Candidate installer missing after build: $candidateExeSrc"
+            }
+            $candidateInstaller = Join-Path $lab 'POS-Desktop-Setup-0.0.13.exe'
+            Copy-Item -LiteralPath $candidateExeSrc -Destination $candidateInstaller -Force
+
+            # Extract Candidate app payload to unpack resources
+            Write-Host 'Extracting candidate application files...'
+            $candidateExtract = Join-Path $lab 'candidate-extract'
+            & $seven e $candidateInstaller '$PLUGINSDIR\app-64.7z' "-o$candidateExtract" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to extract app-64.7z from candidate installer.' }
+
+            $candidateUnpacked = Join-Path $lab 'candidate-unpacked'
+            & $seven x (Join-Path $candidateExtract 'app-64.7z') "-o$candidateUnpacked" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to unpack candidate installer files.' }
+
+            $candidateShellRoot = $candidateUnpacked
+            $candidateExe = Join-Path $candidateShellRoot 'POS Desktop.exe'
+            $candidateAsar = Join-Path $candidateShellRoot 'resources/app.asar'
+            if (-not (Test-Path -LiteralPath $candidateExe) -or -not (Test-Path -LiteralPath $candidateAsar)) {
+                throw "Candidate shell files missing in: $candidateShellRoot"
+            }
+            $candidateExeHash = (Get-FileHash -LiteralPath $candidateExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            $candidateAsarHash = (Get-FileHash -LiteralPath $candidateAsar -Algorithm SHA256).Hash.ToLowerInvariant()
+
+            $candidateUnpackedApp = Join-Path $candidateUnpacked 'resources/app.asar.unpacked'
+            if (-not (Test-Path -LiteralPath $candidateUnpackedApp)) {
+                throw "Candidate unpacked resources missing: $candidateUnpackedApp"
+            }
+
+            # 8. Prepare candidate variants (Setup 13 inventory vs Delta 13 inventory)
+            Write-Host 'Preparing candidate Setup 13 and Delta 13 variant inventories...'
+            $candidateSetupInv = Join-Path $lab 'candidate13-setup-inventory.json'
+            $candidateDeltaApp = Join-Path $lab 'candidate13-delta-app'
+            $candidateDeltaInv = Join-Path $lab 'candidate13-delta-inventory.json'
+            & $php (Join-Path $repo 'scripts/fixtures/setup12-regressions.php') `
+                --action=prepare-candidate-variants `
+                "--candidate-unpacked=$candidateUnpackedApp" `
+                "--repo-root=$repo" `
+                "--candidate-source=$candidateSource" `
+                "--candidate-setup-inventory=$candidateSetupInv" `
+                "--candidate-delta-app=$candidateDeltaApp" `
+                "--candidate-delta-inventory=$candidateDeltaInv"
+            if ($LASTEXITCODE -ne 0) { throw 'Candidate variant preparation failed.' }
+        }
+        finally {
+            $env:GIT_DIR = $oldGitDir
+            $env:GIT_WORK_TREE = $oldGitWorkTree
+        }
     }
 
     # Write late owned lab marker before contract phase
@@ -830,6 +1057,13 @@ if ($Phase -eq 'prepare') {
         assets = $assets
         storage = [IO.Path]::GetFullPath((Join-Path $env:PROGRAMDATA 'POS System'))
         created_at = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SetupRunId)) {
+        $ownedData['setup_run_id'] = $SetupRunId
+        $ownedData['setup_artifact_dir'] = $SetupArtifactDir
+        $ownedData['binding_receipt_path'] = $bindingReceiptPath
+        $ownedData['setup_assets_map'] = $setup5Map
+        $ownedData['external_setup_mode'] = $true
     }
     $tmpOwned = $ownedLabMarker + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $ownedData | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmpOwned -Encoding utf8
@@ -877,47 +1111,88 @@ if ($Phase -eq 'sign') {
     try {
         Write-Host 'Building and signing bidirectional channel transition packages...'
         # Transitions are bound to candidate 13 extracted shell root ($owned.candidate_shell_root)
-        & $php scripts/fixtures/setup12-regressions.php `
-            --action=build-transitions `
-            "--assets-dir=$assets" `
-            "--output-root=$assets" `
-            "--candidate-app=$($owned.candidate_unpacked_app)" `
-            "--candidate-setup-inventory=$(Join-Path $lab 'candidate13-setup-inventory.json')" `
-            "--candidate-delta-app=$($owned.candidate_delta_app)" `
-            "--candidate-delta-inventory=$(Join-Path $lab 'candidate13-delta-inventory.json')" `
-            "--beta12-app=$($owned.beta12_app)" `
-            "--beta12-inventory=$(Join-Path $lab 'beta12-inventory.json')" `
-            "--contract=$contractPath" `
+        $buildArgs = @(
+            'scripts/fixtures/setup12-regressions.php',
+            '--action=build-transitions',
+            "--assets-dir=$assets",
+            "--output-root=$assets",
+            "--candidate-app=$($owned.candidate_unpacked_app)",
+            "--candidate-setup-inventory=$(Join-Path $lab 'candidate13-setup-inventory.json')",
+            "--candidate-delta-app=$($owned.candidate_delta_app)",
+            "--candidate-delta-inventory=$(Join-Path $lab 'candidate13-delta-inventory.json')",
+            "--beta12-app=$($owned.beta12_app)",
+            "--beta12-inventory=$(Join-Path $lab 'beta12-inventory.json')",
+            "--contract=$contractPath",
             "--shell-root=$($owned.candidate_shell_root)"
+        )
+        if ($owned.external_setup_mode) {
+            $buildArgs += '--external-mode'
+        }
+        & $php @buildArgs
         if ($LASTEXITCODE -ne 0) { throw 'Building and signing transitions failed.' }
 
-        # Verify signed outputs nested in pos-desktop and pos-desktop-updates (3 pairs delta/full)
         $posDesktopDir = Join-Path $assets 'pos-desktop'
         $posDesktopUpdatesDir = Join-Path $assets 'pos-desktop-updates'
 
-        foreach ($req in @(
-            'channel-transitions.json',
-            'channel-transitions.sig',
-            'transition-0.0.13-to-beta-0.0.12-beta.1-delta.zip',
-            'transition-0.0.13-to-beta-0.0.12-beta.1-full.zip'
-        )) {
-            $p = Join-Path $posDesktopDir $req
-            if (-not (Test-Path -LiteralPath $p)) {
-                throw "Expected signed transition artifact missing in pos-desktop: $req"
+        if ($owned.external_setup_mode) {
+            # In external setup mode, pos-desktop contains ONLY setup assets (no channel index)
+            if (Test-Path -LiteralPath (Join-Path $posDesktopDir 'channel-transitions.json')) {
+                throw "pos-desktop must not contain channel-transitions.json in external setup mode."
+            }
+            if (Test-Path -LiteralPath (Join-Path $posDesktopDir 'channel-transitions.sig')) {
+                throw "pos-desktop must not contain channel-transitions.sig in external setup mode."
+            }
+
+            # pos-desktop-updates must contain the 4 canonical transitions (14 carrier files)
+            $expectedUpdatesCarrierFiles = @(
+                'channel-transitions.json',
+                'channel-transitions.sig',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-delta.zip',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-delta.json',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-delta.sig',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-full.zip',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-full.json',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-full.sig',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-delta.zip',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-delta.json',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-delta.sig',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-full.zip',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-full.json',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-full.sig'
+            )
+            foreach ($req in $expectedUpdatesCarrierFiles) {
+                $p = Join-Path $posDesktopUpdatesDir $req
+                if (-not (Test-Path -LiteralPath $p)) {
+                    throw "Expected signed transition artifact missing in pos-desktop-updates: $req"
+                }
             }
         }
+        else {
+            # Verify signed outputs nested in pos-desktop and pos-desktop-updates (3 pairs delta/full)
+            foreach ($req in @(
+                'channel-transitions.json',
+                'channel-transitions.sig',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-delta.zip',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-full.zip'
+            )) {
+                $p = Join-Path $posDesktopDir $req
+                if (-not (Test-Path -LiteralPath $p)) {
+                    throw "Expected signed transition artifact missing in pos-desktop: $req"
+                }
+            }
 
-        foreach ($req in @(
-            'channel-transitions.json',
-            'channel-transitions.sig',
-            'transition-0.0.13-to-beta-0.0.12-beta.1-delta.zip',
-            'transition-0.0.13-to-beta-0.0.12-beta.1-full.zip',
-            'transition-0.0.12-beta.1-to-stable-0.0.13-delta.zip',
-            'transition-0.0.12-beta.1-to-stable-0.0.13-full.zip'
-        )) {
-            $p = Join-Path $posDesktopUpdatesDir $req
-            if (-not (Test-Path -LiteralPath $p)) {
-                throw "Expected signed transition artifact missing in pos-desktop-updates: $req"
+            foreach ($req in @(
+                'channel-transitions.json',
+                'channel-transitions.sig',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-delta.zip',
+                'transition-0.0.13-to-beta-0.0.12-beta.1-full.zip',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-delta.zip',
+                'transition-0.0.12-beta.1-to-stable-0.0.13-full.zip'
+            )) {
+                $p = Join-Path $posDesktopUpdatesDir $req
+                if (-not (Test-Path -LiteralPath $p)) {
+                    throw "Expected signed transition artifact missing in pos-desktop-updates: $req"
+                }
             }
         }
     }

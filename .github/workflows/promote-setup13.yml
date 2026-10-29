@@ -1,0 +1,98 @@
+name: Promote Setup 0.0.13 to Public Release
+on:
+  workflow_dispatch:
+    inputs:
+      setup_run_id:
+        description: 'Successful windows-setup.yml workflow run ID'
+        required: true
+        type: string
+      acceptance_run_id:
+        description: 'Successful setup13-release-acceptance.yml workflow run ID'
+        required: true
+        type: string
+  push:
+    branches:
+      - 'test/**'
+      - 'test-*'
+      - 'fix-*'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Verify Setup 0.0.13 promotion policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository at exact workflow commit
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run promotion policy test suite
+        run: node scripts/verify-setup13-promotion-policy.mjs
+
+  promote:
+    name: Verify acceptance provenance and promote Setup 0.0.13
+    if: github.event_name == 'workflow_dispatch'
+    needs: policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout repository at exact workflow commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download Windows Setup build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-setup
+          path: setup-assets
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download Release Acceptance evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: setup13-release-evidence
+          path: setup13-release-evidence
+          run-id: ${{ inputs.acceptance_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download Channel Transition Carrier artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: setup13-channel-carrier
+          path: setup13-channel-carrier
+          run-id: ${{ inputs.acceptance_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify acceptance provenance and promote Setup 0.0.13
+        env:
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SETUP_RUN_ID" =~ ^[1-9][0-9]*$ ]] || ! [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "CRITICAL: SETUP_RUN_ID and ACCEPTANCE_RUN_ID must be strictly positive numeric IDs" >&2
+            exit 1
+          fi
+          node scripts/promote-setup13.mjs \
+            --setup-run-id "$SETUP_RUN_ID" \
+            --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+            --setup-dir "setup-assets" \
+            --evidence-dir "setup13-release-evidence" \
+            --carrier-dir "setup13-channel-carrier"
