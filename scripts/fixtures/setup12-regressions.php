@@ -2764,7 +2764,7 @@ final class Setup12RegressionsHelper
             }
         }
 
-        // 2. Discover git-tracked repo migrations (66) and seeders (3) using read-only git ls-files
+        // 2. Discover git-tracked repo migrations (67) and seeders (3) using read-only git ls-files
         $cmd = 'git -C ' . escapeshellarg($repoRootNorm) . ' ls-files -z -- database/migrations database/seeders';
         $output = shell_exec($cmd);
         if (!is_string($output) || $output === '') {
@@ -2797,8 +2797,8 @@ final class Setup12RegressionsHelper
             }
         }
 
-        if (count($repoMigrations) !== 66) {
-            throw new RuntimeException("Expected exactly 66 git-tracked migration SQL files, found " . count($repoMigrations));
+        if (count($repoMigrations) !== 67) {
+            throw new RuntimeException("Expected exactly 67 git-tracked migration SQL files, found " . count($repoMigrations));
         }
         if (count($repoSeeders) !== 3) {
             throw new RuntimeException("Expected exactly 3 git-tracked seeder SQL files, found " . count($repoSeeders));
@@ -2829,8 +2829,8 @@ final class Setup12RegressionsHelper
             }
         }
 
-        if (count($pharMigrationEntries) !== 66) {
-            throw new RuntimeException("PHAR migration count mismatch: expected 66, found " . count($pharMigrationEntries));
+        if (count($pharMigrationEntries) !== 67) {
+            throw new RuntimeException("PHAR migration count mismatch: expected 67, found " . count($pharMigrationEntries));
         }
         if (count($pharSeederEntries) !== 3) {
             throw new RuntimeException("PHAR seeder count mismatch: expected 3, found " . count($pharSeederEntries));
@@ -2855,7 +2855,7 @@ final class Setup12RegressionsHelper
             throw new RuntimeException("PHAR seeder relative paths do not match git-tracked seeder paths.");
         }
 
-        // Verify exact SHA256 and size for all 66 migrations in PHAR vs repo
+        // Verify exact SHA256 and size for all 67 migrations in PHAR vs repo
         foreach ($repoMigrations as $relPath => $expected) {
             if (!isset($pharObj[$relPath])) {
                 throw new RuntimeException("PHAR missing migration file: {$relPath}");
