@@ -42,6 +42,10 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
+        env:
+          # Limit concurrent archive I/O on Windows
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
         run: |
           npm ci
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
