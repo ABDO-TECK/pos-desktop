@@ -79,11 +79,17 @@ console.log('--- Setup 0.0.13 Promotion Policy Regression Suite (GHA Mocked) ---
 
 let totalTests = 0;
 let passedTests = 0;
+let skippedTests = 0;
 
 function runTest(name, fn) {
   totalTests++;
   try {
-    fn();
+    const outcome = fn();
+    if (outcome && outcome.skipped) {
+      skippedTests++;
+      console.log(`  [SKIP] ${name}${outcome.reason ? `: ${outcome.reason}` : ''}`);
+      return;
+    }
     passedTests++;
     console.log(`  [PASS] ${name}`);
   } catch (err) {
@@ -1133,8 +1139,16 @@ try {
 
   runTest('Policy: Reject latest.yml with version mismatch', () => {
     const ymlFile = path.join(setupDir, 'latest.yml');
+    const sumsFile = path.join(setupDir, 'SHA256SUMS.txt');
     const origYml = fs.readFileSync(ymlFile, 'utf8');
-    fs.writeFileSync(ymlFile, origYml.replace('0.0.13', '0.0.12'));
+    const origSums = fs.readFileSync(sumsFile, 'utf8');
+
+    const tamperedYml = origYml.replace('0.0.13', '0.0.12');
+    const origHash = sha256(Buffer.from(origYml));
+    const tamperedHash = sha256(Buffer.from(tamperedYml));
+
+    fs.writeFileSync(ymlFile, tamperedYml);
+    fs.writeFileSync(sumsFile, origSums.replace(origHash, tamperedHash));
     try {
       assert.throws(
         () => validateSetupDirectory(setupDir),
@@ -1142,6 +1156,7 @@ try {
       );
     } finally {
       fs.writeFileSync(ymlFile, origYml);
+      fs.writeFileSync(sumsFile, origSums);
     }
   });
 
@@ -1471,8 +1486,7 @@ try {
       symlinkCreated = true;
     } catch (createErr) {
       if (createErr.code === 'EPERM' || createErr.code === 'EACCES') {
-        console.log('    [SKIP] Symlink creation unsupported/unprivileged on current host; skipped symlink check');
-        return;
+        return { skipped: true, reason: 'Symlink creation unsupported/unprivileged on current host' };
       }
       throw createErr;
     }
@@ -1530,7 +1544,11 @@ try {
   });
 
   console.log(`\n===============================================================`);
-  console.log(` ALL ${passedTests}/${totalTests} PROMOTION POLICY REGRESSION TESTS PASSED!`);
+  if (skippedTests > 0) {
+    console.log(` PROMOTION POLICY REGRESSION TESTS: ${passedTests} PASSED, ${skippedTests} SKIPPED (${totalTests} TOTAL)`);
+  } else {
+    console.log(` ALL ${passedTests}/${totalTests} PROMOTION POLICY REGRESSION TESTS PASSED!`);
+  }
   console.log(`===============================================================\n`);
 } finally {
   fs.rmSync(testTemp, { recursive: true, force: true });
