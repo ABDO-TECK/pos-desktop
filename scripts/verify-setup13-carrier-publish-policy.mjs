@@ -460,7 +460,7 @@ runTest('validateApiEndpoint accepts valid relative and absolute HTTPS API paths
 runTest('validateApiEndpoint rejects non-HTTPS, untrusted domains, credentials, or unauthorized repos', () => {
   assert.throws(
     () => validateApiEndpoint(`http://api.github.com/repos/${SOURCE_REPO}/releases`),
-    /API endpoint must use HTTPS/
+    /Relative API endpoint must start with '\/'/
   );
   assert.throws(
     () => validateApiEndpoint(`https://evil.attacker.com/repos/${SOURCE_REPO}/releases`),
