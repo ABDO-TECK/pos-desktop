@@ -143,6 +143,11 @@ final class ShellDeltaFileTransactionService
                 throw new RuntimeException("Source root verification failed during prepare: " . ($srcCheck['reason_code'] ?? 'source_mismatch'));
             }
 
+            // Fresh actual full inventory check before staging/backup
+            if (!$this->isRootExactSource($canonicalRoot, $descriptor)) {
+                throw new RuntimeException("Source root inventory verification failed during prepare: source_inventory_mismatch");
+            }
+
             // Stage all changed files from ZIP into workspace/staged
             $stagedFiles = $this->stageChangedFiles($sealedZipPath, $descriptor, $workspace);
 
@@ -256,6 +261,11 @@ final class ShellDeltaFileTransactionService
             $srcCheck = $this->manifests->verifySource($canonicalRoot, $descriptor);
             if (!$srcCheck['ok']) {
                 throw new RuntimeException("Source root drift detected before first mutation: " . ($srcCheck['reason_code'] ?? 'source_drift'));
+            }
+
+            // Fresh actual full inventory check before any product mutation or journal applying transition
+            if (!$this->isRootExactSource($canonicalRoot, $descriptor)) {
+                throw new RuntimeException("Source root inventory drift detected before first mutation: source_inventory_mismatch");
             }
 
             // Pre-flight check for file <-> directory shape transitions
