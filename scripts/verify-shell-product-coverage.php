@@ -535,18 +535,82 @@ if ($buildInventoryException !== null) {
     $gaps[] = "Service buildInventory failed: " . $buildInventoryException->getMessage();
 }
 
-// Check D: Inventory omissions or discrepancies (if buildInventory succeeded)
+// Check D: Inventory omissions, size/hash discrepancies, or format failures (if buildInventory succeeded)
 if ($inventory !== null) {
     $inventoryFiles = $inventory['files'] ?? [];
 
     $missingFromInventory = [];
+    $sizeMismatches = [];
+    $hashMismatches = [];
+    $accessErrors = [];
+
     foreach ($discoveredFiles as $path => $info) {
-        if (!$info['is_protected'] && !isset($inventoryFiles[$path])) {
+        if ($info['is_protected']) {
+            // Protected user-state files must NEVER be hashed, read, or expected in inventory
+            continue;
+        }
+
+        if (!isset($inventoryFiles[$path])) {
             $missingFromInventory[] = $path;
+            continue;
+        }
+
+        // Independently verify physical file size and sha256 via approved confinement resolver
+        try {
+            $confinedFile = ProductInventoryService::resolveConfinedPath($canonicalRoot, $path, true);
+            if (!is_file($confinedFile) || is_link($confinedFile)) {
+                $accessErrors[] = "{$path}: not a regular file or link encountered";
+                continue;
+            }
+
+            clearstatcache(true, $confinedFile);
+            $diskSize = @filesize($confinedFile);
+            if ($diskSize === false || $diskSize !== $inventoryFiles[$path]['size']) {
+                $sizeMismatches[] = sprintf(
+                    "%s (disk: %s, inventory: %s)",
+                    $path,
+                    $diskSize === false ? 'false' : (string)$diskSize,
+                    (string)($inventoryFiles[$path]['size'] ?? 'missing')
+                );
+            }
+
+            $diskHash = @hash_file('sha256', $confinedFile);
+            if ($diskHash === false || strtolower($diskHash) !== strtolower((string)($inventoryFiles[$path]['sha256'] ?? ''))) {
+                $hashMismatches[] = sprintf(
+                    "%s (disk: %s, inventory: %s)",
+                    $path,
+                    $diskHash === false ? 'false' : $diskHash,
+                    (string)($inventoryFiles[$path]['sha256'] ?? 'missing')
+                );
+            }
+        } catch (\Throwable $e) {
+            $accessErrors[] = "{$path}: " . $e->getMessage();
         }
     }
+
     if (!empty($missingFromInventory)) {
         $gaps[] = sprintf("Inventory omits %d independently discovered physical files.", count($missingFromInventory));
+        foreach (array_slice($missingFromInventory, 0, 50) as $mPath) {
+            echo "  - [INVENTORY OMISSION] {$mPath}\n";
+        }
+    }
+
+    if (!empty($sizeMismatches)) {
+        $gaps[] = sprintf("Inventory contains %d file size mismatches against physical files.", count($sizeMismatches));
+        foreach (array_slice($sizeMismatches, 0, 50) as $sMis) {
+            echo "  - [SIZE MISMATCH] {$sMis}\n";
+        }
+    }
+
+    if (!empty($hashMismatches)) {
+        $gaps[] = sprintf("Inventory contains %d sha256 digest mismatches against physical files.", count($hashMismatches));
+        foreach (array_slice($hashMismatches, 0, 50) as $hMis) {
+            echo "  - [SHA256 MISMATCH] {$hMis}\n";
+        }
+    }
+
+    if (!empty($accessErrors)) {
+        $gaps[] = sprintf("Encountered %d physical file access/confinement errors during independent check.", count($accessErrors));
     }
 
     $extraInInventory = [];
@@ -557,10 +621,13 @@ if ($inventory !== null) {
     }
     if (!empty($extraInInventory)) {
         $gaps[] = sprintf("Inventory contains %d paths not present in physical filesystem.", count($extraInInventory));
+        foreach (array_slice($extraInInventory, 0, 50) as $ePath) {
+            echo "  - [EXTRA IN INVENTORY] {$ePath}\n";
+        }
     }
 
-    // Validate inventory format and structure
-    $validationCheck = $service->validateInventory($inventory);
+    // Validate inventory format and structure using nativeVersion from source package
+    $validationCheck = $service->validateInventory($inventory, null, $nativeVersion);
     if (!$validationCheck['ok']) {
         $gaps[] = "Inventory failed validateInventory check: " . ($validationCheck['reason_code'] ?? 'unknown');
     }

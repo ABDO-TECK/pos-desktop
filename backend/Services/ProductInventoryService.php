@@ -27,7 +27,23 @@ final class ProductInventoryService
     /**
      * Managed Electron root files needed for normal packaged tree.
      */
-    private const ELECTRON_ROOT_PATTERN = '/^(?:POS Desktop\.exe|uninstall-data\.ps1|icudtl\.dat|v8_context_snapshot\.bin|snapshot_blob\.bin|resources\.pak|chrome_100_percent\.pak|chrome_200_percent\.pak|d3dcompiler_47\.dll|ffmpeg\.dll|libEGL\.dll|libGLESv2\.dll|vk_swiftshader\.dll|vk_swiftshader_icd\.json|vulkan-1\.dll|dxil\.dll|dxcompiler\.dll|LICENSE(?:\.[A-Za-z0-9_.-]+)*\.txt|LICENSES(?:\.[A-Za-z0-9_.-]+)*\.html|version)$/D';
+    private const ELECTRON_ROOT_PATTERN = '/^(?:POS Desktop\.exe|icudtl\.dat|v8_context_snapshot\.bin|snapshot_blob\.bin|resources\.pak|chrome_100_percent\.pak|chrome_200_percent\.pak|d3dcompiler_47\.dll|ffmpeg\.dll|libEGL\.dll|libGLESv2\.dll|vk_swiftshader\.dll|vk_swiftshader_icd\.json|vulkan-1\.dll|dxil\.dll|dxcompiler\.dll|LICENSE(?:\.[A-Za-z0-9_.-]+)*\.txt|LICENSES(?:\.[A-Za-z0-9_.-]+)*\.html|version)$/D';
+
+    /**
+     * Exact vendor bootstrap SQL scripts under resources/portable/mysql/share.
+     * These are static engine assets, NOT mutable customer user-state databases.
+     */
+    public const VENDOR_BOOTSTRAP_SQL_FILES = [
+        'resources/portable/mysql/share/fill_help_tables.sql',
+        'resources/portable/mysql/share/install_spider.sql',
+        'resources/portable/mysql/share/maria_add_gis_sp.sql',
+        'resources/portable/mysql/share/maria_add_gis_sp_bootstrap.sql',
+        'resources/portable/mysql/share/mysql_performance_tables.sql',
+        'resources/portable/mysql/share/mysql_system_tables.sql',
+        'resources/portable/mysql/share/mysql_system_tables_data.sql',
+        'resources/portable/mysql/share/mysql_test_data_timezone.sql',
+        'resources/portable/mysql/share/mysql_test_db.sql',
+    ];
 
     /**
      * Required physical artifacts in an as-built Windows installation.
@@ -119,8 +135,8 @@ final class ProductInventoryService
             return true;
         }
 
-        // SQL files except the schema definition in unpacked app
-        if (preg_match('/\.sql$/i', $normalized) && $normalized !== 'resources/app.asar.unpacked/database/pos_schema.sql') {
+        // SQL files except the schema definition in unpacked app and authorized vendor bootstrap SQL
+        if (preg_match('/\.sql$/i', $normalized) && !self::isAllowedSqlPath($normalized)) {
             return true;
         }
 
@@ -130,6 +146,25 @@ final class ProductInventoryService
         }
 
         return false;
+    }
+
+    /**
+     * Check if a path is an authorized vendor bootstrap SQL script.
+     */
+    public static function isVendorBootstrapSqlPath(string $path): bool
+    {
+        return in_array($path, self::VENDOR_BOOTSTRAP_SQL_FILES, true);
+    }
+
+    /**
+     * Check if a relative path is an authorized nonprotected SQL file.
+     */
+    public static function isAllowedSqlPath(string $path): bool
+    {
+        if ($path === 'resources/app.asar.unpacked/database/pos_schema.sql') {
+            return true;
+        }
+        return self::isVendorBootstrapSqlPath($path);
     }
 
     /**
@@ -221,20 +256,107 @@ final class ProductInventoryService
             return ['ok' => true, 'reason_code' => null];
         }
 
-        // 5. resources/portable runtime tree (explicit allowlist from desktop-runtime.json / build)
-        if ($path === 'resources/portable/runtime-manifest.json') {
+        // 5. resources root files
+        if ($path === 'resources/uninstall-data.ps1') {
             return ['ok' => true, 'reason_code' => null];
         }
-        if (preg_match('/^resources\/portable\/php\/(?:php\.exe|php\.ini|php\.ini-production|php\.ini-development|libsqlite3\.dll|libcrypto-[A-Za-z0-9_.-]+\.dll|libssl-[A-Za-z0-9_.-]+\.dll|libssh2\.dll|nghttp2\.dll)$/D', $path)) {
+
+        // 6. resources/portable runtime tree manifests
+        if ($path === 'resources/portable/runtime-manifest.json' || $path === 'resources/portable/printing-manifest.json') {
             return ['ok' => true, 'reason_code' => null];
         }
+
+        // 7. resources/portable/php runtime
+        // Exact 5 exes: php.exe, php-cgi.exe, php-win.exe, phpdbg.exe, deplister.exe
+        if (preg_match('/^resources\/portable\/php\/(?:php\.exe|php-cgi\.exe|php-win\.exe|phpdbg\.exe|deplister\.exe)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // php root configurations, docs, licenses, libs, and dlls
+        if (preg_match('/^resources\/portable\/php\/(?:php\.ini|php\.ini-production|php\.ini-development|README\.md|license\.txt|news\.txt|readme-redist-bins\.txt|snapshot\.txt|php8embed\.lib|[A-Za-z0-9_.-]+\.dll)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // php phar scripts
+        if ($path === 'resources/portable/php/phar.phar.bat' || $path === 'resources/portable/php/pharcommand.phar') {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // php dev libraries, extras, and lib subdirectories
+        if ($path === 'resources/portable/php/dev/php8.lib' ||
+            $path === 'resources/portable/php/extras/ssl/legacy.dll' ||
+            $path === 'resources/portable/php/extras/ssl/openssl.cnf' ||
+            $path === 'resources/portable/php/lib/enchant/libenchant2_hunspell.dll') {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // php extensions
         if (preg_match('/^resources\/portable\/php\/ext\/php_[a-z0-9_]+\.dll$/D', $path)) {
             return ['ok' => true, 'reason_code' => null];
         }
-        if (preg_match('/^resources\/portable\/mysql\/(?:bin\/mysqld\.exe|bin\/mysql\.exe|bin\/mysqladmin\.exe|bin\/mysql_install_db\.exe|my\.ini)$/D', $path)) {
+
+        // 8. resources/portable/java runtime
+        // Finite bin exes: jabswitch.exe, java.exe, javaw.exe, jcmd.exe
+        if (preg_match('/^resources\/portable\/java\/bin\/(?:jabswitch\.exe|java\.exe|javaw\.exe|jcmd\.exe)$/D', $path)) {
             return ['ok' => true, 'reason_code' => null];
         }
-        if (preg_match('/^resources\/portable\/mysql\/share\/[A-Za-z0-9_.\/ -]+$/D', $path)) {
+        // java bin DLLs (root bin and server/client subdirectories)
+        if (preg_match('/^resources\/portable\/java\/bin\/(?:server\/|client\/)?[A-Za-z0-9_.-]+\.dll$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // java release metadata
+        if ($path === 'resources/portable/java/release') {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // java conf files (security policy readme, java.policy, java.security, bounded policies)
+        if (preg_match('/^resources\/portable\/java\/conf\/security\/(?:java\.policy|java\.security|policy\/(?:README\.txt|(?:limited|unlimited)\/[A-Za-z0-9_.-]+\.policy))$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // java lib files (strictly jrt-fs.jar, jvm.cfg, tz data, font config, modules, classlist, jawt, jvm, Xusage, jfr, security policies/certs)
+        if ($path === 'resources/portable/java/lib/jrt-fs.jar') {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        if (preg_match('/^resources\/portable\/java\/lib\/(?:jvm\.cfg|tzdb\.dat|tzmappings|fontconfig\.(?:bfc|properties\.src)|psfont(?:2D)?\.properties\.ja|modules|classlist|jawt\.lib|jvm\.lib|(?:client|server)\/Xusage\.txt|jfr\/(?:default|profile)\.jfc|security\/(?:default\.policy|public_suffix_list\.dat|blocked\.certs|cacerts|policy\/(?:limited|unlimited)\/[A-Za-z0-9_.-]+\.policy))$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+
+        // 9. resources/portable/qz-tray runtime
+        // Root qz-tray.jar and LICENSE.txt
+        if ($path === 'resources/portable/qz-tray/qz-tray.jar' || $path === 'resources/portable/qz-tray/LICENSE.txt') {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // libs DLLs (DLL only, no JARs in libs/)
+        if (preg_match('/^resources\/portable\/qz-tray\/libs\/[A-Za-z0-9_.-]+\.dll$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+
+        // 10. resources/portable/mysql runtime
+        // Root metadata and config
+        if (preg_match('/^resources\/portable\/mysql\/(?:COPYING|CREDITS|README\.md|THIRDPARTY|my\.ini)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // 32 finite exes in bin/
+        if (preg_match('/^resources\/portable\/mysql\/bin\/(?:aria_(?:chk|dump_log|ftdump|pack|read_log)|innochecksum|mariabackup|mbstream|my_print_defaults|myisam(?:_ftdump|chk|log|pack)|mysql(?:|_install_db|_ldb|_plugin|_tzinfo_to_sql|_upgrade|_upgrade_service|_upgrade_wizard|admin|binlog|check|d|dump|import|show|slap)|perror|replace|sst_dump)\.exe$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql bin DLLs and PDB
+        if (preg_match('/^resources\/portable\/mysql\/bin\/(?:[A-Za-z0-9_.-]+\.dll|mysqld\.pdb)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql bin perl scripts and hotbackup (exact 5 measured perl scripts + myrocks_hotbackup)
+        if (preg_match('/^resources\/portable\/mysql\/bin\/(?:(?:mysql_config|mysql_convert_table_format|mysqld_multi|mysqldumpslow|mysqlhotcopy)\.pl|myrocks_hotbackup)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql include headers
+        if (preg_match('/^resources\/portable\/mysql\/include\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.h$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql lib files and plugins
+        if (preg_match('/^resources\/portable\/mysql\/lib\/(?:(?:libmariadb\.(?:dll|lib|pdb)|mariadbclient\.lib|mysqlservices\.lib)|plugin\/[A-Za-z0-9_.-]+\.(?:dll|lib))$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql share: strictly 4 JARs, charsets XML/README, error messages
+        if (preg_match('/^resources\/portable\/mysql\/share\/(?:charsets\/[A-Za-z0-9_.-]+\.xml|charsets\/README|[A-Za-z0-9_.-]+\/errmsg\.sys|(?:JavaWrappers|JdbcInterface|Mongo2|Mongo3)\.jar)$/D', $path)) {
+            return ['ok' => true, 'reason_code' => null];
+        }
+        // mysql vendor bootstrap SQL files (single source of truth via VENDOR_BOOTSTRAP_SQL_FILES)
+        if (self::isVendorBootstrapSqlPath($path)) {
             return ['ok' => true, 'reason_code' => null];
         }
 
