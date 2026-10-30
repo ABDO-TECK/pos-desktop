@@ -42,3 +42,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           php scripts/verify-shell-delta-contract.php
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          php scripts/verify-shell-delta-builder.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
