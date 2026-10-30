@@ -783,9 +783,20 @@ final class ProductInventoryService
         }
 
         // Retained shell entries must strictly equal inventory files entries
-        if ($files['POS Desktop.exe'] !== $shellFiles['POS Desktop.exe'] ||
-            $files['resources/app.asar'] !== $shellFiles['resources/app.asar']) {
-            return ['ok' => false, 'reason_code' => 'native_shell_file_mismatch'];
+        foreach (['POS Desktop.exe', 'resources/app.asar'] as $req) {
+            $fEntry = $files[$req];
+            if (!is_array($fEntry)) {
+                return ['ok' => false, 'reason_code' => 'native_shell_file_mismatch'];
+            }
+            $fKeys = array_keys($fEntry);
+            sort($fKeys);
+            if ($fKeys !== ['sha256', 'size']) {
+                return ['ok' => false, 'reason_code' => 'native_shell_file_mismatch'];
+            }
+            if ($fEntry['sha256'] !== $shellFiles[$req]['sha256'] ||
+                $fEntry['size'] !== $shellFiles[$req]['size']) {
+                return ['ok' => false, 'reason_code' => 'native_shell_file_mismatch'];
+            }
         }
 
         // Validate all paths and entries
