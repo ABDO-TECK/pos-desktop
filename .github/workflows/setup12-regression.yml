@@ -85,6 +85,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-desktop-restore-flow.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-delta-flow.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Record unit regression summary
         shell: pwsh
