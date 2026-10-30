@@ -1,0 +1,47 @@
+name: Shell File Transaction Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Services/ShellDeltaFileTransactionService.php'
+      - 'scripts/verify-shell-file-transaction.php'
+      - '.github/workflows/shell-file-transaction.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-file-transaction-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-transaction:
+    name: Verify Shell File Transaction Core (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: zip, openssl, mbstring, gd
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          composer install --no-dev --prefer-dist --no-progress --no-interaction --no-scripts --working-dir=backend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run shell file transaction verification
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-file-transaction.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
