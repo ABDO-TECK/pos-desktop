@@ -1,0 +1,108 @@
+name: Shell Packaged Product Coverage Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'scripts/verify-shell-product-coverage.php'
+      - '.github/workflows/shell-product-coverage.yml'
+      - 'backend/Services/ProductInventoryService.php'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/desktop-runtime.json'
+      - 'scripts/prepare-desktop-runtime.ps1'
+      - 'scripts/prepare-print-runtime.ps1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-product-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage-probe:
+    name: Packaged Product Coverage Probe (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked dependencies
+        shell: pwsh
+        env:
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build frontend and backend phar
+        shell: pwsh
+        run: |
+          npm run frontend:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:phar
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          php scripts/verify-phar-runtime.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Cache pinned vendor archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-tools/desktop-runtime-downloads
+            build-tools/qz-tray-2.2.6-x86_64.exe
+          key: windows-portable-${{ hashFiles('scripts/desktop-runtime.json') }}
+
+      - name: Prepare portable PHP, MariaDB, Java and QZ Tray
+        shell: pwsh
+        run: |
+          npm run prepare:desktop-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run prepare:print-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run verify:desktop-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build unpacked development package directory
+        shell: pwsh
+        run: |
+          Write-Host "Executing electron-builder directory build (NO NSIS/Setup; development product coverage only)..."
+          .\node_modules\.bin\electron-builder.cmd --win --x64 --dir --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath 'dist-electron/win-unpacked' -PathType Container)) {
+            Write-Error "Required output directory dist-electron/win-unpacked does not exist."
+            exit 1
+          }
+
+      - name: Run shell packaged product coverage probe
+        shell: pwsh
+        run: |
+          Write-Host "DEVELOPMENT PRODUCT COVERAGE PROBE: Current development tree file coverage only; no installed13/Beta bootstrap proof. Not a release."
+          php scripts/verify-shell-product-coverage.php --root dist-electron/win-unpacked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
