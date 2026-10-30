@@ -403,6 +403,7 @@ $mysqlPositives = [
     'resources/portable/mysql/lib/plugin/ha_connect.lib',
     'resources/portable/mysql/share/JavaWrappers.jar',
     'resources/portable/mysql/share/charsets/Index.xml',
+    'resources/portable/mysql/share/errmsg-utf8.txt',
     'resources/portable/mysql/share/english/errmsg.sys',
 ];
 foreach ($mysqlPositives as $p) {

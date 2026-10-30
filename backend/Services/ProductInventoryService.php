@@ -352,7 +352,7 @@ final class ProductInventoryService
             return ['ok' => true, 'reason_code' => null];
         }
         // mysql share: strictly 4 JARs, charsets XML/README, error messages
-        if (preg_match('/^resources\/portable\/mysql\/share\/(?:charsets\/[A-Za-z0-9_.-]+\.xml|charsets\/README|[A-Za-z0-9_.-]+\/errmsg\.sys|(?:JavaWrappers|JdbcInterface|Mongo2|Mongo3)\.jar)$/D', $path)) {
+        if (preg_match('/^resources\/portable\/mysql\/share\/(?:errmsg-utf8\.txt|charsets\/[A-Za-z0-9_.-]+\.xml|charsets\/README|[A-Za-z0-9_.-]+\/errmsg\.sys|(?:JavaWrappers|JdbcInterface|Mongo2|Mongo3)\.jar)$/D', $path)) {
             return ['ok' => true, 'reason_code' => null];
         }
         // mysql vendor bootstrap SQL files (single source of truth via VENDOR_BOOTSTRAP_SQL_FILES)
