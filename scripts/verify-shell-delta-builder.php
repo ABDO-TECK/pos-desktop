@@ -732,7 +732,7 @@ try {
         '--output-dir', $missingParentOut,
     ]);
     assertTrue($resMissingParent['exitCode'] !== 0, "Missing nested parent must exit non-zero");
-    assertTrue(str_contains($resMissingParent['stderr'], 'Output parent is not a directory'), "Expected 'Output parent is not a directory', got: {$resMissingParent['stderr']}");
+    assertTrue(str_contains($resMissingParent['stderr'], 'Required path does not exist:'), "Expected missing parent rejection, got: {$resMissingParent['stderr']}");
     assertTrue(!file_exists($missingParentOut), "Missing parent output dir must not exist");
     assertNoStageOrLeaseLeft($lab);
     echo "  PASS: Missing nested parent rejected.\n\n";
