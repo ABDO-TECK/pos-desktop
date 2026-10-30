@@ -1,0 +1,47 @@
+name: Shell Worker Launch Boundary Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'scripts/verify-shell-worker-launch.mjs'
+      - '.github/workflows/shell-worker-launch.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-worker-launch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Shell Worker Launch Boundary Probe (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup PHP 8.2.30
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2.30'
+          coverage: none
+          tools: none
+
+      - name: Run shell worker launch boundary probe
+        shell: pwsh
+        run: |
+          node scripts/verify-shell-worker-launch.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
