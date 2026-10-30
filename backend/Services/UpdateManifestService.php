@@ -261,7 +261,7 @@ class UpdateManifestService
      *
      * Rules:
      * - 'stable' client receives ONLY 'stable' releases.
-     * - 'beta' client receives 'beta' and 'stable' releases.
+     * - 'beta' client receives ONLY 'beta' releases.
      *
      * @param string $clientChannel Client update channel ('stable', 'beta')
      * @param string|null $releaseChannel Channel specified in release manifest (defaults to 'stable')
@@ -277,6 +277,9 @@ class UpdateManifestService
         }
         if ($cliChannel === 'stable' && $relChannel !== 'stable') {
             return ['compatible'=>false, 'reason'=>'Stable clients accept stable releases only.'];
+        }
+        if ($cliChannel === 'beta' && $relChannel !== 'beta') {
+            return ['compatible'=>false, 'reason'=>'Beta clients accept beta releases only.'];
         }
         return ['compatible'=>true, 'reason'=>null];
     }

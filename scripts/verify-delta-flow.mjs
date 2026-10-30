@@ -87,7 +87,7 @@ $service=new App\\Services\\DeltaUpdateService(null,$argv[2],$argv[3]);
 $check=new App\\Services\\UpdateManifestService();
 if($check->checkVersionCompatibility('0.0.1',$manifest)['compatible'])throw new Exception('wrong baseline accepted');
 if($check->checkChannelCompatibility('stable','beta')['compatible'])throw new Exception('stable accepted beta');
-if(!$check->checkChannelCompatibility('beta','stable')['compatible'])throw new Exception('beta rejected stable');
+if($check->checkChannelCompatibility('beta','stable')['compatible'])throw new Exception('beta accepted stable');
 $stage=$service->extractZipToStaging($argv[4],$service->getStagingDir($manifest['version']));
 if(!$stage['ok'])throw new Exception(json_encode($stage));
 $backup=$service->createBackupSnapshot($manifest['from_version'],$manifest['version'],$manifest);

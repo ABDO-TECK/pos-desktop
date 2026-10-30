@@ -43,7 +43,17 @@ expect(count($paged->requests) === 2, 'Release enumeration did not reach second 
 $policy = new App\Services\UpdateManifestService();
 expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'beta'], '0.0.3', 'v0.0.3', 'stable')['compatible'], 'Signed beta asset accepted under a stable tag.');
 expect(!$policy->checkReleaseAssociation(['version'=>'0.0.4-beta.1','channel'=>'beta'], '0.0.4-beta.1', 'v0.0.4-beta.1', 'stable')['compatible'], 'Stable apply accepted beta channel.');
-expect($policy->checkReleaseAssociation(['version'=>'0.0.3','channel'=>'stable'], '0.0.3', 'v0.0.3', 'beta')['compatible'], 'Beta cannot promote to stable.');
+expect(!$policy->checkReleaseAssociation(['version'=>'0.0.3','channel'=>'stable'], '0.0.3', 'v0.0.3', 'beta')['compatible'], 'Beta must reject stable promotion.');
+
+// Beta paged search: 100 stable releases on page 1, beta release on page 2
+$pagedBeta = new FixtureReleaseProvider(array_merge(array_fill(0, 100, release('0.0.3', false)), [release('0.0.4-beta.1', true)]));
+expect($pagedBeta->getLatestRelease('beta', '0.0.2')['latest_version'] === '0.0.4-beta.1', 'Beta release hidden behind stable page.');
+expect(count($pagedBeta->requests) === 2, 'Beta release enumeration did not reach second page.');
+
+// Only Stable available: Beta client receives no_eligible_release (never offers Stable)
+$onlyStable = (new FixtureReleaseProvider([release('0.0.13', false, '0.0.12')]))->getLatestRelease('beta', '0.0.12');
+expect(!empty($onlyStable['no_eligible_release']), 'Beta client offered stable when only stable releases exist.');
+
 foreach ($provider->requests as $url) expect(str_contains($url, '/ABDO-TECK/pos-desktop-updates/'), 'Request reached the wrong repository.');
 echo "Release channels verified: stable/beta only, RC/drafts excluded, baseline selection and repository isolation.\n";
 

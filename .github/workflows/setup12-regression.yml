@@ -3,7 +3,7 @@ name: Setup 12 Core Unit Regressions
 on:
   workflow_dispatch:
   push:
-    branches: [fix-setup12-channel-and-restore]
+    branches: [fix-setup12-channel-and-restore, fix-strict-update-channels]
 
 permissions:
   contents: read
@@ -62,6 +62,8 @@ jobs:
           php scripts/verify-release-channels.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-update-channel-policy.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-auto-updater-channel-isolation.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-channel-transition-compatibility.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

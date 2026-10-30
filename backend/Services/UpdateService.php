@@ -217,9 +217,25 @@ class UpdateService
                 $cached = @json_decode((string) @file_get_contents($cacheFile), true);
                 if (is_array($cached) && !empty($cached['ok']) && !empty($cached['data'])) {
                     $cachedVersion = $cached['data']['version'] ?? null;
-                    if ($cachedVersion === null || (is_string($cachedVersion) && $this->manifestService->checkChannelCompatibility($targetChannel, UpdateChannelPolicy::installedChannel($cachedVersion))['compatible'])) {
-                        return $cached['data'];
+                    if ($cachedVersion !== null) {
+                        if (!is_string($cachedVersion)) {
+                            return null;
+                        }
+                        $derivedChannel = UpdateChannelPolicy::installedChannel($cachedVersion);
+                        $declaredChannel = isset($cached['data']['channel']) && is_string($cached['data']['channel'])
+                            ? strtolower(trim($cached['data']['channel']))
+                            : null;
+                        if ($declaredChannel !== null && $declaredChannel !== $derivedChannel) {
+                            return null;
+                        }
+                        if ($derivedChannel !== $targetChannel) {
+                            return null;
+                        }
+                        if (!$this->manifestService->checkChannelCompatibility($targetChannel, $derivedChannel)['compatible']) {
+                            return null;
+                        }
                     }
+                    return $cached['data'];
                 }
             }
         }
@@ -333,6 +349,15 @@ class UpdateService
             $local = $this->getLocalVersion();
             $ghRelease = $this->githubProvider->getLatestRelease($targetChannel, $local['version'] ?? null);
             $noEligibleRelease = !empty($ghRelease['no_eligible_release']);
+            $relVersion = $ghRelease['latest_version'] ?? null;
+            if ($relVersion !== null && !$noEligibleRelease) {
+                $relChannel = UpdateChannelPolicy::installedChannel($relVersion);
+                $declaredChannel = isset($ghRelease['channel']) && is_string($ghRelease['channel']) ? strtolower(trim($ghRelease['channel'])) : null;
+                if (($declaredChannel !== null && $declaredChannel !== $relChannel) || $relChannel !== $targetChannel) {
+                    $noEligibleRelease = true;
+                    $ghRelease['latest_version'] = null;
+                }
+            }
             if ($ghRelease['ok'] && (!empty($ghRelease['latest_version']) || $noEligibleRelease)) {
                 $cachePayload = [
                     'ok' => true,
@@ -348,7 +373,7 @@ class UpdateService
                         'delta_url' => $ghRelease['delta_url'],
                         'full_package_url' => $ghRelease['full_package_url'],
                         'assets' => $ghRelease['assets'],
-                        'channel' => $ghRelease['channel'] ?? 'stable',
+                        'channel' => $ghRelease['channel'] ?? $targetChannel,
                         'no_eligible_release' => $noEligibleRelease,
                     ],
                     'checkedUrl' => $this->repoUrl,
@@ -406,6 +431,15 @@ class UpdateService
             $data = json_decode($result, true);
             if (!is_array($data) || empty($data['version']) || !is_string($data['version'])) {
                 return $this->remoteFailure('invalid_version_json', 'Update server returned invalid version data.', $httpCode);
+            }
+
+            $derivedChannel = UpdateChannelPolicy::installedChannel($data['version']);
+            $declaredChannel = isset($data['channel']) && is_string($data['channel']) ? strtolower(trim($data['channel'])) : null;
+            if ($declaredChannel !== null && $declaredChannel !== $derivedChannel) {
+                return $this->remoteFailure('channel_mismatch', 'Update server declared channel does not match version tag.', $httpCode);
+            }
+            if ($derivedChannel !== $targetChannel) {
+                return $this->remoteFailure('channel_mismatch', "Update version {$data['version']} belongs to channel {$derivedChannel}, but target channel is {$targetChannel}.", $httpCode);
             }
 
             $cachePayload = [
@@ -744,9 +778,17 @@ class UpdateService
 
         // Release generation guard: v0 clients must never update to a newer generation.
         $compatibility = ReleaseVersionPolicy::assess($currentVersion, $latestVersion);
-        $hasUpdate = $compatibility['compatible'] && version_compare($latestVersion, $currentVersion, '>');
-        $deltaReason = $compatibility['reason'];
-        $deltaReasonCode = $compatibility['reason_code'];
+        $derivedReleaseChannel = is_string($latestVersion) ? UpdateChannelPolicy::installedChannel($latestVersion) : null;
+        $declaredReleaseChannel = isset($remote['channel']) && is_string($remote['channel']) ? strtolower(trim($remote['channel'])) : null;
+        if ($derivedReleaseChannel !== null && $declaredReleaseChannel !== null && $derivedReleaseChannel !== $declaredReleaseChannel) {
+            $channelCompat = ['compatible' => false, 'reason' => 'Remote declared channel does not match version tag.'];
+        } else {
+            $targetReleaseChannel = $derivedReleaseChannel ?? $declaredReleaseChannel ?? $clientChannel;
+            $channelCompat = $this->manifestService->checkChannelCompatibility($clientChannel, $targetReleaseChannel);
+        }
+        $hasUpdate = $compatibility['compatible'] && $channelCompat['compatible'] && version_compare($latestVersion, $currentVersion, '>');
+        $deltaReason = !$channelCompat['compatible'] ? $channelCompat['reason'] : $compatibility['reason'];
+        $deltaReasonCode = !$channelCompat['compatible'] ? 'channel_mismatch' : $compatibility['reason_code'];
 
         // Emit update_check_started telemetry
         $this->getTelemetryService()->recordEvent([
@@ -1060,6 +1102,37 @@ class UpdateService
             return ['ok' => false, 'error' => 'تعذر الاتصال بخادم التحديثات. تحقق من اتصالك بالإنترنت.', 'code' => 502, 'data' => ['logs' => $output]];
         }
         $targetVersion = $remote['version'] ?? 'unknown';
+        $clientChannel = $this->getClientChannel();
+        $derivedChannel = (is_string($targetVersion) && $targetVersion !== 'unknown') ? UpdateChannelPolicy::installedChannel($targetVersion) : null;
+        $declaredChannel = isset($remote['channel']) && is_string($remote['channel']) ? strtolower(trim($remote['channel'])) : null;
+        if ($derivedChannel !== null && $declaredChannel !== null && $derivedChannel !== $declaredChannel) {
+            return [
+                'ok' => false,
+                'error' => 'Remote declared channel does not match version tag.',
+                'code' => 422,
+                'data' => [
+                    'reason_code' => 'channel_mismatch',
+                    'current_version' => $currentVersion,
+                    'target_version' => is_string($targetVersion) ? $targetVersion : null,
+                    'logs' => $output,
+                ],
+            ];
+        }
+        $targetChannel = $derivedChannel ?? $declaredChannel ?? $clientChannel;
+        $channelCompat = $this->manifestService->checkChannelCompatibility($clientChannel, $targetChannel);
+        if (!$channelCompat['compatible']) {
+            return [
+                'ok' => false,
+                'error' => $channelCompat['reason'] ?? 'Release channel does not match client update channel.',
+                'code' => 422,
+                'data' => [
+                    'reason_code' => 'channel_mismatch',
+                    'current_version' => $currentVersion,
+                    'target_version' => is_string($targetVersion) ? $targetVersion : null,
+                    'logs' => $output,
+                ],
+            ];
+        }
         $compatibility = ReleaseVersionPolicy::assess(
             $currentVersion,
             is_string($targetVersion) ? $targetVersion : null

@@ -35,11 +35,12 @@ $descriptor=['format'=>1,'operation'=>'channel_transition','carrier_tag'=>'v0.0.
 $provider=new class extends GitHubReleaseProvider {
     public array $assets=[];public array $source=[];public array $target=[];
     public string $packagePath='';public ?Closure $afterDownload=null;
+    public array $downloadedUrls=[];
     public function getReleaseByTag(string $tag,string $repo='pos-desktop-updates'):array{return ['ok'=>true,'release'=>$this->source];}
     public function listChannelCandidates(string $channel,int $page=1):array{return ['ok'=>true,'releases'=>$channel==='beta'?[$this->source]:[],'next_page'=>null];}
     public function getLatestSetupRelease(?string $currentVersion=null):array{return ['ok'=>true,'release'=>$this->target];}
     public function fetchAssetContent(string $url):array{return isset($this->assets[$url])?['ok'=>true,'content'=>$this->assets[$url]]:['ok'=>false];}
-    public function downloadAssetFile(string $url,string $destPath):array{copy($this->packagePath,$destPath);if($this->afterDownload)($this->afterDownload)();return ['ok'=>true];}
+    public function downloadAssetFile(string $url,string $destPath):array{$this->downloadedUrls[]=$url;copy($this->packagePath,$destPath);if($this->afterDownload)($this->afterDownload)();return ['ok'=>true];}
 };
 $release=static function(string $repo,string $version,array $names):array{return ['tag_name'=>'v'.$version,'draft'=>false,'prerelease'=>str_contains($version,'-'),'assets'=>array_map(static fn($name)=>['name'=>$name,'browser_download_url'=>'https://github.com/ABDO-TECK/'.$repo.'/releases/download/v'.$version.'/'.$name],$names)];};
 $provider->source=$release('pos-desktop-updates',$source['version'],['deployment-inventory.json','channel-transitions.json','channel-transitions.sig','return.json','return.sig','return.zip','full.json','full.sig','full.zip']);
@@ -82,6 +83,115 @@ $provider->afterDownload=null;$updates->setClientChannel('stable');
 $ready=$service->preview(7,'stable');file_put_contents($package,'corrupt ZIP');
 $result=$service->prepare(7,$ready['preview_id'],true);
 dataAssert(!$result['ok']&&$result['reason_code']==='package_download_or_digest_failed','Corrupt ZIP was not rejected before file or SQL backup operations');
+
+// Synthetic Beta 0.0.12-beta.1 -> Stable 0.0.13 cross-channel transition test
+file_put_contents($root.'/version.json', '{"version":"0.0.12-beta.1"}');
+$source12 = ['version'=>'0.0.12-beta.1', 'files'=>[]];
+foreach(['version.json','backend/backend.phar','frontend/dist/new.js'] as $file) {
+    $source12['files'][$file] = ['sha256'=>hash_file('sha256', $root.'/'.$file), 'size'=>filesize($root.'/'.$file)];
+}
+$target13 = [
+    'version' => '0.0.13',
+    'files' => [
+        'version.json' => ['sha256' => hash('sha256', 'stable13'), 'size' => 8],
+        'backend/backend.phar' => ['sha256' => hash('sha256', 'phar13'), 'size' => 6],
+    ],
+];
+
+$url12 = static fn(string $asset): string => 'https://github.com/ABDO-TECK/pos-desktop-updates/releases/download/v0.0.12-beta.1/' . $asset;
+$provider->source = $release('pos-desktop-updates', '0.0.12-beta.1', [
+    'deployment-inventory.json',
+    'channel-transitions.json',
+    'channel-transitions.sig',
+    'delta-12-to-13.json',
+    'delta-12-to-13.sig',
+    'delta-12-to-13.zip',
+    'full-13.json',
+    'full-13.sig',
+    'full-13.zip',
+]);
+$provider->target = $release('pos-desktop', '0.0.13', ['deployment-inventory.json']);
+$provider->assets[$url12('deployment-inventory.json')] = json_encode($source12);
+$provider->assets['https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.13/deployment-inventory.json'] = json_encode($target13);
+
+$descriptor13Delta = [
+    'format' => 1,
+    'operation' => 'channel_transition',
+    'carrier_tag' => 'v0.0.12-beta.1',
+    'from_version' => '0.0.12-beta.1',
+    'from_channel' => 'beta',
+    'source_inventory_sha256' => hash('sha256', json_encode($source12)),
+    'source_inventory' => $source12,
+    'version' => '0.0.13',
+    'channel' => 'stable',
+    'target_repo' => 'pos-desktop',
+    'target_tag' => 'v0.0.13',
+    'target_inventory_sha256' => hash('sha256', json_encode($target13)),
+    'target_inventory' => $target13,
+    'shell_sha256' => $shell,
+    'type' => 'delta',
+    'files' => array_map(static fn($p) => ['path' => $p, ...$target13['files'][$p]], array_keys($target13['files'])),
+    'deleted_files' => ['frontend/dist/new.js'],
+    'migrations' => [],
+    'package' => ['asset' => 'delta-12-to-13.zip', 'sha256' => str_repeat('b', 64), 'size' => 456],
+    'data_compatibility' => [
+        'format' => 1,
+        'metadata_migration' => App\Services\UpdateDataCompatibilityService::METADATA_MIGRATION,
+        'schema_sha256' => $description['schema_sha256'],
+        'ledger_sha256' => $description['ledger_sha256'],
+    ],
+];
+[$raw13Delta, $sig13Delta] = $sign($descriptor13Delta);
+$provider->assets[$url12('delta-12-to-13.json')] = $raw13Delta;
+$provider->assets[$url12('delta-12-to-13.sig')] = $sig13Delta;
+
+$descriptor13Full = $descriptor13Delta;
+$descriptor13Full['type'] = 'full';
+$descriptor13Full['package'] = ['asset' => 'full-13.zip', 'sha256' => str_repeat('c', 64), 'size' => 789];
+[$raw13Full, $sig13Full] = $sign($descriptor13Full);
+$provider->assets[$url12('full-13.json')] = $raw13Full;
+$provider->assets[$url12('full-13.sig')] = $sig13Full;
+
+$entry13Delta = [
+    'from_version' => '0.0.12-beta.1',
+    'source_inventory_sha256' => $descriptor13Delta['source_inventory_sha256'],
+    'version' => '0.0.13',
+    'channel' => 'stable',
+    'descriptor' => 'delta-12-to-13.json',
+    'signature' => 'delta-12-to-13.sig',
+    'descriptor_sha256' => hash('sha256', $raw13Delta),
+    'type' => 'delta',
+];
+$entry13Full = [
+    ...$entry13Delta,
+    'type' => 'full',
+    'descriptor' => 'full-13.json',
+    'signature' => 'full-13.sig',
+    'descriptor_sha256' => hash('sha256', $raw13Full),
+];
+
+[$index13, $indexSig13] = $sign(['format' => 1, 'carrier_tag' => 'v0.0.12-beta.1', 'entries' => [$entry13Delta, $entry13Full]]);
+$provider->assets[$url12('channel-transitions.json')] = $index13;
+$provider->assets[$url12('channel-transitions.sig')] = $indexSig13;
+
+$updates->setClientChannel('stable');
+$preview13 = $service->preview(7, 'stable');
+dataAssert($preview13['status'] === 'ready', 'Beta 12 -> Stable 13 transition preview failed: ' . json_encode($preview13));
+dataAssert($preview13['package_type'] === 'delta', 'Beta 12 -> Stable 13 must prioritize delta over full package');
+dataAssert($descriptor13Delta['package']['size'] === 456 && $descriptor13Full['package']['size'] === 789, 'Delta size must be distinct from full package size');
+
+// Fallback to full transition when delta asset is missing
+$providerSourceWithNoDelta = $provider->source;
+$provider->source['assets'] = array_values(array_filter($provider->source['assets'], static fn($a) => $a['name'] !== 'delta-12-to-13.zip'));
+$preview13Fallback = $service->preview(7, 'stable');
+dataAssert($preview13Fallback['status'] === 'ready' && $preview13Fallback['package_type'] === 'full', 'Missing delta must fall back to full zip package');
+$provider->source = $providerSourceWithNoDelta;
+
+// Verify that transition packages are zip archives and never native installer executables
+foreach ($provider->downloadedUrls as $dlUrl) {
+    dataAssert(!str_ends_with(strtolower($dlUrl), '.exe'), 'Channel transition must never download native installer exe: ' . $dlUrl);
+}
+
 // The random fixture root owns all its artifacts; no original installation path is used.
 $canonical=realpath($lab);dataAssert($canonical!==false&&str_starts_with(strtolower(str_replace('\\','/',$canonical)),strtolower(str_replace('\\','/',realpath(sys_get_temp_dir()))).'/pos-transition-ready-'),'Unsafe fixture cleanup root');
 $cleanup=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($lab,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::CHILD_FIRST);

@@ -265,7 +265,7 @@ class GitHubReleaseProvider
             $relChannel = UpdateChannelPolicy::installedChannel(ltrim($tag, 'vV'));
             if ($relChannel === 'retired') continue;
             if ((bool)$rel['prerelease'] !== ($relChannel === 'beta')) continue;
-            if ($channel === 'stable' && $relChannel !== 'stable') continue;
+            if ($relChannel !== $channel) continue;
 
             if (!empty($rel['draft'])) continue;
             $mapped = $this->mapReleaseData($rel, $currentVersion);

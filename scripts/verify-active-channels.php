@@ -22,7 +22,7 @@ file_put_contents($file,'malformed json');UpdateChannelPolicy::migratePreference
 $policy=new UpdateManifestService();
 expectActive(!$policy->checkChannelCompatibility('beta','rc')['compatible'],'Beta accepts retired RC release');
 expectActive(!$policy->checkChannelCompatibility('stable','beta')['compatible'],'Stable accepts beta');
-expectActive($policy->checkChannelCompatibility('beta','stable')['compatible'],'Normal beta promotion to stable blocked');
+expectActive(!$policy->checkChannelCompatibility('beta','stable')['compatible'],'Beta accepts stable release');
 expectActive(!$policy->checkChannelCompatibility('beta','nonsense')['compatible'],'Unknown release treated as stable');
 mkdir($lab.'/root');file_put_contents($lab.'/root/version.json','{"version":"0.0.10-beta.5","update_channel":"beta"}');
 putenv('APP_DEPLOY_ROOT='.$lab.'/root');
@@ -34,4 +34,19 @@ $delta=new App\Services\DeltaUpdateService(null,$lab.'/root',$lab);
 $service=new App\Services\UpdateService(new App\Services\GitService(),new App\Services\FrontendBuildService(),new App\Services\BackupService(),$delta,null,null,$provider);
 try {$service->fetchRemoteVersion('beta',false);throw new RuntimeException('Retired cached release offered');}
 catch(RuntimeException $error){expectActive($error->getMessage()==='retired_cache_rejected',$error->getMessage());}
+file_put_contents($lab.'/remote_version_cache_beta.json',json_encode(['ok'=>true,'data'=>['version'=>'0.0.13','channel'=>'stable']]));
+try {$service->fetchRemoteVersion('beta',false);throw new RuntimeException('Stable cached release offered to beta');}
+catch(RuntimeException $error){expectActive($error->getMessage()==='retired_cache_rejected',$error->getMessage());}
+// Negative fixture: cached declared beta but stable version (contradiction)
+file_put_contents($lab.'/remote_version_cache_beta.json',json_encode(['ok'=>true,'data'=>['version'=>'0.0.13','channel'=>'beta']]));
+try {$service->fetchRemoteVersion('beta',false);throw new RuntimeException('Contradictory cached release (declared beta, stable version) offered');}
+catch(RuntimeException $error){expectActive($error->getMessage()==='retired_cache_rejected',$error->getMessage());}
+// Negative fixture: cached declared stable but beta version (contradiction)
+file_put_contents($lab.'/remote_version_cache_stable.json',json_encode(['ok'=>true,'data'=>['version'=>'0.0.10-beta.6','channel'=>'stable']]));
+try {$service->fetchRemoteVersion('stable',false);throw new RuntimeException('Contradictory cached release (declared stable, beta version) offered');}
+catch(RuntimeException $error){expectActive($error->getMessage()==='retired_cache_rejected',$error->getMessage());}
+// Positive fixture: valid matching cached beta release
+file_put_contents($lab.'/remote_version_cache_beta.json',json_encode(['ok'=>true,'data'=>['version'=>'0.0.10-beta.6','channel'=>'beta']]));
+$validCached = $service->fetchRemoteVersion('beta',false);
+expectActive($validCached!==null&&$validCached['version']==='0.0.10-beta.6','Valid same-channel cached release ignored');
 echo "PASS active channels: stable/beta only, retired preference migration, installed identity, preserved history and strict manifest channel policy\n";

@@ -307,6 +307,41 @@ function writeUpdateState(storageDir, state, context = {}) {
   return payload;
 }
 
+function writeUpdateStateIfOwned(storageDir, state, context = {}, expectedOwner = {}) {
+  if (!expectedOwner || typeof expectedOwner !== 'object' || !expectedOwner.owner_id || !expectedOwner.operation) {
+    return { ok: false, reason: 'missing_expected_ownership' };
+  }
+
+  const gate = acquireCoordinationGate(storageDir);
+  if (!gate) return { ok: false, reason: 'gate_unavailable' };
+  try {
+    const current = readUpdateState(storageDir);
+    if (!current) {
+      return { ok: false, reason: 'state_not_found' };
+    }
+    if (current.owner_id !== expectedOwner.owner_id) {
+      return { ok: false, reason: 'owner_mismatch', current };
+    }
+    if (current.operation !== expectedOwner.operation) {
+      return { ok: false, reason: 'operation_mismatch', current };
+    }
+    if (expectedOwner.state !== undefined) {
+      const allowed = Array.isArray(expectedOwner.state) ? expectedOwner.state : [expectedOwner.state];
+      if (!allowed.includes(current.state)) {
+        return { ok: false, reason: 'state_mismatch', current };
+      }
+    }
+    if (expectedOwner.target_version !== undefined && current.target_version !== expectedOwner.target_version) {
+      return { ok: false, reason: 'target_version_mismatch', current };
+    }
+
+    const payload = writeUpdateState(storageDir, state, context);
+    return { ok: true, payload };
+  } finally {
+    releaseCoordinationGate(gate);
+  }
+}
+
 function isActiveUpdateState(state, now = Date.now(), ttlMs = LOCK_TTL_MS) {
   if (!state || !ACTIVE_UPDATE_STATES.has(state.state)) return false;
   const updatedAt = Date.parse(state.updated_at || '');
@@ -324,4 +359,5 @@ module.exports = {
   readUpdateState,
   releaseUpdateLock,
   writeUpdateState,
+  writeUpdateStateIfOwned,
 };
