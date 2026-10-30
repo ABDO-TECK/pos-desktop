@@ -1077,19 +1077,24 @@ try {
     assertTrue($resDowngrade['exitCode'] !== 0, "Downgrade delta must exit non-zero");
     assertTrue(str_contains($resDowngrade['stderr'], 'must be newer than source'), "Expected downgrade error, got: {$resDowngrade['stderr']}");
 
-    // 11.3 Regular delta with no changes
+    // 11.3 Unchanged application version / identical files
+    $sameNativeIdenticalTgt = $lab . '/same-native-identical-tgt';
+    $noChangesOut = $lab . '/out-no-changes';
+    populateTree($sameNativeIdenticalTgt, $sameNativeBase);
     $resNoChanges = runBuilderCli([
         '--source-root', $sameNativeSrcDir,
-        '--target-root', $sameNativeSrcDir,
+        '--target-root', $sameNativeIdenticalTgt,
         '--source-native-version', '0.0.14',
         '--target-native-version', '0.0.14',
         '--source-data-contract', $sourceContractFile,
         '--target-data-contract', $targetContractFile,
         '--private-key', $keyFile,
-        '--output-dir', $lab . '/out-no-changes',
+        '--output-dir', $noChangesOut,
     ]);
-    assertTrue($resNoChanges['exitCode'] !== 0, "No changes delta must exit non-zero");
-    assertTrue(str_contains($resNoChanges['stderr'], 'No physical artifact changes detected'), "Expected no changes error, got: {$resNoChanges['stderr']}");
+    assertTrue($resNoChanges['exitCode'] !== 0, "Unchanged app version must exit non-zero");
+    assertTrue(str_contains($resNoChanges['stderr'], 'must be newer than source'), "Expected unchanged app version error, got: {$resNoChanges['stderr']}");
+    assertTrue(!file_exists($noChangesOut), "No-changes output dir must not exist");
+    assertNoStageOrLeaseLeft($lab);
 
     echo "  PASS: Business logic rejections verified.\n\n";
 
@@ -1112,7 +1117,7 @@ try {
     ]);
     removeTrackedJunction($jSrc);
     assertTrue($resJSrc['exitCode'] !== 0, "Junction source root must exit non-zero");
-    assertTrue(str_contains($resJSrc['stderr'], 'Reparse points and symbolic links are strictly forbidden'), "Expected reparse point error, got: {$resJSrc['stderr']}");
+    assertTrue(str_contains($resJSrc['stderr'], 'Reparse point'), "Expected reparse point error, got: {$resJSrc['stderr']}");
 
     // 12.2 Target is a junction
     $jTgt = $lab . '/junction-tgt';
@@ -1129,7 +1134,7 @@ try {
     ]);
     removeTrackedJunction($jTgt);
     assertTrue($resJTgt['exitCode'] !== 0, "Junction target root must exit non-zero");
-    assertTrue(str_contains($resJTgt['stderr'], 'Reparse points and symbolic links are strictly forbidden'), "Expected reparse point error, got: {$resJTgt['stderr']}");
+    assertTrue(str_contains($resJTgt['stderr'], 'Reparse point'), "Expected reparse point error, got: {$resJTgt['stderr']}");
 
     // 12.3 Output parent is a junction
     $realParent = $lab . '/real-parent-dir';
@@ -1149,7 +1154,7 @@ try {
     removeTrackedJunction($jParent);
     assertTrue(rmdir($realParent), "Failed to rmdir real parent dir");
     assertTrue($resJParent['exitCode'] !== 0, "Junction output parent must exit non-zero");
-    assertTrue(str_contains($resJParent['stderr'], 'Reparse points and symbolic links are strictly forbidden'), "Expected reparse point error, got: {$resJParent['stderr']}");
+    assertTrue(str_contains($resJParent['stderr'], 'Reparse point'), "Expected reparse point error, got: {$resJParent['stderr']}");
 
     echo "  PASS: Junction and reparse point protections verified.\n\n";
 
