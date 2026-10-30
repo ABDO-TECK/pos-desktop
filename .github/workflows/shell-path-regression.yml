@@ -1,0 +1,35 @@
+name: Shell Path Policy Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat-shell-delta-updates]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-path-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-path-policy:
+    name: Verify Shell Path Policy (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      - name: Run shell path policy verification
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-path-policy.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
