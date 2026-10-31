@@ -2895,7 +2895,7 @@ try {
     $root6cSnapshotAfter = snapshotTree($suite5Root6c);
     assertEqual($root6cSnapshotAfter, $root6cSnapshotBefore, "Product root must remain unchanged after oversize journal rejection");
 
-    // 5.6d: Journal redirect / path traversal
+    // 5.6d: Forged legacy journal hints cannot redirect signed actions (positive security proof)
     $suite5Root6d = $lab . DIRECTORY_SEPARATOR . 'suite5-prod-6d';
     $suite5State6d = $lab . DIRECTORY_SEPARATOR . 'suite5-state-6d';
     mkdir($suite5State6d, 0700, true);
@@ -2903,20 +2903,112 @@ try {
     $prep6d = $txService->prepare($suite5Root6d, $suite5State6d, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext);
     $op6d = $prep6d['operation_id'];
     $jPath6d = $suite5State6d . DIRECTORY_SEPARATOR . 'workspaces' . DIRECTORY_SEPARATOR . $op6d . DIRECTORY_SEPARATOR . 'journal.json';
-    $jData6d = json_decode((string) file_get_contents($jPath6d), true);
-    if (!empty($jData6d['files'])) {
-        $firstKey = array_key_first($jData6d['files']);
-        $entry = $jData6d['files'][$firstKey];
-        unset($jData6d['files'][$firstKey]);
-        $jData6d['files']['../../shell-tx-victim/evil.txt'] = $entry;
-    }
-    file_put_contents($jPath6d, json_encode($jData6d, JSON_THROW_ON_ERROR));
+    $jData6d = json_decode((string) file_get_contents($jPath6d), true, 64, JSON_THROW_ON_ERROR);
 
-    assertThrows(function () use ($txService, $suite5Root6d, $suite5State6d, $op6d, $installedBetaContext) {
-        $txService->apply($suite5Root6d, $suite5State6d, $op6d, $installedBetaContext);
-    }, '', "Apply must reject journal with path traversal / redirect");
+    // Explicit unconditional injection of non-empty legacy maps containing relative traversal and
+    // absolute outside product paths pointing ONLY to owned victimDir witness
+    $victimWitnessRel = '../../' . basename($victimDir) . '/' . basename($victimSentinel);
+    $victimWitnessAbs = $victimSentinel;
+
+    $jData6d['files'] = [
+        $victimWitnessRel => ['sha256' => hash('sha256', 'forged_files_rel'), 'size' => 128],
+        $victimWitnessAbs => ['sha256' => hash('sha256', 'forged_files_abs'), 'size' => 256],
+    ];
+    $jData6d['deleted_files'] = [
+        $victimWitnessRel,
+        $victimWitnessAbs,
+    ];
+    $jData6d['staged_files'] = [
+        'POS Desktop.exe' => $victimWitnessAbs,
+        $victimWitnessRel => $victimWitnessAbs,
+    ];
+    $jData6d['backup_files'] = [
+        'POS Desktop.exe' => $victimWitnessAbs,
+        $victimWitnessRel => $victimWitnessAbs,
+    ];
+
+    file_put_contents($jPath6d, json_encode($jData6d, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+
+    // Assert readback tampered journal contains non-empty intended payload (must not no-op)
+    $jReadBack6d = json_decode((string) file_get_contents($jPath6d), true, 64, JSON_THROW_ON_ERROR);
+    assertTrue(!empty($jReadBack6d['files']), "Read-back tampered journal must contain non-empty legacy files map");
+    assertTrue(!empty($jReadBack6d['deleted_files']), "Read-back tampered journal must contain non-empty legacy deleted_files map");
+    assertTrue(!empty($jReadBack6d['staged_files']), "Read-back tampered journal must contain non-empty legacy staged_files map");
+    assertTrue(!empty($jReadBack6d['backup_files']), "Read-back tampered journal must contain non-empty legacy backup_files map");
+    assertEqual($jReadBack6d['staged_files']['POS Desktop.exe'], $victimWitnessAbs, "Read-back staged_files must match injected victim witness path");
+
+    // Apply must succeed: core derives all actions from signed descriptor, not legacy journal hints
+    $apply6dRes = $txService->apply($suite5Root6d, $suite5State6d, $op6d, $installedBetaContext);
+    assertEqual($apply6dRes['phase'], ShellDeltaFileTransactionService::PHASE_FILES_APPLIED, "Apply phase must be 'files_applied_awaiting_health'");
+    assertEqual($apply6dRes['version'], '0.0.14-beta.1', "Applied version must match signed target version 0.0.14-beta.1");
+
+    // Applied files must match full physical signed embedded target inventory and canonical digest
+    $applied6dInv = $manifestService->buildInventory($suite5Root6d, '0.0.14');
+    assertEqual($applied6dInv['files'], $betaTargetInv['files'], "Applied product files must match signed embedded target inventory");
+    $applied6dDigest = ShellDeltaManifestService::canonicalInventoryDigest($applied6dInv);
+    assertEqual($applied6dDigest, $betaManifest['target_inventory_sha256'], "Applied product canonical inventory digest must match signed target digest");
+
+    // Product root must NOT contain extra/traversal files
+    $applied6dSnap = snapshotTree($suite5Root6d);
+    foreach (array_keys($applied6dSnap) as $relP) {
+        assertFalse(str_contains($relP, 'victim'), "Product tree must not contain victim-redirected paths: {$relP}");
+        assertFalse(str_contains($relP, '..'), "Product tree must not contain traversal paths: {$relP}");
+    }
+
+    // Complete known victim snapshot untouched
+    $assertVictimUntouched($victimDir, $victimSnapshotBefore);
+
+    // Rollback must succeed restoring signed source full inventory digest and preserve victim
+    $rb6dRes = $txService->rollback($suite5Root6d, $suite5State6d, $op6d, $installedBetaContext);
+    assertEqual($rb6dRes['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Rollback phase must be 'rolled_back'");
+
+    $rolledBack6dInv = $manifestService->buildInventory($suite5Root6d, '0.0.13');
+    assertEqual($rolledBack6dInv['files'], $betaSourceInv['files'], "Rolled back product files must match signed embedded source inventory");
+    $rolledBack6dDigest = ShellDeltaManifestService::canonicalInventoryDigest($rolledBack6dInv);
+    assertEqual($rolledBack6dDigest, $betaManifest['source_inventory_sha256'], "Rolled back product canonical inventory digest must match signed source digest");
 
     $assertVictimUntouched($victimDir, $victimSnapshotBefore);
+
+    // 5.6e: Authoritative root redirect negative fixture (journal root mismatch rejected)
+    $suite5Root6e = $lab . DIRECTORY_SEPARATOR . 'suite5-prod-6e';
+    $suite5State6e = $lab . DIRECTORY_SEPARATOR . 'suite5-state-6e';
+    mkdir($suite5State6e, 0700, true);
+    populateTree($suite5Root6e, $sourceBetaFiles);
+
+    $prep6e = $txService->prepare($suite5Root6e, $suite5State6e, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext);
+    $op6e = $prep6e['operation_id'];
+    $ws6e = $prep6e['workspace'];
+    $jPath6e = $ws6e . DIRECTORY_SEPARATOR . 'journal.json';
+
+    // Capture complete product snapshot + own active marker bytes
+    $product6eSnapshotBefore = snapshotTree($suite5Root6e);
+    $root6eDigest = hash('sha256', strtolower(rtrim(str_replace('/', '\\', ProductInventoryService::resolveAbsolutePath($suite5Root6e, true)), '\\')));
+    $activeMarkerFile6e = $suite5State6e . DIRECTORY_SEPARATOR . 'active_roots' . DIRECTORY_SEPARATOR . $root6eDigest . '.json';
+    assertTrue(is_file($activeMarkerFile6e), "Active marker file must exist after prepare");
+    $activeMarkerBytesBefore = file_get_contents($activeMarkerFile6e);
+
+    // Set journal['root'] to victimDir (actual owned absolute outside root) and write/read back confirm changed
+    $jData6e = json_decode((string) file_get_contents($jPath6e), true, 64, JSON_THROW_ON_ERROR);
+    $jData6e['root'] = $victimDir;
+    $jTamperedBytes6e = json_encode($jData6e, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+    file_put_contents($jPath6e, $jTamperedBytes6e);
+
+    $jReadBack6e = json_decode((string) file_get_contents($jPath6e), true, 64, JSON_THROW_ON_ERROR);
+    assertEqual($jReadBack6e['root'], $victimDir, "Read-back journal root must match tampered victimDir");
+
+    // Apply must throw specific 'Journal root mismatch' (class line 1628)
+    assertThrows(function () use ($txService, $suite5Root6e, $suite5State6e, $op6e, $installedBetaContext) {
+        $txService->apply($suite5Root6e, $suite5State6e, $op6e, $installedBetaContext);
+    }, 'Journal root mismatch', "Apply must reject journal with root pointing to outside victim directory");
+
+    // Assert product bytes/listing unchanged, victim unchanged, own marker/workspace/journal retained exact tampered bytes
+    $product6eSnapshotAfter = snapshotTree($suite5Root6e);
+    assertEqual($product6eSnapshotAfter, $product6eSnapshotBefore, "Product root bytes and listing must remain completely unchanged after journal root mismatch rejection");
+    $assertVictimUntouched($victimDir, $victimSnapshotBefore);
+    assertTrue(is_file($activeMarkerFile6e), "Own active marker file must still exist after rejected apply");
+    assertEqual(file_get_contents($activeMarkerFile6e), $activeMarkerBytesBefore, "Own active marker file bytes must be retained unchanged");
+    assertTrue(is_dir($ws6e), "Workspace directory must be retained");
+    assertEqual(file_get_contents($jPath6e), $jTamperedBytes6e, "Journal must retain exact tampered bytes");
 
     echo "  [Test Suite 5 Passed]\n";
 
