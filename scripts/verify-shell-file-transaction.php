@@ -1655,10 +1655,15 @@ try {
     // -------------------------------------------------------------------------
     echo "\n=== [Test Suite 3] Deep Directory & Shape Transitions ===\n";
 
-    // 3.1 Deep new directory & file build
+    // 3.1 Deep new directory & file build, publication, and rollback
+    echo "  [3.1] Deep directory publication, parent directory creation, and rollback...\n";
+    $deepRel = 'resources/app.asar.unpacked/frontend/dist/deeply/nested/managed/subpath/feature.js';
+    $deepFeatureBytes = "DEEP_FEATURE_CONTENT_" . bin2hex(random_bytes(16));
+
     $deepTargetFiles = $sourceBetaFiles;
-    $deepTargetFiles['deeply/nested/managed/subpath/feature.js'] = "DEEP_FEATURE_CONTENT_" . bin2hex(random_bytes(16));
+    $deepTargetFiles[$deepRel] = $deepFeatureBytes;
     $deepTargetFiles['resources/app.asar.unpacked/version.json'] = json_encode(['version' => '0.0.14-beta.1']);
+    $deepTargetFiles['resources/app.asar.unpacked/package.json'] = json_encode(['name' => 'pos-desktop', 'version' => '0.0.14-beta.1']);
 
     $deepSrcDir = $lab . DIRECTORY_SEPARATOR . 'deep-src';
     $deepTgtDir = $lab . DIRECTORY_SEPARATOR . 'deep-tgt';
@@ -1676,29 +1681,157 @@ try {
         '--private-key', $keyFile,
         '--output-dir', $deepOutDir,
     ], $lab);
-    assertEqual($builderDeepRes['exitCode'], 0, "Deep builder CLI must succeed");
+    assertEqual(
+        $builderDeepRes['exitCode'],
+        0,
+        "Deep builder CLI must succeed (stdout: {$builderDeepRes['stdout']}, stderr: {$builderDeepRes['stderr']})"
+    );
 
-    $deepManifestRaw = file_get_contents($deepOutDir . DIRECTORY_SEPARATOR . 'shell-manifest.json');
-    $deepSig = file_get_contents($deepOutDir . DIRECTORY_SEPARATOR . 'shell-manifest.sig');
+    $deepManifestRaw = (string) file_get_contents($deepOutDir . DIRECTORY_SEPARATOR . 'shell-manifest.json');
+    $deepSig = (string) file_get_contents($deepOutDir . DIRECTORY_SEPARATOR . 'shell-manifest.sig');
     $deepZipPath = $deepOutDir . DIRECTORY_SEPARATOR . 'shell-delta.zip';
 
-    // 3.2 File <-> Directory shape transition fails preflight
-    echo "  [3.2] File <-> Directory shape transition fails preflight before mutation...\n";
+    $deepManifest = json_decode($deepManifestRaw, true, 64, JSON_THROW_ON_ERROR);
+    $deepSourceInv = $deepManifest['source_inventory'];
+    $deepTargetInv = $deepManifest['target_inventory'];
+
+    // Positive Deep Parent Publication fixture
+    $deepPosRoot = $lab . DIRECTORY_SEPARATOR . 'suite3-deep-pos-product';
+    $deepPosState = $lab . DIRECTORY_SEPARATOR . 'suite3-deep-pos-state';
+    mkdir($deepPosState, 0700, true);
+    populateTree($deepPosRoot, $sourceBetaFiles);
+    populateTree($deepPosRoot, $customerSentinels);
+
+    $prepDeepPos = $txService->prepare($deepPosRoot, $deepPosState, $deepManifestRaw, $deepSig, $deepZipPath, $installedBetaContext);
+    assertEqual($prepDeepPos['phase'], ShellDeltaFileTransactionService::PHASE_PREPARED, "Deep prepare phase must be 'prepared'");
+    $deepPosOpId = $prepDeepPos['operation_id'];
+    $deepPosWs = $prepDeepPos['workspace'];
+
+    $applyDeepPos = $txService->apply($deepPosRoot, $deepPosState, $deepPosOpId, $installedBetaContext);
+    assertEqual($applyDeepPos['phase'], ShellDeltaFileTransactionService::PHASE_FILES_APPLIED, "Deep apply phase must be 'files_applied_awaiting_health'");
+
+    // Require full physical target inventory canonical digest/map match signed embedded target inventory
+    $appliedDeepInv = $manifestService->buildInventory($deepPosRoot, '0.0.14');
+    assertEqual($appliedDeepInv['files'], $deepTargetInv['files'], "Applied product files must match signed embedded target inventory");
+    $appliedDeepDigest = ShellDeltaManifestService::canonicalInventoryDigest($appliedDeepInv);
+    assertEqual($appliedDeepDigest, $deepManifest['target_inventory_sha256'], "Applied product canonical inventory digest must match signed target digest");
+
+    // Deep added file exact target bytes + new ancestors actually exist
+    $deepPhysicalFile = $deepPosRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $deepRel);
+    assertTrue(is_file($deepPhysicalFile), "Deep target file must physically exist after apply");
+    assertEqual(file_get_contents($deepPhysicalFile), $deepFeatureBytes, "Deep target file bytes must match target specification");
+    assertTrue(is_dir(dirname($deepPhysicalFile)), "Deep target file parent directory must physically exist");
+
+    // Customer sentinels intact
+    foreach ($customerSentinels as $cRel => $cContent) {
+        $cPath = $deepPosRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cRel);
+        assertTrue(is_file($cPath), "Protected customer sentinel must remain intact: {$cRel}");
+        assertEqual(file_get_contents($cPath), $cContent, "Protected customer sentinel content must be unchanged: {$cRel}");
+    }
+
+    // Rollback restores source inventory exact; newly empty MANAGED dirs MAY remain by designed policy (NO pruning)
+    $rbDeepPosRes = $txService->rollback($deepPosRoot, $deepPosState, $deepPosOpId, $installedBetaContext);
+    assertEqual($rbDeepPosRes['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Rollback of deep target must succeed with 'rolled_back'");
+
+    $rolledBackDeepInv = $manifestService->buildInventory($deepPosRoot, '0.0.13');
+    assertEqual($rolledBackDeepInv['files'], $deepSourceInv['files'], "Rolled back product files must match signed embedded source inventory");
+    $rolledBackDeepDigest = ShellDeltaManifestService::canonicalInventoryDigest($rolledBackDeepInv);
+    assertEqual($rolledBackDeepDigest, $deepManifest['source_inventory_sha256'], "Rolled back product canonical inventory digest must match signed source digest");
+
+    assertFalse(file_exists($deepPhysicalFile), "Deep target file must be unlinked after rollback");
+    foreach ($customerSentinels as $cRel => $cContent) {
+        $cPath = $deepPosRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cRel);
+        assertEqual(file_get_contents($cPath), $cContent, "Customer sentinel content must be unchanged after rollback: {$cRel}");
+    }
+
+    $deepPosRootDigest = hash('sha256', strtolower(rtrim(str_replace('/', '\\', ProductInventoryService::resolveAbsolutePath($deepPosRoot, true)), '\\')));
+    $deepPosMarkerFile = $deepPosState . DIRECTORY_SEPARATOR . 'active_roots' . DIRECTORY_SEPARATOR . $deepPosRootDigest . '.json';
+    assertFalse(file_exists($deepPosMarkerFile), "Active marker must be removed after successful rollback");
+    assertTrue(is_dir($deepPosWs), "Workspace directory must be retained for audit");
+
+    // 3.2 Target file collision with existing directory fails preflight before mutation
+    echo "  [3.2] Target file collision with existing directory fails preflight before mutation...\n";
     $shapeRoot = $lab . DIRECTORY_SEPARATOR . 'suite3-shape-product';
     $shapeState = $lab . DIRECTORY_SEPARATOR . 'suite3-shape-state';
     mkdir($shapeState, 0700, true);
     populateTree($shapeRoot, $sourceBetaFiles);
-    // In source, create a regular file where the target expects a directory
-    $shapeConflictFile = $shapeRoot . DIRECTORY_SEPARATOR . 'deeply' . DIRECTORY_SEPARATOR . 'nested';
-    @mkdir(dirname($shapeConflictFile), 0700, true);
-    file_put_contents($shapeConflictFile, "I_AM_A_REGULAR_FILE_NOT_A_DIR");
+    populateTree($shapeRoot, $customerSentinels);
 
-    assertThrows(function () use ($txService, $shapeRoot, $shapeState, $deepManifestRaw, $deepSig, $deepZipPath, $installedBetaContext) {
-        $txService->prepare($shapeRoot, $shapeState, $deepManifestRaw, $deepSig, $deepZipPath, $installedBetaContext);
-    }, '', "Shape transition (file where dir expected) must fail preflight");
+    // Create an empty directory at the EXACT signed target leaf ($deepRel)
+    $shapeConflictDir = $shapeRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $deepRel);
+    mkdir($shapeConflictDir, 0700, true);
+
+    // Directories not in inventory; source files/digest STILL signed source
+    $shapeBeforeInv = $manifestService->buildInventory($shapeRoot, '0.0.13');
+    assertEqual($shapeBeforeInv['files'], $deepSourceInv['files'], "Source product inventory files must match signed source inventory despite empty directory");
+    $shapeBeforeDigest = ShellDeltaManifestService::canonicalInventoryDigest($shapeBeforeInv);
+    assertEqual($shapeBeforeDigest, $deepManifest['source_inventory_sha256'], "Source product canonical inventory digest must match signed source digest before prepare");
+
+    // prepare then must SUCCEED (stages outside product)
+    $prepShape = $txService->prepare($shapeRoot, $shapeState, $deepManifestRaw, $deepSig, $deepZipPath, $installedBetaContext);
+    assertEqual($prepShape['phase'], ShellDeltaFileTransactionService::PHASE_PREPARED, "Prepare must succeed when empty directory exists at target leaf");
+    $shapeOpId = $prepShape['operation_id'];
+    $shapeWs = $prepShape['workspace'];
+
+    // CAPTURE source product before apply including dirs
+    $shapeSnapBefore = snapshotTree($shapeRoot);
+    $shapeCanonicalRoot = ProductInventoryService::resolveAbsolutePath($shapeRoot, true);
+    $shapeNormRoot = str_replace('\\', '/', $shapeCanonicalRoot);
+    $shapeRootLen = strlen($shapeNormRoot);
+
+    $collectDirs = static function (string $root, int $normLen): array {
+        $dirs = [];
+        $dirIt = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($dirIt as $item) {
+            if ($item->isDir()) {
+                $dirs[] = ltrim(substr(str_replace('\\', '/', $item->getPathname()), $normLen), '/');
+            }
+        }
+        sort($dirs);
+        return $dirs;
+    };
+    $shapeDirsBefore = $collectDirs($shapeCanonicalRoot, $shapeRootLen);
+
+    // apply must fail SPECIFIC `Target file collision with existing directory` from assertNoShapeTransitions
+    assertThrows(function () use ($txService, $shapeRoot, $shapeState, $shapeOpId, $installedBetaContext) {
+        $txService->apply($shapeRoot, $shapeState, $shapeOpId, $installedBetaContext);
+    }, 'Target file collision with existing directory', "Apply must fail with specific shape collision exception before journal applying transition");
+
+    // BEFORE journal phase applying/product mutation: journal phase must remain 'prepared'
+    $shapeJournalPath = $shapeWs . DIRECTORY_SEPARATOR . 'journal.json';
+    $shapeJournal = json_decode((string) file_get_contents($shapeJournalPath), true);
+    assertEqual($shapeJournal['phase'], ShellDeltaFileTransactionService::PHASE_PREPARED, "Journal phase must remain 'prepared' because shape collision failed before mutation");
+
+    // Assert complete product bytes + directory listing UNCHANGED, leaf still directory, own workspace/marker retained
+    $shapeSnapAfter = snapshotTree($shapeRoot);
+    assertEqual($shapeSnapAfter, $shapeSnapBefore, "Complete product bytes must remain unchanged after shape collision");
+
+    $shapeDirsAfter = $collectDirs($shapeCanonicalRoot, $shapeRootLen);
+    assertEqual($shapeDirsAfter, $shapeDirsBefore, "Directory listing must remain unchanged after shape collision");
+    assertTrue(is_dir($shapeConflictDir), "Target leaf path must still be a directory");
+
+    $shapeRootDigest = hash('sha256', strtolower(rtrim(str_replace('/', '\\', $shapeCanonicalRoot), '\\')));
+    $shapeMarkerFile = $shapeState . DIRECTORY_SEPARATOR . 'active_roots' . DIRECTORY_SEPARATOR . $shapeRootDigest . '.json';
+    assertTrue(is_file($shapeMarkerFile), "Active marker must be retained after pre-mutation apply failure");
+    assertTrue(is_dir($shapeWs), "Workspace must be retained after pre-mutation apply failure");
+
+    // Customer sentinels intact
+    foreach ($customerSentinels as $cRel => $cContent) {
+        $cPath = $shapeRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $cRel);
+        assertEqual(file_get_contents($cPath), $cContent, "Customer sentinel content must remain intact: {$cRel}");
+    }
+
+    // Normal recover may cancel at full source exact and clear own marker, keep empty dirs
+    $recShapeRes = $txService->recover($shapeRoot, $shapeState, $shapeOpId, $installedBetaContext);
+    assertEqual($recShapeRes['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Normal recover must cancel at full source exact and return 'rolled_back'");
+    assertFalse(file_exists($shapeMarkerFile), "Active marker must be cleared after recover cancellation");
+    assertTrue(is_dir($shapeConflictDir), "Target leaf empty directory must remain retained after recover");
 
     // 3.3 Recover before first mutation on deep directory target
-    echo "  [3.3] Recover before first mutation restores source intact...\n";
+    echo "  [3.3] Recover before first mutation restores source intact (repeat recovery idempotent)...\n";
     $deepRecRoot = $lab . DIRECTORY_SEPARATOR . 'suite3-deep-rec-product';
     $deepRecState = $lab . DIRECTORY_SEPARATOR . 'suite3-deep-rec-state';
     mkdir($deepRecState, 0700, true);
