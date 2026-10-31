@@ -420,76 +420,564 @@ function populateTree(string $root, array $files): void
 
 /** @var list<string> */
 $createdJunctions = [];
+/** @var array<string, string> */
+$createdJunctionTargets = [];
+
+/**
+ * Normalize a junction target path for robust case-insensitive comparison.
+ * Strips literal Windows NT namespace prefixes (\\?\ or \??\) without regex.
+ * Preserves normal path characters and spaces.
+ */
+function normalizeJunctionTarget(string $target): string
+{
+    $clean = str_replace('/', '\\', trim($target));
+    if (str_starts_with($clean, '\\\\?\\')) {
+        $clean = substr($clean, 4);
+    } elseif (str_starts_with($clean, '\\??\\')) {
+        $clean = substr($clean, 4);
+    }
+    return strtolower(rtrim($clean, '\\'));
+}
+
+/**
+ * Independent native leaf metadata oracle via PowerShell 5.1.
+ * Inspects leaf attributes and link type without resolving leaf target contents or recursing.
+ *
+ * @return array{kind: 'junction'|'reparse'|'regular'|'absent'|'error'|'unknown', linkType: ?string, target: ?string, attributes: ?int, error: ?string}
+ */
+function queryNativeItemMetadata(string $path): array
+{
+    global $lab, $trackedChildProcs;
+
+    // 1. Mandatory lab validation
+    if (!isset($lab) || !is_string($lab) || $lab === '' || !is_dir($lab)) {
+        throw new RuntimeException("Global lab directory is not set or not a valid directory.");
+    }
+    ProductInventoryService::assertNoReparse($lab);
+
+    $cleanPath = rtrim(str_replace('/', '\\', $path), '\\');
+
+    // Mandatory root guard: query path must be strictly under owned lab
+    $normLab = strtolower(rtrim(str_replace('/', '\\', $lab), '\\'));
+    $normQuery = strtolower($cleanPath);
+    if (!str_starts_with($normQuery, $normLab . '\\')) {
+        throw new RuntimeException("Query path is not under lab root: '{$cleanPath}'");
+    }
+
+    // 2. Validate RAW parent / all ancestors have no reparse points BEFORE query
+    // Any parent error throws and fails closed; only native leaf query can report actual absent
+    $parentDir = dirname($cleanPath);
+    ProductInventoryService::assertNoReparse($parentDir);
+
+    // 3. Setup temporary stdout/stderr capture files inside validated OWN main lab
+    $tempDir = $lab;
+    $nonce = bin2hex(random_bytes(8));
+    $stdoutLog = $tempDir . DIRECTORY_SEPARATOR . 'ps-oracle-out-' . $nonce . '.log';
+    $stderrLog = $tempDir . DIRECTORY_SEPARATOR . 'ps-oracle-err-' . $nonce . '.log';
+
+    $descriptors = [
+        0 => ['file', 'NUL', 'r'],
+        1 => ['file', $stdoutLog, 'w'],
+        2 => ['file', $stderrLog, 'w'],
+    ];
+
+    // 4. Fixed PowerShell 5.1 executable (NO PATH fallback)
+    $systemRoot = getenv('SystemRoot');
+    if (!is_string($systemRoot) || $systemRoot === '') {
+        $systemRoot = getenv('WINDIR');
+        if (!is_string($systemRoot) || $systemRoot === '') {
+            $systemRoot = 'C:\\Windows';
+        }
+    }
+    $psExe = rtrim($systemRoot, '\\/') . '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    if (!is_file($psExe)) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Fixed PowerShell 5.1 executable not found at: '{$psExe}'",
+        ];
+    }
+
+    $inputPayload = json_encode(['path' => $cleanPath], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $b64Input = base64_encode($inputPayload);
+
+    $psScript = <<<POWERSHELL
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+\$ProgressPreference = 'SilentlyContinue'
+\$ErrorActionPreference = 'Stop'
+try {
+    \$raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{$b64Input}'))
+    \$in = ConvertFrom-Json \$raw
+    \$item = Get-Item -LiteralPath \$in.path -Force -ErrorAction Stop
+    \$attr = [int]\$item.Attributes
+    \$isReparse = (\$attr -band 1024) -ne 0
+    \$linkType = [string]\$item.LinkType
+    \$target = ''
+    if (\$item.Target) {
+        if (\$item.Target -is [array] -or \$item.Target -is [System.Collections.IList]) {
+            \$target = [string](\$item.Target | Select-Object -First 1)
+        } else {
+            \$target = [string]\$item.Target
+        }
+    }
+    \$kind = 'regular'
+    if (\$isReparse) {
+        if (\$linkType -ieq 'Junction') {
+            \$kind = 'junction'
+        } else {
+            \$kind = 'reparse'
+        }
+    }
+    @{
+        kind = \$kind
+        linkType = \$linkType
+        target = \$target
+        attributes = \$attr
+    } | ConvertTo-Json -Compress
+    exit 0
+} catch [System.Management.Automation.ItemNotFoundException] {
+    @{ kind = 'absent' } | ConvertTo-Json -Compress
+    exit 0
+} catch [System.IO.FileNotFoundException] {
+    @{ kind = 'absent' } | ConvertTo-Json -Compress
+    exit 0
+} catch [System.IO.DirectoryNotFoundException] {
+    @{ kind = 'absent' } | ConvertTo-Json -Compress
+    exit 0
+} catch [System.UnauthorizedAccessException] {
+    @{ kind = 'error'; error = 'AccessDenied' } | ConvertTo-Json -Compress
+    exit 0
+} catch {
+    \$errId = [string]\$_.FullyQualifiedErrorId
+    \$ex = \$_.Exception
+    if (\$errId -like '*ItemNotFound*' -or \$errId -like '*PathNotFound*' -or (\$ex -is [System.IO.FileNotFoundException]) -or (\$ex -is [System.IO.DirectoryNotFoundException])) {
+        @{ kind = 'absent' } | ConvertTo-Json -Compress
+        exit 0
+    } elseif (\$errId -like '*PermissionDenied*' -or (\$ex -is [System.UnauthorizedAccessException])) {
+        @{ kind = 'error'; error = 'AccessDenied' } | ConvertTo-Json -Compress
+        exit 0
+    } else {
+        @{ kind = 'error'; error = [string]\$_.ToString() } | ConvertTo-Json -Compress
+        exit 0
+    }
+}
+POWERSHELL;
+
+    $encodedCommand = base64_encode(mb_convert_encoding($psScript, 'UTF-16LE', 'UTF-8'));
+    $cmd = [
+        $psExe,
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        $encodedCommand,
+    ];
+
+    // 5. Spawn PowerShell process
+    $proc = proc_open($cmd, $descriptors, $pipes, dirname(__DIR__), null);
+    if (!is_resource($proc)) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => 'Failed to spawn powershell oracle process',
+        ];
+    }
+
+    // 6. Immediate resource tracking before bounded watchdog
+    $trackedChildProcs[] = $proc;
+
+    $start = microtime(true);
+    $running = true;
+    $exitCode = -1;
+    while ((microtime(true) - $start) < 10.0) {
+        $st = getVerifiedProcessStatus($proc);
+        if ($st['state'] === 'DEAD') {
+            $running = false;
+            $exitCode = $st['exitcode'];
+            break;
+        }
+        if ($st['state'] === 'UNKNOWN') {
+            break;
+        }
+        usleep(25000);
+    }
+
+    if ($running) {
+        try {
+            forceKillChildAndVerify($proc, 5);
+        } catch (Throwable) {
+            // Unkillable or UNKNOWN proc remains in $trackedChildProcs to enforce retain
+        }
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => 'PowerShell oracle timed out or status UNKNOWN',
+        ];
+    }
+
+    // Process is verified DEAD
+    @proc_close($proc);
+    $idx = array_search($proc, $trackedChildProcs, true);
+    if ($idx !== false) {
+        unset($trackedChildProcs[$idx]);
+        $trackedChildProcs = array_values($trackedChildProcs);
+    }
+
+    // 7. Validate exitCode === 0 and bounded exact stdout
+    if ($exitCode !== 0) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "PowerShell oracle exited with non-zero code {$exitCode}",
+        ];
+    }
+
+    if (!is_file($stdoutLog)) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Stdout log file does not exist",
+        ];
+    }
+
+    $stdoutSize = @filesize($stdoutLog);
+    if ($stdoutSize === false || $stdoutSize === 0 || $stdoutSize > 8192) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Stdout log size invalid or exceeds 8192 bytes ceiling (size: " . var_export($stdoutSize, true) . ")",
+        ];
+    }
+
+    $stdout = @file_get_contents($stdoutLog);
+    if ($stdout === false || strlen($stdout) !== $stdoutSize) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Failed to read exact stdout log bytes",
+        ];
+    }
+
+    $stdoutTrim = ltrim(trim($stdout), "\xEF\xBB\xBF");
+    if ($stdoutTrim === '') {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Stdout output was empty",
+        ];
+    }
+
+    $decoded = null;
+    try {
+        $decoded = json_decode($stdoutTrim, true, 512, JSON_THROW_ON_ERROR);
+    } catch (Throwable $e) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Oracle JSON parsing failed: " . $e->getMessage(),
+        ];
+    }
+
+    if (!is_array($decoded) || !isset($decoded['kind']) || !is_string($decoded['kind'])) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Oracle JSON missing string kind property",
+        ];
+    }
+
+    $kind = $decoded['kind'];
+    if (!in_array($kind, ['junction', 'reparse', 'regular', 'absent', 'error'], true)) {
+        return [
+            'kind' => 'unknown',
+            'linkType' => null,
+            'target' => null,
+            'attributes' => null,
+            'error' => "Unrecognized oracle kind: '{$kind}'",
+        ];
+    }
+
+    // 8. Strict schema validation per kind
+    if ($kind === 'junction') {
+        if (!isset($decoded['attributes']) || !is_int($decoded['attributes']) || (($decoded['attributes'] & 1024) === 0)) {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed junction: missing or non-reparse integer attributes",
+            ];
+        }
+        if (!isset($decoded['linkType']) || !is_string($decoded['linkType']) || strcasecmp($decoded['linkType'], 'Junction') !== 0) {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed junction: linkType is not Junction",
+            ];
+        }
+        if (!isset($decoded['target']) || !is_string($decoded['target']) || trim($decoded['target']) === '') {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed junction: target is missing or empty",
+            ];
+        }
+    } elseif ($kind === 'error') {
+        if (!isset($decoded['error']) || !is_string($decoded['error']) || trim($decoded['error']) === '') {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed error: missing or empty error string",
+            ];
+        }
+    } elseif ($kind === 'regular') {
+        if (!isset($decoded['attributes']) || !is_int($decoded['attributes']) || (($decoded['attributes'] & 1024) !== 0)) {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed regular item: attributes has ReparsePoint bit set",
+            ];
+        }
+    } elseif ($kind === 'reparse') {
+        if (!isset($decoded['attributes']) || !is_int($decoded['attributes']) || (($decoded['attributes'] & 1024) === 0)) {
+            return [
+                'kind' => 'unknown',
+                'linkType' => null,
+                'target' => null,
+                'attributes' => null,
+                'error' => "Malformed reparse item: attributes missing ReparsePoint bit",
+            ];
+        }
+    }
+
+    return [
+        'kind' => $kind,
+        'linkType' => isset($decoded['linkType']) && is_string($decoded['linkType']) ? $decoded['linkType'] : null,
+        'target' => isset($decoded['target']) && is_string($decoded['target']) ? $decoded['target'] : null,
+        'attributes' => isset($decoded['attributes']) && is_int($decoded['attributes']) ? $decoded['attributes'] : null,
+        'error' => isset($decoded['error']) && is_string($decoded['error']) ? $decoded['error'] : null,
+    ];
+}
 
 function createTrackedJunction(string $link, string $target): void
 {
-    global $createdJunctions;
+    global $lab, $canonicalRunnerTemp, $victimDir, $createdJunctions, $createdJunctionTargets;
+
+    // 1. Mandatory lab validation and lexical under-lab guard
+    if (!isset($lab) || !is_string($lab) || $lab === '' || !is_dir($lab)) {
+        throw new RuntimeException("Global lab directory is not set or not a valid directory.");
+    }
+    ProductInventoryService::assertNoReparse($lab);
+
+    $normLink = str_replace('/', '\\', $link);
+    $normLab = strtolower(rtrim(str_replace('/', '\\', $lab), '\\'));
+    if (!str_starts_with(strtolower($normLink), $normLab . '\\')) {
+        throw new RuntimeException("Cannot create junction outside lab root: '{$link}'");
+    }
+
+    // 2. RAW parent validated noreparse and leaf absent before create
+    $parentDir = dirname($normLink);
+    ProductInventoryService::assertNoReparse($parentDir);
+
+    $preMeta = queryNativeItemMetadata($link);
+    if ($preMeta['kind'] !== 'absent') {
+        throw new RuntimeException("Cannot create junction: leaf already exists or is inaccessible (kind: '{$preMeta['kind']}'): '{$link}'");
+    }
+
+    // 3. Validate expected target canonical noreparse under own lab/victim as fixture target BEFORE create
+    $canonicalTarget = ProductInventoryService::resolveAbsolutePath($target, true);
+    ProductInventoryService::assertNoReparse($canonicalTarget);
+
+    $normTarget = strtolower($canonicalTarget);
+    $isOwnedTarget = false;
+    if (isset($victimDir) && is_string($victimDir) && $victimDir !== '') {
+        $normVictim = strtolower(rtrim(str_replace('/', '\\', $victimDir), '\\'));
+        if ($normTarget === $normVictim || str_starts_with($normTarget, $normVictim . '\\')) {
+            $isOwnedTarget = true;
+        }
+    }
+    if ($normTarget === $normLab || str_starts_with($normTarget, $normLab . '\\')) {
+        $isOwnedTarget = true;
+    }
+    if (!$isOwnedTarget) {
+        throw new RuntimeException("Target path is not an owned victim or lab target: '{$target}'");
+    }
+
+    // 4. Keep cmd mklink /J producer actual exit 0
     $output = [];
     $exitCode = 0;
-    exec('cmd /c mklink /J ' . escapeshellarg(str_replace('/', '\\', $link)) . ' ' . escapeshellarg(str_replace('/', '\\', $target)), $output, $exitCode);
+    exec('cmd /c mklink /J ' . escapeshellarg($normLink) . ' ' . escapeshellarg($canonicalTarget), $output, $exitCode);
     if ($exitCode !== 0) {
-        throw new RuntimeException("Failed to create junction from '{$link}' to '{$target}'");
+        throw new RuntimeException("Failed to create junction from '{$link}' to '{$target}' (exit code {$exitCode})");
     }
-    clearstatcache(true, $link);
-    $lstat = @lstat($link);
-    if ($lstat === false || (($lstat['mode'] & 0120000) !== 0120000)) {
-        throw new RuntimeException("Created junction failed reparse point verification: '{$link}'");
+
+    // 5. Register owned creation IMMEDIATELY AFTER successful cmd, BEFORE postcreate verification
+    // so failed oracle can't leave untracked link that cleanup traverses
+    if (!in_array($normLink, $createdJunctions, true)) {
+        $createdJunctions[] = $normLink;
     }
-    $createdJunctions[] = $link;
+    $createdJunctionTargets[$normLink] = $canonicalTarget;
+    if ($link !== $normLink) {
+        $createdJunctionTargets[$link] = $canonicalTarget;
+    }
+
+    // 6. Postcreate verification: independent native actual kind + expected target proof
+    clearstatcache(true, $normLink);
+    $postMeta = queryNativeItemMetadata($link);
+    if ($postMeta['kind'] !== 'junction') {
+        throw new RuntimeException("Created junction failed native junction verification (kind: '{$postMeta['kind']}', linkType: " . var_export($postMeta['linkType'] ?? null, true) . "): '{$link}'");
+    }
+
+    $expectedNorm = normalizeJunctionTarget($canonicalTarget);
+    $actualNorm = normalizeJunctionTarget((string) ($postMeta['target'] ?? ''));
+    if ($expectedNorm !== $actualNorm) {
+        throw new RuntimeException("Created junction target mismatch (expected '{$canonicalTarget}', got '{$postMeta['target']}'): '{$link}'");
+    }
+
+    // 7. Confirm tested library ProductInventoryService rejects actual fixture
+    $rejectedByInventory = false;
+    try {
+        ProductInventoryService::assertNoReparse($normLink);
+    } catch (Throwable) {
+        $rejectedByInventory = true;
+    }
+    if (!$rejectedByInventory) {
+        throw new RuntimeException("Created junction was unexpectedly accepted by ProductInventoryService: '{$link}'");
+    }
 }
 
 function removeTrackedJunction(string $link, string $labRoot): void
 {
-    global $createdJunctions;
-    $idx = array_search($link, $createdJunctions, true);
+    global $createdJunctions, $createdJunctionTargets;
+
+    $normLink = str_replace('/', '\\', $link);
+    $idx = array_search($normLink, $createdJunctions, true);
     if ($idx === false) {
-        return;
+        $idx = array_search($link, $createdJunctions, true);
+        if ($idx === false) {
+            return;
+        }
     }
 
-    // 1. Verify RAW path is under labRoot without resolving away aliases
-    $normLink = strtolower(str_replace('/', '\\', $link));
-    $normLab = strtolower(str_replace('/', '\\', $labRoot));
-    if (!str_starts_with($normLink, $normLab . '\\')) {
+    // 1. Validate RAW link under labRoot and parent noreparse
+    $normLab = strtolower(rtrim(str_replace('/', '\\', $labRoot), '\\'));
+    if (!str_starts_with(strtolower($normLink), $normLab . '\\')) {
         throw new RuntimeException("Tracked junction is not under lab root: '{$link}'");
     }
 
-    // 2. Check actual reparse point on the leaf
-    $lstat = @lstat($link);
-    if ($lstat === false) {
+    $parentDir = dirname($normLink);
+    ProductInventoryService::assertNoReparse($parentDir);
+
+    // 2. Independently native query exact leaf kind
+    $meta = queryNativeItemMetadata($link);
+    if ($meta['kind'] === 'absent') {
         // Already absent
         unset($createdJunctions[$idx]);
         $createdJunctions = array_values($createdJunctions);
+        unset($createdJunctionTargets[$normLink], $createdJunctionTargets[$link]);
         return;
     }
-    $isReparse = is_link($link) || (($lstat['mode'] & 0120000) === 0120000);
-    if (!$isReparse) {
-        throw new RuntimeException("Tracked junction is not a reparse point: '{$link}'");
+
+    if ($meta['kind'] !== 'junction') {
+        // If regular foreign replacement, unknown status, or access failure, retain and throw; NEVER recursive/delete fallback
+        throw new RuntimeException("Refusing to remove tracked junction: leaf is not a verified junction (kind: '{$meta['kind']}', error: " . var_export($meta['error'] ?? null, true) . "): '{$link}'");
     }
 
-    // 3. rmdir NO /S (removes reparse link only)
+    // 3. Known junction expected target check: NONNULL binding required!
+    $expectedTarget = $createdJunctionTargets[$normLink] ?? ($createdJunctionTargets[$link] ?? null);
+    if ($expectedTarget === null || !is_string($expectedTarget) || trim($expectedTarget) === '') {
+        throw new RuntimeException("Refusing to remove tracked junction: missing expected target binding in tracking map: '{$link}'");
+    }
+    $expectedNorm = normalizeJunctionTarget($expectedTarget);
+    $actualNorm = normalizeJunctionTarget((string) ($meta['target'] ?? ''));
+    if ($expectedNorm !== $actualNorm) {
+        throw new RuntimeException("Refusing to remove tracked junction: target mismatch (expected '{$expectedTarget}', got '{$meta['target']}'): '{$link}'");
+    }
+
+    // 4. rmdir NO /S (removes reparse link only, does not follow target)
     $output = [];
     $exitCode = 0;
-    exec('cmd /c rmdir ' . escapeshellarg(str_replace('/', '\\', $link)), $output, $exitCode);
+    exec('cmd /c rmdir ' . escapeshellarg($normLink), $output, $exitCode);
     if ($exitCode !== 0) {
         throw new RuntimeException("Failed to remove tracked junction (exit code {$exitCode}): '{$link}'");
     }
 
-    // 4. Confirm absent BEFORE removing from tracking!
-    clearstatcache(true, $link);
-    if (file_exists($link) || is_link($link)) {
-        throw new RuntimeException("Tracked junction still exists after rmdir: '{$link}'");
+    // 5. CHECK exit and leaf ABSENT via actual leaf metadata BEFORE untrack!
+    clearstatcache(true, $normLink);
+    $postMeta = queryNativeItemMetadata($link);
+    if ($postMeta['kind'] !== 'absent') {
+        throw new RuntimeException("Tracked junction still exists after rmdir (status: {$postMeta['kind']}): '{$link}'");
     }
 
+    // 6. Actual absence only can untrack
     unset($createdJunctions[$idx]);
     $createdJunctions = array_values($createdJunctions);
+    unset($createdJunctionTargets[$normLink], $createdJunctionTargets[$link]);
 }
 
 function removeAllTrackedJunctions(string $labRoot): void
 {
-    global $createdJunctions;
-    while (!empty($createdJunctions)) {
-        $lastIdx = count($createdJunctions) - 1;
-        $j = $createdJunctions[$lastIdx];
+    global $lab, $createdJunctions;
+
+    if (!isset($lab) || !is_string($lab) || $lab === '' || !is_dir($lab)) {
+        throw new RuntimeException("Global lab directory is not set or not a valid directory.");
+    }
+    ProductInventoryService::assertNoReparse($lab);
+
+    $normLab = strtolower(rtrim(str_replace('/', '\\', $lab), '\\'));
+    $normRoot = strtolower(rtrim(str_replace('/', '\\', $labRoot), '\\'));
+
+    // Validate labRoot is main lab or a subdirectory under main lab
+    if ($normRoot !== $normLab && !str_starts_with($normRoot, $normLab . '\\')) {
+        throw new RuntimeException("removeAllTrackedJunctions root is not main lab or its subdirectory: '{$labRoot}'");
+    }
+
+    // Assert every tracked junction is under main lab; fail closed if truly foreign tracking exists
+    foreach ($createdJunctions as $j) {
+        $normJ = strtolower(rtrim(str_replace('/', '\\', $j), '\\'));
+        if (!str_starts_with($normJ, $normLab . '\\')) {
+            throw new RuntimeException("Tracked junction is outside main lab root: '{$j}'");
+        }
+    }
+
+    $toRemove = [];
+    foreach ($createdJunctions as $j) {
+        $normJ = strtolower(rtrim(str_replace('/', '\\', $j), '\\'));
+        if ($normRoot === $normLab || str_starts_with($normJ, $normRoot . '\\')) {
+            $toRemove[] = $j;
+        }
+    }
+
+    // Remove in reverse order of creation
+    foreach (array_reverse($toRemove) as $j) {
         removeTrackedJunction($j, $labRoot);
     }
 }
