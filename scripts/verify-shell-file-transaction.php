@@ -3560,59 +3560,219 @@ try {
     mkdir($testStateLate, 0700, true);
     populateTree($testRootLate, $sourceBetaFiles);
 
+    // Call prepare with plain service first to bind known workspace and operation ID
+    $prepLate = $txService->prepare($testRootLate, $testStateLate, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext);
+    $opLate = $prepLate['operation_id'];
+    $workspaceLate = $prepLate['workspace'];
+
+    $canonicalRootLate = ProductInventoryService::resolveAbsolutePath($testRootLate, true);
+    $canonicalWorkspaceLate = ProductInventoryService::resolveAbsolutePath($workspaceLate, true);
+    ProductInventoryService::assertNoReparse($canonicalWorkspaceLate);
+    $expectedTempDirLate = ProductInventoryService::resolveAbsolutePath($canonicalWorkspaceLate . DIRECTORY_SEPARATOR . 'temp', true);
+    ProductInventoryService::assertNoReparse($expectedTempDirLate);
+
+    $rootDigestLate = hash('sha256', strtolower(rtrim(str_replace('/', '\\', $canonicalRootLate), '\\')));
+    $activeMarkerFileLate = $testStateLate . DIRECTORY_SEPARATOR . 'active_roots' . DIRECTORY_SEPARATOR . $rootDigestLate . '.json';
+    assertTrue(file_exists($activeMarkerFileLate), "Active marker must exist after prepare");
+
+    $currentPublishRel = null;
+    $captureFired = false;
+    $privateCopyValidated = false;
     $lateMutated = false;
     $targetLeafRel = null;
     $lateTargetFull = null;
+    $capturedTempPath = null;
     $lateForeignBytes = 'LATE_FOREIGN_LEAF_MUTATION_' . bin2hex(random_bytes(16));
     $originalLeafContent = null;
 
-    $lateCb = static function (string $checkpoint, array $context) use ($testRootLate, $sourceBetaFiles, $lateForeignBytes, &$targetLeafRel, &$lateTargetFull, &$originalLeafContent, &$lateMutated): void {
+    $lateCb = static function (string $checkpoint, array $context) use (
+        $canonicalRootLate,
+        $expectedTempDirLate,
+        $sourceBetaFiles,
+        $betaManifest,
+        $betaSourceInv,
+        $betaTargetInv,
+        $lateForeignBytes,
+        &$currentPublishRel,
+        &$captureFired,
+        &$privateCopyValidated,
+        &$targetLeafRel,
+        &$lateTargetFull,
+        &$capturedTempPath,
+        &$originalLeafContent,
+        &$lateMutated
+    ): void {
+        if ($checkpoint === 'before_publish_file') {
+            $rel = $context['path'] ?? null;
+            if (!is_string($rel) || $rel === '') {
+                throw new RuntimeException("Invariant violation: before_publish_file checkpoint path missing or empty");
+            }
+            $syntax = ProductInventoryService::validateProductPath($rel);
+            if (!$syntax['ok']) {
+                throw new RuntimeException("Invariant violation: before_publish_file path syntax invalid: {$rel}");
+            }
+            if (!isset($betaTargetInv['files'][$rel])) {
+                throw new RuntimeException("Invariant violation: before_publish_file path not in target inventory: {$rel}");
+            }
+            ProductInventoryService::resolveConfinedPath($canonicalRootLate, $rel, false);
+            $currentPublishRel = $rel;
+            $captureFired = true;
+            return;
+        }
+
         if ($checkpoint === 'io_after_close' && ($context['purpose'] ?? '') === 'publish' && !$lateMutated) {
-            // Select once first native POSDesktop.exe or mapped public relpath inside closure
-            $rel = $context['path'] ?? ($context['target_rel'] ?? '');
-            if ($rel === '') {
-                foreach (array_keys($sourceBetaFiles) as $k) {
-                    if (str_ends_with(strtolower($k), 'posdesktop.exe') || str_contains($k, 'app-v14.js')) {
-                        $rel = $k;
-                        break;
-                    }
-                }
-                if ($rel === '') {
-                    $rel = array_key_first($sourceBetaFiles);
+            if ($currentPublishRel === null) {
+                throw new RuntimeException("Invariant violation: io_after_close publish fired without prior before_publish_file capture");
+            }
+            $rel = $currentPublishRel;
+
+            // Choose first actual modified known source file, skip added targets without source if encountered
+            if (!isset($betaSourceInv['files'][$rel], $betaTargetInv['files'][$rel])) {
+                return;
+            }
+
+            $sourceMeta = $betaSourceInv['files'][$rel];
+            $targetMeta = $betaTargetInv['files'][$rel];
+
+            // Validate against betaManifest files changes and betaSourceInv/betaTargetInv source existing + different hash/size
+            if ($sourceMeta['sha256'] === $targetMeta['sha256'] && $sourceMeta['size'] === $targetMeta['size']) {
+                return;
+            }
+
+            if (!isset($sourceBetaFiles[$rel])) {
+                throw new RuntimeException("Invariant violation: modified file not found in source fixture definitions: {$rel}");
+            }
+
+            $manifestEntry = null;
+            foreach ($betaManifest['files'] as $fEntry) {
+                if ($fEntry['path'] === $rel) {
+                    $manifestEntry = $fEntry;
+                    break;
                 }
             }
+            if ($manifestEntry === null) {
+                throw new RuntimeException("Invariant violation: published file not found in manifest files: {$rel}");
+            }
+            if ($manifestEntry['sha256'] !== $targetMeta['sha256'] || $manifestEntry['size'] !== $targetMeta['size']) {
+                throw new RuntimeException("Invariant violation: manifest file metadata mismatch for: {$rel}");
+            }
+
+            // io_after_close['path'] remains PRIVATE temp
+            $tempPath = $context['path'] ?? null;
+            if (!is_string($tempPath) || $tempPath === '') {
+                throw new RuntimeException("Invariant violation: io_after_close publish missing private temp path");
+            }
+
+            $canonicalTemp = ProductInventoryService::resolveAbsolutePath($tempPath, true);
+            ProductInventoryService::assertNoReparse($canonicalTemp);
+
+            $tempDir = dirname($canonicalTemp);
+            $canonicalTempDir = ProductInventoryService::resolveAbsolutePath($tempDir, true);
+            if (strtolower(rtrim(str_replace('/', '\\', $canonicalTempDir), '\\')) !== strtolower(rtrim(str_replace('/', '\\', $expectedTempDirLate), '\\'))) {
+                throw new RuntimeException("Invariant violation: private temp path is not inside owned workspace temp dir: {$canonicalTemp}");
+            }
+
+            if (!is_file($canonicalTemp) || is_link($canonicalTemp)) {
+                throw new RuntimeException("Invariant violation: private temp path is not a regular file: {$canonicalTemp}");
+            }
+
+            // Independently verify owned prepared workspace/temp/noreparse actual file matches SIGNED TARGET metadata (size/hash)
+            $actualTempSize = filesize($canonicalTemp);
+            $actualTempHash = hash_file('sha256', $canonicalTemp);
+            if ($actualTempSize !== $targetMeta['size'] || $actualTempHash === false || strtolower($actualTempHash) !== strtolower($targetMeta['sha256'])) {
+                throw new RuntimeException("Invariant violation: private temp copy content does not match signed target metadata: {$canonicalTemp}");
+            }
+
+            $privateCopyValidated = true;
+            $capturedTempPath = $canonicalTemp;
+
+            // Target captured relative path (not context path) in product root
+            $candidateFull = ProductInventoryService::resolveConfinedPath($canonicalRootLate, $rel, true);
+            ProductInventoryService::assertNoReparse($candidateFull);
+            if (!is_file($candidateFull) || is_link($candidateFull)) {
+                throw new RuntimeException("Invariant violation: target product leaf is not a regular file: {$candidateFull}");
+            }
+
+            // Preserve actual source bytes before write and assert they are SIGNED SOURCE before mutation
+            $existingBytes = file_get_contents($candidateFull);
+            if ($existingBytes === false) {
+                throw new RuntimeException("Invariant violation: unable to read product leaf before mutation: {$candidateFull}");
+            }
+            if (strlen($existingBytes) !== $sourceMeta['size'] || strtolower(hash('sha256', $existingBytes)) !== strtolower($sourceMeta['sha256'])) {
+                throw new RuntimeException("Invariant violation: product leaf content does not match signed source before mutation: {$candidateFull}");
+            }
+            if ($existingBytes !== $sourceBetaFiles[$rel]) {
+                throw new RuntimeException("Invariant violation: product leaf content does not match source fixture: {$candidateFull}");
+            }
+
             $targetLeafRel = $rel;
-            $candidateFull = $testRootLate . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $rel);
-            if (is_file($candidateFull)) {
-                $lateTargetFull = $candidateFull;
-                $originalLeafContent = file_get_contents($candidateFull);
-                // Mutate corresponding product leaf known target while copy complete
-                file_put_contents($lateTargetFull, $lateForeignBytes);
-                $lateMutated = true;
+            $lateTargetFull = $candidateFull;
+            $originalLeafContent = $existingBytes;
+
+            // Write exact test-owned $lateForeignBytes at ACTUAL PRODUCT leaf after private copy close
+            $written = file_put_contents($lateTargetFull, $lateForeignBytes);
+            if ($written !== strlen($lateForeignBytes)) {
+                throw new RuntimeException("Invariant violation: failed to write complete foreign bytes to product leaf: {$lateTargetFull}");
             }
+
+            // Checked readback
+            clearstatcache(true, $lateTargetFull);
+            $readback = file_get_contents($lateTargetFull);
+            if ($readback !== $lateForeignBytes) {
+                throw new RuntimeException("Invariant violation: readback mismatch after writing foreign bytes to: {$lateTargetFull}");
+            }
+
+            $lateMutated = true;
         }
     };
 
-    $prepLate = $txService->prepare($testRootLate, $testStateLate, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext);
-    $opLate = $prepLate['operation_id'];
     $lateSvc = new ShellDeltaFileTransactionService($manifestService, $lateCb);
 
-    // Apply must reject with SPECIFIC foreign reason ('foreign'), not any generic exception
+    // Apply must throw specific service guard: Late leaf collision: refusing to publish modified file over altered foreign entry (class 867..882)
     assertThrows(function () use ($lateSvc, $testRootLate, $testStateLate, $opLate, $installedBetaContext) {
         $lateSvc->apply($testRootLate, $testStateLate, $opLate, $installedBetaContext);
-    }, 'foreign', "Apply must abort with specific foreign reason when leaf is mutated after copy");
+    }, 'Late leaf collision: refusing to publish modified file over altered foreign entry', "Apply must abort with specific foreign reason when leaf is mutated after copy");
 
+    assertTrue($captureFired, "before_publish_file hook must have captured a relative publish path");
+    assertTrue($privateCopyValidated, "Private temp copy must be validated against signed target before mutation");
     assertTrue($lateMutated, "Late mutation hook at io_after_close must have fired");
-    assertTrue(is_file($lateTargetFull), "Foreign leaf must not be deleted");
+    assertTrue($lateTargetFull !== null && is_file($lateTargetFull), "Foreign leaf must not be deleted");
     assertEqual(file_get_contents($lateTargetFull), $lateForeignBytes, "Foreign leaf bytes must be preserved intact");
+
+    assertTrue($capturedTempPath !== null && is_file($capturedTempPath), "Private temp copy must be retained on disk after abort");
+    assertEqual(filesize($capturedTempPath), $betaTargetInv['files'][$targetLeafRel]['size'], "Retained private temp copy size must match signed target");
+    assertEqual(strtolower((string) hash_file('sha256', $capturedTempPath)), strtolower($betaTargetInv['files'][$targetLeafRel]['sha256']), "Retained private temp copy hash must match signed target");
+
+    assertTrue(file_exists($activeMarkerFileLate), "Active operation marker must be retained after apply abort");
+    assertTrue(is_dir($workspaceLate), "Workspace directory must be retained after apply abort");
+
+    $snapAfterAbort = snapshotTree($testRootLate);
+    foreach ($sourceBetaFiles as $rel => $expectedContent) {
+        $fullPath = $testRootLate . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $rel);
+        if ($rel === $targetLeafRel) {
+            assertEqual(file_get_contents($fullPath), $lateForeignBytes, "Foreign leaf bytes must be preserved intact");
+        } else {
+            assertEqual(file_get_contents($fullPath), $expectedContent, "Other product file must have no unknown writes: {$rel}");
+        }
+    }
+    assertEqual(count($snapAfterAbort), count($sourceBetaFiles), "Product root must not contain extra or missing files after abort");
+
     echo "  INJECTED failure (synthetic IO hook failure verified, not actual disk failure) for late foreign leaf mutation.\n";
 
     // Isolate fixture and restore known leaf only with normal test-owned explicit repair for recover
-    if ($originalLeafContent !== null && is_file($lateTargetFull)) {
-        file_put_contents($lateTargetFull, $originalLeafContent);
-    }
+    assertTrue($originalLeafContent !== null, "Remembered signed source bytes must be present");
+    file_put_contents($lateTargetFull, $originalLeafContent);
+    assertEqual(file_get_contents($lateTargetFull), $originalLeafContent, "Repaired leaf must match remembered signed source bytes");
+
     $recLate = $txService->recover($testRootLate, $testStateLate, $opLate, $installedBetaContext);
     assertEqual($recLate['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Recovery must succeed after restoring known leaf");
+
+    $recLateInv = $manifestService->buildInventory($testRootLate, '0.0.13');
+    assertEqual($recLateInv['files'], $betaSourceInv['files'], "Restored product inventory must match signed source inventory");
+    $recLateDigest = ShellDeltaManifestService::canonicalInventoryDigest($recLateInv);
+    assertEqual($recLateDigest, $betaManifest['source_inventory_sha256'], "Restored product canonical inventory digest must match signed source digest");
+
+    assertFalse(file_exists($activeMarkerFileLate), "Active operation marker must be cleared after successful recovery");
 
     // 9.20: Private error-path fail-retain regression (junction to outside victim with foreign witness)
     echo "  [9.20] Private error-path fail-retain regression (reparse boundary & foreign witness intact)...\n";
