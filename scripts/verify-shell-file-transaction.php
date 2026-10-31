@@ -2765,7 +2765,7 @@ try {
     $ws3d = $suite5State3d . DIRECTORY_SEPARATOR . 'workspaces' . DIRECTORY_SEPARATOR . $op3d;
     $sealed3d = $ws3d . DIRECTORY_SEPARATOR . 'sealed';
     if (file_exists($sealed3d) || is_dir($sealed3d)) {
-        @unlink($sealed3d);
+        safeLexicalSubdirCleanup($sealed3d, $lab);
         @rmdir($sealed3d);
     }
     createTrackedJunction($sealed3d, $victimDir);
