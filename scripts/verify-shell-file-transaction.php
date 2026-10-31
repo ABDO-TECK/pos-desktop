@@ -1361,17 +1361,77 @@ try {
     $prepBakMut = $txService->prepare($bakMutRoot, $bakMutState, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext);
     $bakMutOpId = $prepBakMut['operation_id'];
     $bakMutWs = $prepBakMut['workspace'];
-    // Mutate a file so rollback genuinely requires the backup
-    file_put_contents($bakMutRoot . DIRECTORY_SEPARATOR . 'icudtl.dat', 'PARTIALLY_MUTATED_BYTES');
-    $bakFiles2 = glob($bakMutWs . DIRECTORY_SEPARATOR . 'backups' . DIRECTORY_SEPARATOR . '*.bak');
-    assertTrue(!empty($bakFiles2), "Backup files must exist");
-    foreach ($bakFiles2 as $bf) {
-        file_put_contents($bf, 'CORRUPTED_BACKUP_DATA');
-    }
 
+    // Select actual modified path where signed source and target differ
+    $modifiedRel = 'POS Desktop.exe';
+    assertTrue(
+        isset($betaSourceInv['files'][$modifiedRel], $betaTargetInv['files'][$modifiedRel]),
+        "Modified file must exist in both source and target inventory"
+    );
+    $sourceMeta = $betaSourceInv['files'][$modifiedRel];
+    $targetMeta = $betaTargetInv['files'][$modifiedRel];
+    assertTrue(
+        $sourceMeta['sha256'] !== $targetMeta['sha256'] && $sourceMeta['size'] !== $targetMeta['size'],
+        "Modified file must have different signed hashes and sizes"
+    );
+    assertTrue(
+        isset($sourceBetaFiles[$modifiedRel], $targetBetaFiles[$modifiedRel]),
+        "Modified file must exist in fixture definitions"
+    );
+
+    // Simulate genuine partially published signed target: write exact target bytes at own product path
+    $modifiedProductPath = $bakMutRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $modifiedRel);
+    file_put_contents($modifiedProductPath, $targetBetaFiles[$modifiedRel]);
+
+    // Corresponding backup filename under workspace/backups
+    $backupFileName = hash('sha256', $modifiedRel) . '.bak';
+    $backupFilePath = $bakMutWs . DIRECTORY_SEPARATOR . 'backups' . DIRECTORY_SEPARATOR . $backupFileName;
+    assertTrue(is_file($backupFilePath), "Backup file for modified path must exist");
+    assertEqual(filesize($backupFilePath), $sourceMeta['size'], "Initial backup file size must match signed source metadata");
+    assertEqual(strtolower((string) hash_file('sha256', $backupFilePath)), strtolower($sourceMeta['sha256']), "Initial backup hash must match signed source metadata");
+    assertEqual(file_get_contents($backupFilePath), $sourceBetaFiles[$modifiedRel], "Initial backup bytes must match source fixture bytes");
+
+    // Corrupt THAT SPECIFIC backup (not arbitrary first entry or all files)
+    file_put_contents($backupFilePath, 'CORRUPTED_BACKUP_DATA');
+
+    // Capture product snapshot and active marker before rollback attempt
+    $snapBeforeRollback = snapshotTree($bakMutRoot);
+    $rootDigest = hash('sha256', strtolower(rtrim(str_replace('/', '\\', ProductInventoryService::resolveAbsolutePath($bakMutRoot, true)), '\\')));
+    $activeMarkerFile = $bakMutState . DIRECTORY_SEPARATOR . 'active_roots' . DIRECTORY_SEPARATOR . $rootDigest . '.json';
+    assertTrue(is_file($activeMarkerFile), "Own active root marker must exist before rollback");
+    $activeMarkerBytesBefore = file_get_contents($activeMarkerFile);
+    $activeMarkerData = json_decode($activeMarkerBytesBefore, true);
+    assertEqual($activeMarkerData['operation_id'], $bakMutOpId, "Active marker operation_id must match known op");
+
+    // Attempt rollback: must fail closed on corrupt needed backup
     assertThrows(function () use ($txService, $bakMutRoot, $bakMutState, $bakMutOpId, $installedBetaContext) {
         $txService->rollback($bakMutRoot, $bakMutState, $bakMutOpId, $installedBetaContext);
     }, 'backup', "Rollback on mutated root with corrupt backup must fail closed and retain state");
+
+    // Product tree must remain completely unchanged: known target file untouched, no other mutations
+    $snapAfterRollback = snapshotTree($bakMutRoot);
+    assertEqual($snapAfterRollback, $snapBeforeRollback, "Product tree bytes and listing must remain completely unchanged after rollback abort");
+    assertEqual(file_get_contents($modifiedProductPath), $targetBetaFiles[$modifiedRel], "Known target file must remain untouched with target bytes");
+
+    // Corrupt backup and workspace must be retained
+    assertTrue(is_dir($bakMutWs), "Workspace directory must be retained");
+    assertTrue(is_file($backupFilePath), "Corrupt backup file must be retained");
+    assertEqual(file_get_contents($backupFilePath), 'CORRUPTED_BACKUP_DATA', "Corrupt backup file content must be retained");
+
+    // Own active root marker retained exact
+    assertTrue(is_file($activeMarkerFile), "Own active root marker must be retained after rollback abort");
+    assertEqual(file_get_contents($activeMarkerFile), $activeMarkerBytesBefore, "Active root marker bytes must remain exact and untampered");
+
+    // Demonstrate positive recovery after explicitly repairing synthetic backup with source fixture bytes
+    file_put_contents($backupFilePath, $sourceBetaFiles[$modifiedRel]);
+
+    $recRes = $txService->recover($bakMutRoot, $bakMutState, $bakMutOpId, $installedBetaContext);
+    assertEqual($recRes['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Recovery after repairing backup must succeed and reach rolled_back phase");
+
+    $rolledBackInv = $manifestService->buildInventory($bakMutRoot, '0.0.13');
+    assertEqual($rolledBackInv['files'], $betaSourceInv['files'], "Restored product inventory must match signed source inventory");
+    assertEqual(file_get_contents($modifiedProductPath), $sourceBetaFiles[$modifiedRel], "Restored file must match source fixture bytes");
+    assertFalse(file_exists($activeMarkerFile), "Active operation marker must be released after successful recovery");
 
     // 2.8 Missing/Corrupt Unused ZIP After Partial Apply
     echo "  [2.8] Missing/corrupt unused ZIP after prepare allows verified backup rollback...\n";
