@@ -1552,7 +1552,7 @@ try {
 
     assertThrows(function () use ($txService, $driftRoot, $driftState, $driftOpId, $installedBetaContext) {
         $txService->apply($driftRoot, $driftState, $driftOpId, $installedBetaContext);
-    }, 'drift', "Apply must abort on source drift");
+    }, 'source_file_mismatch', "Apply must abort on source drift");
 
     // Restore and clean up
     file_put_contents($driftRoot . DIRECTORY_SEPARATOR . 'icudtl.dat', $sourceBetaFiles['icudtl.dat']);
