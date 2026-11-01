@@ -1,0 +1,59 @@
+name: Shell Worker Inspection Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Services/ShellDeltaWorkerInspectionService.php'
+      - 'backend/Services/ShellDeltaWorkerSnapshotService.php'
+      - 'backend/Services/ManifestSignatureService.php'
+      - 'backend/Services/ShellDeltaManifestService.php'
+      - 'backend/Services/ProductInventoryService.php'
+      - 'backend/Services/UpdateChannelPolicy.php'
+      - 'backend/Services/UpdateDataCompatibilityService.php'
+      - 'backend/certs/update_public_key.pem'
+      - 'backend/cli/shell-worker-inspect.php'
+      - 'build-phar.php'
+      - 'scripts/verify-shell-worker-inspection.php'
+      - '.github/workflows/shell-worker-inspection.yml'
+      - 'scripts/build-shell-delta.php'
+      - 'backend/composer.json'
+      - 'backend/composer.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-worker-inspection-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-inspection:
+    name: Verify Shell Worker Inspection Slice (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: zip, openssl, mbstring, gd
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          composer install --no-dev --prefer-dist --no-progress --no-interaction --no-scripts --working-dir=backend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run shell worker inspection verification
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-worker-inspection.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

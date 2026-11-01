@@ -498,6 +498,12 @@ $stub = <<<PHP
 Phar::mapPhar('backend.phar');
 
 if (php_sapi_name() === 'cli') {
+    // Isolated shell worker inspection command passthrough (reserved prefix)
+    if (\$argc > 1 && str_starts_with(\$argv[1], 'shell-worker')) {
+        require 'phar://backend.phar/cli/shell-worker-inspect.php';
+        exit(1);
+    }
+
     // CLI commands passthrough
     if (\$argc > 1 && \$argv[1] === 'process-jobs') {
         unset(\$argv[1]);
@@ -594,6 +600,31 @@ PHP;
 
 $phar->setStub($stub);
 
+// Generate static inspection-only capability marker inside built PHAR
+$actualStub = $phar->getStub();
+$stubSha256 = hash('sha256', $actualStub);
+
+$entrypointPath = 'cli/shell-worker-inspect.php';
+if (!isset($phar[$entrypointPath])) {
+    throw new RuntimeException("Cannot generate inspection marker: missing entrypoint '{$entrypointPath}'.");
+}
+$entrypointBytes = $phar[$entrypointPath]->getContent();
+$entrypointSha256 = hash('sha256', $entrypointBytes);
+
+$inspectionMarkerData = [
+    'format' => 1,
+    'operation' => 'inspect_snapshot',
+    'can_apply' => false,
+    'entrypoint' => $entrypointPath,
+    'entrypoint_sha256' => $entrypointSha256,
+    'stub_sha256' => $stubSha256,
+];
+$inspectionMarkerJson = json_encode($inspectionMarkerData, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+if (strlen($inspectionMarkerJson) > 4096) {
+    throw new RuntimeException("Generated inspection capability marker exceeds 4KB limit.");
+}
+$phar->addFromString('shell-worker-inspection.json', $inspectionMarkerJson);
+
 // 5. Apply SHA-512 integrity verification check (not cryptographic signature or encryption)
 $phar->setSignatureAlgorithm(Phar::SHA512);
 
@@ -607,6 +638,8 @@ $requiredPharEntries = [
     'cli/migrate.php',
     'cli/verify-database.php',
     'cli/initialize-admin.php',
+    'cli/shell-worker-inspect.php',
+    'shell-worker-inspection.json',
     'router.php',
     'version.json',
     'certs/cacert.pem',

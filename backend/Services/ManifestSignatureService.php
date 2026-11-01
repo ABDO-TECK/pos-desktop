@@ -11,16 +11,28 @@ class ManifestSignatureService
     private ?string $publicKeyPath;
     /** @var list<string> */
     private array $trustedPublicKeys = [];
+    private bool $enableLogging = true;
 
-    public function __construct(?string $publicKeyPath = null, array $additionalTrustedKeys = [])
-    {
-        $this->publicKeyPath = $publicKeyPath ? str_replace('\\', '/', $publicKeyPath) : $this->resolveDefaultPublicKeyPath();
-        $this->trustedPublicKeys = array_values(array_unique(array_filter(
-            array_merge(
-                $this->resolveAllTrustedKeyPaths(),
-                $additionalTrustedKeys
-            )
-        )));
+    public function __construct(
+        ?string $publicKeyPath = null,
+        array $additionalTrustedKeys = [],
+        bool $discoverDefaultKeys = true,
+        bool $enableLogging = true
+    ) {
+        $this->enableLogging = $enableLogging;
+        if ($discoverDefaultKeys) {
+            $this->publicKeyPath = $publicKeyPath ? str_replace('\\', '/', $publicKeyPath) : $this->resolveDefaultPublicKeyPath();
+            $this->trustedPublicKeys = array_values(array_unique(array_filter(
+                array_merge(
+                    $this->resolveAllTrustedKeyPaths(),
+                    $additionalTrustedKeys
+                )
+            )));
+        } else {
+            $this->publicKeyPath = ($publicKeyPath !== null && $publicKeyPath !== '') ? str_replace('\\', '/', $publicKeyPath) : null;
+            $normalizedAdditional = array_map(static fn($k) => is_string($k) ? str_replace('\\', '/', $k) : $k, $additionalTrustedKeys);
+            $this->trustedPublicKeys = array_values(array_unique(array_filter($normalizedAdditional)));
+        }
     }
 
     public function getPublicKeyPath(): ?string
@@ -47,7 +59,7 @@ class ManifestSignatureService
     public function verifySignature(string $data, string $signature, ?string $customPublicKey = null): bool
     {
         if (trim($data) === '' || trim($signature) === '') {
-            Logger::warning('Manifest signature verification failed: empty data or signature provided.');
+            $this->logWarning('Manifest signature verification failed: empty data or signature provided.');
             return false;
         }
 
@@ -77,14 +89,14 @@ class ManifestSignatureService
             }
 
             if ($this->verifyWithSingleKey($data, $rawSignature, $trustedKeyPathOrContent)) {
-                Logger::info('Manifest signature verified using trusted secondary/rotation public key.', [
+                $this->logInfo('Manifest signature verified using trusted secondary/rotation public key.', [
                     'key' => is_file($trustedKeyPathOrContent) ? basename($trustedKeyPathOrContent) : 'in_memory_key',
                 ]);
                 return true;
             }
         }
 
-        Logger::warning('Manifest signature verification rejected: No trusted public key could verify the signature.');
+        $this->logWarning('Manifest signature verification rejected: No trusted public key could verify the signature.');
         return false;
     }
 
@@ -101,7 +113,7 @@ class ManifestSignatureService
         // Validate key strength: must be RSA with at least 2048 bits
         $details = openssl_pkey_get_details($publicKey);
         if (!$details || ($details['type'] ?? -1) !== OPENSSL_KEYTYPE_RSA || ($details['bits'] ?? 0) < 2048) {
-            Logger::error('Public key rejected: must be RSA-2048 or higher.', [
+            $this->logError('Public key rejected: must be RSA-2048 or higher.', [
                 'type' => $details['type'] ?? 'unknown',
                 'bits' => $details['bits'] ?? 0,
             ]);
@@ -113,11 +125,47 @@ class ManifestSignatureService
             $result = openssl_verify($data, $rawSignature, $publicKey, OPENSSL_ALGO_SHA256);
             return $result === 1;
         } catch (Throwable $e) {
-            Logger::error('Exception during manifest signature verification', [
+            $this->logError('Exception during manifest signature verification', [
                 'exception' => get_class($e),
                 'message' => $e->getMessage(),
             ]);
             return false;
+        }
+    }
+
+    /**
+     * Guarded log helper: warning.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function logWarning(string $message, array $context = []): void
+    {
+        if ($this->enableLogging) {
+            Logger::warning($message, $context);
+        }
+    }
+
+    /**
+     * Guarded log helper: info.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function logInfo(string $message, array $context = []): void
+    {
+        if ($this->enableLogging) {
+            Logger::info($message, $context);
+        }
+    }
+
+    /**
+     * Guarded log helper: error.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function logError(string $message, array $context = []): void
+    {
+        if ($this->enableLogging) {
+            Logger::error($message, $context);
         }
     }
 

@@ -338,6 +338,133 @@ final class ShellDeltaWorkerSnapshotService
     }
 
     /**
+     * Bounded read-only verification of a sealed worker snapshot using caller-pinned digest.
+     * Reads sealed manifest and signature directly from fixed worker_snapshots/id/sealed paths,
+     * comparing the caller pin against snapshot.json before interpreting any metadata, and then
+     * invoking the full verify logic with those exact raw bytes.
+     * Product contents are not read; missing or mutated product installation is permitted.
+     *
+     * @param string $productRoot Absolute Windows product root directory (may be missing or mutated)
+     * @param string $privateStateBase Absolute Windows private state base directory
+     * @param string $snapshotId Snapshot identifier (rt_<32lowerhex>)
+     * @param string $expectedSnapshotSha256 Pinned 64-character lowercase hex digest of snapshot.json
+     * @param array<string, mixed> $installedContext Required source context (root key forbidden)
+     * @return array{
+     *     snapshot_id: string,
+     *     snapshot_root: string,
+     *     snapshot_sha256: string,
+     *     source_inventory_sha256: string,
+     *     manifest_sha256: string,
+     *     php_path: string,
+     *     phar_path: string,
+     *     phase: string,
+     *     expected_php_sha256: string,
+     *     expected_phar_sha256: string
+     * }
+     */
+    public function verifySealed(
+        string $productRoot,
+        string $privateStateBase,
+        string $snapshotId,
+        string $expectedSnapshotSha256,
+        array $installedContext
+    ): array {
+        // 1. Strict installed context validation (context root key rejected)
+        $this->validateInstalledContext($installedContext);
+
+        // 2. Pure lexical drive-root rejection BEFORE any filesystem resolution or I/O
+        self::assertNotDriveRoot($productRoot, 'productRoot');
+        self::assertNotDriveRoot($privateStateBase, 'privateStateBase');
+
+        // 3. Validate snapshotId syntax
+        if (!is_string($snapshotId) || preg_match('/^rt_[a-f0-9]{32}$/D', $snapshotId) !== 1) {
+            throw new RuntimeException("Invalid snapshot ID format: {$snapshotId}");
+        }
+
+        // 4. Validate expectedSnapshotSha256 syntax
+        if (!is_string($expectedSnapshotSha256) || preg_match('/^[a-f0-9]{64}$/D', $expectedSnapshotSha256) !== 1) {
+            throw new RuntimeException("Invalid expected snapshot digest format.");
+        }
+
+        // 5. Canonical mutually disjoint existing state base and product-may-be-missing using existing helper
+        [$canonicalRoot, $canonicalStateBase] = $this->validateDirectories($productRoot, $privateStateBase, false);
+
+        // 6. Derive ONLY fixed worker_snapshots/id paths
+        $snapshotsDir = $canonicalStateBase . DIRECTORY_SEPARATOR . self::SNAPSHOTS_DIR;
+        $snapshotRoot = $snapshotsDir . DIRECTORY_SEPARATOR . $snapshotId;
+
+        // Raw no-reparse on ALL existing ancestors/leaves before reads
+        ProductInventoryService::assertNoReparse($canonicalStateBase);
+        clearstatcache(true, $snapshotsDir);
+        if (file_exists($snapshotsDir)) {
+            ProductInventoryService::assertNoReparse($snapshotsDir);
+        }
+
+        clearstatcache(true, $snapshotRoot);
+        if (!file_exists($snapshotRoot) || is_link($snapshotRoot) || !is_dir($snapshotRoot)) {
+            throw new RuntimeException("Snapshot directory does not exist or is not a directory: {$snapshotId}");
+        }
+
+        ProductInventoryService::assertNoReparse($snapshotRoot);
+        $canonicalSnapshotRoot = ProductInventoryService::resolveAbsolutePath($snapshotRoot, true);
+        ProductInventoryService::assertNoReparse($canonicalSnapshotRoot);
+
+        $normSnapshotsDir = rtrim(strtolower(str_replace('/', '\\', $snapshotsDir)), '\\');
+        $normSnapshotRoot = rtrim(strtolower(str_replace('/', '\\', $canonicalSnapshotRoot)), '\\');
+        if (!str_starts_with($normSnapshotRoot, $normSnapshotsDir . '\\')) {
+            throw new RuntimeException("Snapshot path escape detected: {$canonicalSnapshotRoot}");
+        }
+
+        // 7. Read bounded snapshot.json and compare CALLER exact pin BEFORE interpreting metadata
+        $completionPath = $canonicalSnapshotRoot . DIRECTORY_SEPARATOR . self::COMPLETION_FILENAME;
+        ProductInventoryService::assertNoReparse($completionPath);
+        $rawCompletionBytes = $this->readBoundedFile($completionPath, self::MAX_METADATA_SIZE);
+        $actualCompletionSha256 = hash('sha256', $rawCompletionBytes);
+        if (!hash_equals($expectedSnapshotSha256, $actualCompletionSha256)) {
+            throw new RuntimeException("Snapshot completion digest mismatch: expected {$expectedSnapshotSha256}, got {$actualCompletionSha256}");
+        }
+
+        // 8. Read only fixed sealed/shell-manifest.json + .sig with existing 16MiB/16KiB checked bounded reads
+        $sealedDir = $canonicalSnapshotRoot . DIRECTORY_SEPARATOR . self::SEALED_DIR;
+        ProductInventoryService::assertNoReparse($sealedDir);
+
+        $sealedManifestPath = $sealedDir . DIRECTORY_SEPARATOR . ShellDeltaManifestService::MANIFEST_ASSET;
+        $sealedSigPath = $sealedDir . DIRECTORY_SEPARATOR . ShellDeltaManifestService::SIGNATURE_ASSET;
+        ProductInventoryService::assertNoReparse($sealedManifestPath);
+        ProductInventoryService::assertNoReparse($sealedSigPath);
+
+        $rawManifest = $this->readBoundedFile($sealedManifestPath, ShellDeltaManifestService::MAX_MANIFEST_SIZE);
+        $signature = $this->readBoundedFile($sealedSigPath, ShellDeltaManifestService::MAX_SIGNATURE_SIZE);
+
+        // 9. Call existing full verify with those exact raw bytes
+        $verified = $this->verify(
+            $productRoot,
+            $privateStateBase,
+            $snapshotId,
+            $expectedSnapshotSha256,
+            $rawManifest,
+            $signature,
+            $installedContext
+        );
+
+        // 10. Extract signed expected php_sha256 and phar_sha256 from authenticated raw manifest
+        $manifestData = json_decode($rawManifest, true, 32, JSON_THROW_ON_ERROR);
+        $expectedPhpSha256 = $manifestData['source_inventory']['files'][self::REQUIRED_PHP_EXE]['sha256'] ?? null;
+        $expectedPharSha256 = $manifestData['source_inventory']['files'][self::REQUIRED_BACKEND_PHAR]['sha256'] ?? null;
+        if (!is_string($expectedPhpSha256) || preg_match('/^[a-f0-9]{64}$/D', $expectedPhpSha256) !== 1) {
+            throw new RuntimeException("Missing or invalid signed expected PHP SHA-256 in manifest source inventory.");
+        }
+        if (!is_string($expectedPharSha256) || preg_match('/^[a-f0-9]{64}$/D', $expectedPharSha256) !== 1) {
+            throw new RuntimeException("Missing or invalid signed expected PHAR SHA-256 in manifest source inventory.");
+        }
+
+        $verified['expected_php_sha256'] = $expectedPhpSha256;
+        $verified['expected_phar_sha256'] = $expectedPharSha256;
+
+        return $verified;
+    }
+
+    /**
      * Verify an existing snapshot without reading or depending on product root file contents.
      * Completely read-only: performs zero writes to disk and zero deletions.
      *
