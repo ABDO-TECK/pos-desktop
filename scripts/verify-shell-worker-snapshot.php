@@ -255,9 +255,32 @@ function forceKillChildAndVerify(mixed $proc, int $timeoutSeconds = 5): int
 }
 
 /**
+ * Validate that an operand path for native cmd commands contains no control characters,
+ * NUL bytes, double quotes, percent, exclamation, or shell metacharacters, and does
+ * not end with a trailing slash. Spaces and UTF-8 multi-byte Unicode characters are permitted.
+ */
+function validateNativeCmdOperand(string $operand): void
+{
+    if (trim($operand) === '') {
+        throw new InvalidArgumentException("Command operand cannot be empty.");
+    }
+    if (str_ends_with($operand, '\\') || str_ends_with($operand, '/')) {
+        throw new InvalidArgumentException("Command operand must not end with a trailing slash: '{$operand}'");
+    }
+    if (preg_match('/[\x00-\x1f\x7f"%!&<>|^]/', $operand)) {
+        throw new InvalidArgumentException("Command operand contains unsafe or control characters: '{$operand}'");
+    }
+}
+
+/**
  * Run native command (e.g. mklink, rmdir) using fixed System32 cmd.exe.
  * Direct-handle tracked in $trackedChildProcs with bounded timeout.
  * Logs are retained in $labRoot for audit and not prematurely unlinked.
+ *
+ * Uses explicit native CMD command line string with outer quote grammar:
+ * conceptual `"<fixedcmd.exe>" /d /v:off /s /c "mklink /J "<link>" "<target>""`
+ * and proc_open(..., ['bypass_shell' => true]) so PHP does not wrap quotes around
+ * internal builtins/switches.
  *
  * @param list<string> $args
  * @return array{exitCode: int, stdout: string, stderr: string}
@@ -265,13 +288,48 @@ function forceKillChildAndVerify(mixed $proc, int $timeoutSeconds = 5): int
 function runNativeCmd(array $args, string $labRoot): array
 {
     global $trackedChildProcs;
+
+    // Fixed native System32 cmd.exe (no PATH)
     $systemRoot = getenv('SystemRoot') ?: (getenv('WINDIR') ?: 'C:\\Windows');
     $cmdExe = rtrim($systemRoot, '\\/') . '\\System32\\cmd.exe';
     if (!is_file($cmdExe)) {
         throw new RuntimeException("Fixed cmd.exe not found at: {$cmdExe}");
     }
 
-    $cmd = array_merge([$cmdExe, '/d', '/c'], $args);
+    if (!is_dir($labRoot)) {
+        throw new RuntimeException("Lab root directory does not exist: {$labRoot}");
+    }
+    ProductInventoryService::assertNoReparse($labRoot);
+
+    // Whitelist EXACT supported shapes BEFORE spawning or allocating files:
+    // Shape 1: ['mklink', '/J', ownedLink, ownedTarget]
+    // Shape 2: ['rmdir', ownedLink] (NO /S)
+    if (empty($args)) {
+        throw new InvalidArgumentException("Command arguments cannot be empty.");
+    }
+    foreach ($args as $arg) {
+        if (!is_string($arg)) {
+            throw new InvalidArgumentException("All command arguments must be strings.");
+        }
+    }
+
+    $numArgs = count($args);
+    $builtInCmd = '';
+    if ($numArgs === 4 && strtolower($args[0]) === 'mklink' && strtoupper($args[1]) === '/J') {
+        validateNativeCmdOperand($args[2]);
+        validateNativeCmdOperand($args[3]);
+        $builtInCmd = 'mklink /J "' . $args[2] . '" "' . $args[3] . '"';
+    } elseif ($numArgs === 2 && strtolower($args[0]) === 'rmdir') {
+        validateNativeCmdOperand($args[1]);
+        $builtInCmd = 'rmdir "' . $args[1] . '"';
+    } else {
+        throw new InvalidArgumentException("Unsupported native command shape or disallowed arguments.");
+    }
+
+    // Outer quote grammar for CMD /d /v:off /s /c:
+    // With /s, cmd strips the outer leading and trailing double quotes around the command string after /c.
+    $cmdLine = '"' . $cmdExe . '" /d /v:off /s /c "' . $builtInCmd . '"';
+
     $nonce = bin2hex(random_bytes(6));
     $stdoutLog = $labRoot . DIRECTORY_SEPARATOR . 'cmd-out-' . $nonce . '.log';
     $stderrLog = $labRoot . DIRECTORY_SEPARATOR . 'cmd-err-' . $nonce . '.log';
@@ -282,7 +340,7 @@ function runNativeCmd(array $args, string $labRoot): array
         2 => ['file', $stderrLog, 'w'],
     ];
 
-    $proc = proc_open($cmd, $descriptors, $pipes, $labRoot, null);
+    $proc = proc_open($cmdLine, $descriptors, $pipes, $labRoot, null, ['bypass_shell' => true]);
     if (!is_resource($proc)) {
         throw new RuntimeException("Failed to spawn native cmd process.");
     }
@@ -664,7 +722,7 @@ function createTrackedJunction(string $link, string $target): void
     }
     ProductInventoryService::assertNoReparse($lab);
 
-    $normLink = str_replace('/', '\\', $link);
+    $normLink = rtrim(str_replace('/', '\\', $link), '\\');
     $normLab = strtolower(rtrim(str_replace('/', '\\', $lab), '\\'));
     if (!str_starts_with(strtolower($normLink), $normLab . '\\')) {
         throw new RuntimeException("Cannot create junction outside lab root: '{$link}'");
@@ -680,7 +738,8 @@ function createTrackedJunction(string $link, string $target): void
 
     $canonicalTarget = ProductInventoryService::resolveAbsolutePath($target, true);
     ProductInventoryService::assertNoReparse($canonicalTarget);
-    $normTarget = strtolower(rtrim(str_replace('/', '\\', $canonicalTarget), '\\'));
+    $canonicalTarget = rtrim(str_replace('/', '\\', $canonicalTarget), '\\');
+    $normTarget = strtolower($canonicalTarget);
 
     $isOwnedTarget = false;
     if (isset($victimDir) && is_string($victimDir) && $victimDir !== '') {
@@ -738,7 +797,7 @@ function removeTrackedJunction(string $link, string $labRoot): void
 {
     global $createdJunctions, $createdJunctionTargets;
 
-    $normLink = str_replace('/', '\\', $link);
+    $normLink = rtrim(str_replace('/', '\\', $link), '\\');
     $idx = array_search($normLink, $createdJunctions, true);
     if ($idx === false) {
         $idx = array_search($link, $createdJunctions, true);
@@ -780,7 +839,7 @@ function removeTrackedJunction(string $link, string $labRoot): void
     // Run native cmd rmdir (NO /S: removes reparse link only)
     $cmdRes = runNativeCmd(['rmdir', $normLink], $labRoot);
     if ($cmdRes['exitCode'] !== 0) {
-        throw new RuntimeException("Failed to remove tracked junction (exit code {$cmdRes['exitCode']}): '{$link}'");
+        throw new RuntimeException("Failed to remove tracked junction (exit code {$cmdRes['exitCode']}): '{$link}'. stdout: {$cmdRes['stdout']} stderr: {$cmdRes['stderr']}");
     }
 
     clearstatcache(true, $normLink);
@@ -1961,6 +2020,85 @@ try {
     assertDirectoryTreeStateMatches($victimDir, $initialVictimState, "Victim directory after verify junction attack");
     removeTrackedJunction($victimPayloadJunc, $lab);
 
+    // 7E: Native CMD junction handling with spaces and Unicode + wrapper rejection guards
+    // Validate unsupported command and unsafe operand cases reject BEFORE spawn and allocate no files in lab
+    $labFilesBefore = glob($lab . DIRECTORY_SEPARATOR . 'cmd-*') ?: [];
+    $trackedCountBefore = count($trackedChildProcs);
+
+    $disallowedInvocations = [
+        ['cmd', '/c', 'echo', 'fail'],
+        ['echo', 'bad'],
+        ['powershell', '-Command', 'exit 0'],
+        ['mklink', '/D', $lab . DIRECTORY_SEPARATOR . 'link', $victimDir],
+        ['mklink', '/H', $lab . DIRECTORY_SEPARATOR . 'link', $victimDir],
+        ['mklink', $lab . DIRECTORY_SEPARATOR . 'link', $victimDir],
+        ['rmdir', '/S', $lab . DIRECTORY_SEPARATOR . 'link'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'link', '/S'],
+        ['rmdir', ''],
+        ['rmdir', '   '],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has"quote'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has%pct%'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has!excl!'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . "has\0null"],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . "has\nnewline"],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has&amp'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has|pipe'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has<less'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has>greater'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'has^caret'],
+        ['rmdir', $lab . DIRECTORY_SEPARATOR . 'trailing\\'],
+    ];
+
+    foreach ($disallowedInvocations as $inv) {
+        assertThrows(
+            fn() => runNativeCmd($inv, $lab),
+            "",
+            "Disallowed command shape or unsafe operand must reject before spawn"
+        );
+    }
+
+    $labFilesAfter = glob($lab . DIRECTORY_SEPARATOR . 'cmd-*') ?: [];
+    assertEqual(count($labFilesBefore), count($labFilesAfter), "No log files allocated in lab during rejected command calls");
+    assertEqual($trackedCountBefore, count($trackedChildProcs), "No child processes tracked during rejected command calls");
+
+    // Exercise createTrackedJunction and removeTrackedJunction with spaces and Unicode
+    $unicodeTargetDir = $lab . DIRECTORY_SEPARATOR . 'fixture target with spaces and unicode 測試';
+    mkdir($unicodeTargetDir, 0700, false);
+    file_put_contents($unicodeTargetDir . DIRECTORY_SEPARATOR . 'probe.txt', 'PROBE_UNICODE_PAYLOAD');
+
+    $unicodeLink = $lab . DIRECTORY_SEPARATOR . 'fixture link with spaces and unicode 測試';
+    $victimUnicodeLink = $lab . DIRECTORY_SEPARATOR . 'victim link with spaces and unicode 測試';
+
+    createTrackedJunction($unicodeLink, $unicodeTargetDir);
+
+    // Verify native PS oracle independently confirms junction kind, linkType, and exact target
+    $oracleMeta = queryNativeItemMetadata($unicodeLink);
+    assertEqual($oracleMeta['kind'], 'junction', "Spaces and Unicode link must be verified as junction by oracle");
+    assertEqual(strcasecmp((string) $oracleMeta['linkType'], 'Junction'), 0, "Oracle linkType must be Junction");
+    assertEqual(normalizeJunctionTarget((string) $oracleMeta['target']), normalizeJunctionTarget($unicodeTargetDir), "Oracle target must match exact Unicode target");
+
+    // Remove junction and verify absence and target preservation
+    removeTrackedJunction($unicodeLink, $lab);
+    $oraclePost = queryNativeItemMetadata($unicodeLink);
+    assertEqual($oraclePost['kind'], 'absent', "Spaces and Unicode junction must be absent after rmdir");
+    assertFalse(file_exists($unicodeLink), "Link path must not exist after removal");
+    assertTrue(is_dir($unicodeTargetDir), "Target directory must remain intact after junction removal");
+    assertTrue(is_file($unicodeTargetDir . DIRECTORY_SEPARATOR . 'probe.txt'), "Target file must remain intact");
+
+    // Also exercise junction directly targeting victim directory with spaces and Unicode in link
+    createTrackedJunction($victimUnicodeLink, $victimDir);
+    $victimLinkMeta = queryNativeItemMetadata($victimUnicodeLink);
+    assertEqual($victimLinkMeta['kind'], 'junction', "Victim link with spaces+Unicode must be junction");
+    assertEqual(normalizeJunctionTarget((string) $victimLinkMeta['target']), normalizeJunctionTarget($victimDir), "Target must match victimDir");
+
+    removeTrackedJunction($victimUnicodeLink, $lab);
+    $victimLinkPost = queryNativeItemMetadata($victimUnicodeLink);
+    assertEqual($victimLinkPost['kind'], 'absent', "Victim link with spaces+Unicode must be absent after removal");
+    assertFalse(file_exists($victimUnicodeLink), "Victim link path must not exist after removal");
+
+    // Verify whole victim directory remains completely untouched
+    assertDirectoryTreeStateMatches($victimDir, $initialVictimState, "Victim directory after spaces and Unicode junction exercise");
+
     // -------------------------------------------------------------------------
     // Suite 8: Verification tamper & fail-closed checks (NO xcopy, fresh snapshots)
     // -------------------------------------------------------------------------
@@ -2129,6 +2267,7 @@ try {
     assertTrue(is_resource($testChildProc), "Spawn test child process bounded to 30s");
     $trackedChildProcs[] = $testChildProc;
 
+    $suite9Error = null;
     try {
         // Assert REAL status is RUNNING immediately before injecting status hook
         $stPre = getVerifiedProcessStatus($testChildProc);
@@ -2174,23 +2313,28 @@ try {
         $juncMeta = queryNativeItemMetadata($faultJunc);
         assertEqual($juncMeta['kind'], 'junction', "faultJunc must still exist as native junction");
         assertEqual(normalizeJunctionTarget((string) $juncMeta['target']), normalizeJunctionTarget($faultVictim), "faultJunc target matches faultVictim");
+
+        // Assert real child status after removing the synthetic override.
+        $globalProcessStatusHook = null;
+        $stPreKill = getVerifiedProcessStatus($testChildProc);
+        assertEqual($stPreKill['state'], 'RUNNING', "Process must still be RUNNING before kill");
+    } catch (Throwable $e) {
+        $suite9Error = $e;
+        throw $e;
     } finally {
         // Clear mock hook so it doesn't mask real teardown
         $globalProcessStatusHook = null;
 
-        // Assert child still RUNNING before kill
-        $stPreKill = getVerifiedProcessStatus($testChildProc);
-        assertEqual($stPreKill['state'], 'RUNNING', "Process must still be RUNNING before kill");
-
-        // Force kill child and prove DEAD before cleanup
-        forceKillChildAndVerify($testChildProc, 5);
-        assertFalse(is_resource($testChildProc), "Verified-dead child handle must be closed by helper");
-        assertFalse(in_array($testChildProc, $trackedChildProcs, true), "Verified-dead child must be untracked by helper");
-
-        // Remove tracked fault junction and safely clean up fault workspaces
-        removeTrackedJunction($faultJunc, $lab);
-        safeLexicalCleanup($faultLab, $faultLabToken, $canonicalRunnerTemp);
-        safeLexicalCleanup($faultVictim, $faultVictimToken, $canonicalRunnerTemp);
+        try {
+            // Force kill child and prove DEAD before cleanup
+            forceKillChildAndVerify($testChildProc, 5);
+            assertFalse(is_resource($testChildProc), "Verified-dead child handle must be closed by helper");
+            assertFalse(in_array($testChildProc, $trackedChildProcs, true), "Verified-dead child must be untracked by helper");
+        } catch (Throwable $fe) {
+            if ($suite9Error === null) {
+                throw $fe;
+            }
+        }
     }
 
     $allSuitesPassed = true;
