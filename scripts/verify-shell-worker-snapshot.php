@@ -699,7 +699,7 @@ function createTrackedJunction(string $link, string $target): void
     // Spawn native cmd using tracked helper
     $cmdRes = runNativeCmd(['mklink', '/J', $normLink, $canonicalTarget], $lab);
     if ($cmdRes['exitCode'] !== 0) {
-        throw new RuntimeException("Failed to create junction from '{$link}' to '{$target}' (exit code {$cmdRes['exitCode']})");
+        throw new RuntimeException("Failed to create junction from '{$link}' to '{$target}' (exit code {$cmdRes['exitCode']}). stdout: {$cmdRes['stdout']} stderr: {$cmdRes['stderr']}");
     }
 
     // Track IMMEDIATELY after creation before oracle verification
