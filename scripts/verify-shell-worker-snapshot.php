@@ -1106,7 +1106,7 @@ function performTeardownAndRetention(
         }
         return [
             'cleaned' => true,
-            'reason' => 'All tests passed cleanly and workspaces cleaned up',
+            'reason' => 'All tracked children verified dead; owned workspaces cleaned up',
             'uncertain' => false,
         ];
     } catch (Throwable $e) {
@@ -2218,6 +2218,7 @@ try {
         "same",
         "Same directory root and state base rejected"
     );
+    assertTrue(mkdir(ProductInventoryService::resolveConfinedPath($betaSrcDir, 'state', false), 0700, false), "Create owned overlapping state-base fixture");
     assertThrows(
         fn() => $snapshotService->create($betaSrcDir, $betaSrcDir . '/state', $betaManifestRaw, $betaSig, $betaContext),
         "inside",
