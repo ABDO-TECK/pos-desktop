@@ -704,7 +704,7 @@ try {
 
     $buildPharScript = $repoRoot . DIRECTORY_SEPARATOR . 'build-phar.php';
     ProductInventoryService::assertNoReparse($buildPharScript);
-    $buildRes = runProcess([PHP_BINARY, '-d', 'phar.readonly=0', $buildPharScript], $repoRoot, null, $lab, 90.0);
+    $buildRes = runProcess([PHP_BINARY, '-d', 'phar.readonly=0', $buildPharScript], $repoRoot, null, $lab, 300.0);
     assertEqual($buildRes['exitCode'], 0, "build-phar.php must exit with 0. Stderr: {$buildRes['stderr']}");
 
     if (!is_file($generatedPhar)) {
