@@ -1,0 +1,33 @@
+name: Shell Native File Lease Oracle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'scripts/verify-shell-native-file-lease.ps1'
+      - '.github/workflows/shell-native-file-lease.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-file-lease-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-lease:
+    name: Verify Win32 File Lease Oracle (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Win32 native file lease oracle
+        shell: pwsh
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-file-lease.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
