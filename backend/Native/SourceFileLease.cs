@@ -1,22 +1,27 @@
 // backend/Native/SourceFileLease.cs
 //
-// INTERNAL native leased-file reader / verified stream-copy / same-directory rename primitive.
+// INTERNAL native leased-file reader / verified stream-copy / same-directory rename / verified staging primitive.
 //
 // Architecture & Trust Notice:
-// Caller MUST authenticate expected metadata from signed SOURCE inventory,
-// select trusted root/paths with ProductInventoryService, authorize old and new names,
+// Caller MUST authenticate expected metadata from signed SOURCE or TARGET inventory,
+// select trusted root/paths with ProductInventoryService, authorize old, new, and staging names,
 // and enforce process quiescence, launch interlock, DB state, and storage proof.
 //
-// This internal component does NOT verify RSA signatures, authorize paths,
-// introspect process IDs (PID), record journal/DB state, provide transactional durability,
-// or prove absolute ancestor TOCTOU guarantees. Directory traversal and path checks
-// cannot be claimed absolute against concurrent attacker directory swaps; private
-// authorized root verification is the caller's responsibility.
+// For staging operations (CreateNewVerified), the caller MUST authenticate target
+// expected size/SHA-256 and old/new root/names from signed TARGET inventory, authorize a fresh
+// nonce-staging namespace, control ancestor directories, and manage process/launch interlocks,
+// DB state, and transaction journals.
+//
+// This internal component does NOT verify RSA signatures, authorize path inventory,
+// introspect process IDs (PID), record journal/DB state, provide transactional durability
+// or staging journals, or prove absolute ancestor TOCTOU / power loss guarantees. Directory traversal
+// and path checks cannot be claimed absolute against concurrent attacker directory swaps; private
+// authorized root verification is the caller's responsibility. Current library is INTERNAL and unwired.
 //
 // Memory data/view mappings may still change file bytes concurrently, so callers
 // must verify bytes for each copy operation via CopyVerifiedTo.
 //
-// This component provides exclusive read/copy/rename access through the SAME owned
+// This component provides exclusive read/copy/rename/write access through the SAME owned
 // Win32 handle (share mode 0), blocking ordinary sharing-aware file opens and
 // blocking EXE/DLL image mappings while leased. It does not prevent all concurrently
 // mapped writable memory views, so callers must verify bytes for each copy.
@@ -139,6 +144,26 @@ namespace PosDesktop.Updates.Native
     }
 
     /// <summary>
+    /// Exception thrown when staging or post-creation validation fails after a native handle has been created,
+    /// retaining handle ownership and staging path diagnostic context for caller retention.
+    /// </summary>
+    public sealed class SourceFileLeaseCreationException : Exception
+    {
+        private readonly SourceFileLease _retainedLease;
+        private readonly string _stagePath;
+
+        public SourceFileLeaseCreationException(string message, Exception innerException, SourceFileLease retainedLease, string stagePath)
+            : base(message, innerException)
+        {
+            this._retainedLease = retainedLease;
+            this._stagePath = stagePath;
+        }
+
+        public SourceFileLease RetainedLease { get { return this._retainedLease; } }
+        public string StagePath { get { return this._stagePath; } }
+    }
+
+    /// <summary>
     /// Provides exclusive native file lease semantics and verified stream copying
     /// strictly through an owned Win32 file handle.
     /// </summary>
@@ -197,11 +222,7 @@ namespace PosDesktop.Updates.Native
             }
         }
 
-        /// <summary>
-        /// Acquires an exclusive file lease (share 0) on the target path, validating
-        /// path structure, reparse safety, file identity, expected size, and expected SHA-256 digest.
-        /// </summary>
-        public static SourceFileLease Acquire(string absolutePath, long expectedSize, string expectedSha256)
+        private static void ValidateCommonMetadata(string absolutePath, long expectedSize, string expectedSha256)
         {
             // Fail closed if not running on Win32NT 64-bit
             if (Environment.OSVersion.Platform != PlatformID.Win32NT || IntPtr.Size != 8)
@@ -216,7 +237,11 @@ namespace PosDesktop.Updates.Native
             }
 
             // Expected SHA-256 validation: strict 64 lowercase hex characters
-            if (string.IsNullOrEmpty(expectedSha256) || expectedSha256.Length != 64)
+            if (expectedSha256 == null)
+            {
+                throw new ArgumentNullException("expectedSha256");
+            }
+            if (expectedSha256.Length != 64)
             {
                 throw new ArgumentException("Expected SHA-256 must be exactly 64 lowercase hex characters.", "expectedSha256");
             }
@@ -231,6 +256,15 @@ namespace PosDesktop.Updates.Native
 
             // Path syntax and ancestor reparse validation
             ValidateDosPath(absolutePath);
+        }
+
+        /// <summary>
+        /// Acquires an exclusive file lease (share 0) on the target path, validating
+        /// path structure, reparse safety, file identity, expected size, and expected SHA-256 digest.
+        /// </summary>
+        public static SourceFileLease Acquire(string absolutePath, long expectedSize, string expectedSha256)
+        {
+            ValidateCommonMetadata(absolutePath, expectedSize, expectedSha256);
 
             // Construct lease owner object BEFORE CreateFileW to minimize unowned handle allocation window
             SourceFileLease lease = new SourceFileLease(expectedSha256);
@@ -310,6 +344,264 @@ namespace PosDesktop.Updates.Native
                     );
                 }
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Creates a new staging file exclusively (share 0, CREATE_NEW) and streams verified bytes
+        /// strictly through the owned Win32 handle. Never opens or overwrites an existing file.
+        /// Destination must not exist.
+        ///
+        /// Caller owns the input stream on both success and failure; this method never seeks,
+        /// reads Length, mutates Position, or disposes the stream, and trusts finite Read completion
+        /// (does not enforce stream timeout). On failure, StagePath and Identity on the retained
+        /// lease represent last-known state and are not guaranteed to be current.
+        ///
+        /// Architecture & Trust Notice:
+        /// Caller MUST authenticate target expected size and SHA-256 from signed TARGET inventory,
+        /// authorize a fresh nonce-staging namespace, control ancestor directories, and enforce
+        /// process/launch interlocks and journal state. This method does NOT verify signatures,
+        /// record journals, or guarantee absolute power-loss or TOCTOU durability.
+        /// </summary>
+        public static SourceFileLease CreateNewVerified(string absolutePath, long expectedSize, string expectedSha256, Stream input)
+        {
+            ValidateCommonMetadata(absolutePath, expectedSize, expectedSha256);
+
+            if (input == null)
+            {
+                throw new ArgumentNullException("input");
+            }
+            if (!input.CanRead)
+            {
+                throw new ArgumentException("Input stream must be readable (CanRead must be true).", "input");
+            }
+
+            // Construct lease owner object BEFORE CreateFileW to minimize unowned handle allocation window
+            SourceFileLease lease = new SourceFileLease(expectedSha256);
+
+            // Open new handle exclusively (share 0) with CREATE_NEW and FILE_FLAG_OPEN_REPARSE_POINT
+            IntPtr handle = NativeMethods.CreateFileW(
+                absolutePath,
+                NativeMethods.EXCLUSIVE_ACCESS,
+                NativeMethods.FILE_SHARE_NONE,
+                IntPtr.Zero,
+                NativeMethods.CREATE_NEW,
+                NativeMethods.FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero
+            );
+
+            if (handle == NativeMethods.INVALID_HANDLE_VALUE || handle == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new IOException(string.Format("Failed to create new staging file with exclusive lease: Win32 error {0}.", err), new Win32Exception(err));
+            }
+
+            // Assign returned handle immediately to the owner lease before any post-create assertion
+            lease._handle = handle;
+
+            // Factory phase: keep _ioInProgress true, _acquisitionValidated false until ALL proof
+            lease._ioInProgress = true;
+            try
+            {
+                // Verify initial empty state before writing: regular disk file, size 0, links 1, non-reparse
+                lease.AssertFileInformation(0);
+
+                // Retrieve and verify canonical DOS path matches requested
+                string canonicalPath = GetCanonicalDosPath(handle);
+                string expectedCanonical = Path.GetFullPath(absolutePath);
+                if (!string.Equals(canonicalPath, expectedCanonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(string.Format("Canonical path mismatch: expected '{0}', got '{1}'.", expectedCanonical, canonicalPath));
+                }
+
+                // Query initial handle file info to snapshot volume serial number and file ID
+                NativeMethods.BY_HANDLE_FILE_INFORMATION fi;
+                if (!NativeMethods.GetFileInformationByHandle(handle, out fi))
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    throw new IOException(string.Format("Failed to query file information by handle: Win32 error {0}.", err), new Win32Exception(err));
+                }
+
+                // Set initial identity with size 0; future asserts bind this volume and file index
+                lease._identity = new SourceFileIdentity(
+                    fi.dwVolumeSerialNumber,
+                    ((ulong)fi.nFileIndexHigh << 32) | (ulong)fi.nFileIndexLow,
+                    0,
+                    canonicalPath
+                );
+
+                // Copy exact expectedSize bytes from input stream using bounded 64 KiB buffers while computing SHA-256
+                const int bufferSize = 65536; // 64 KiB
+                byte[] readBuffer = new byte[bufferSize];
+                IntPtr unmanagedBuf = Marshal.AllocHGlobal(bufferSize);
+                try
+                {
+                    long totalBytesWritten = 0;
+                    SHA256 copySha = null;
+                    Exception primaryCopyEx = null;
+                    Exception hashDisposeEx = null;
+                    try
+                    {
+                        copySha = SHA256.Create();
+                        while (totalBytesWritten < expectedSize)
+                        {
+                            int toRead = (int)Math.Min((long)bufferSize, expectedSize - totalBytesWritten);
+                            int bytesRead = input.Read(readBuffer, 0, toRead);
+                            if (bytesRead < 0 || bytesRead > toRead)
+                            {
+                                throw new InvalidOperationException(string.Format("Input stream Read returned invalid byte count {0} (requested {1}).", bytesRead, toRead));
+                            }
+                            if (bytesRead == 0)
+                            {
+                                throw new EndOfStreamException(string.Format("Unexpected EOF after reading {0} of {1} expected bytes from input stream.", totalBytesWritten, expectedSize));
+                            }
+
+                            copySha.TransformBlock(readBuffer, 0, bytesRead, null, 0);
+
+                            Marshal.Copy(readBuffer, 0, unmanagedBuf, bytesRead);
+
+                            int chunkWritten = 0;
+                            while (chunkWritten < bytesRead)
+                            {
+                                IntPtr writePtr = new IntPtr(unmanagedBuf.ToInt64() + chunkWritten);
+                                uint toWrite = (uint)(bytesRead - chunkWritten);
+                                uint written;
+                                if (!NativeMethods.WriteFile(handle, writePtr, toWrite, out written, IntPtr.Zero))
+                                {
+                                    int err = Marshal.GetLastWin32Error();
+                                    throw new IOException(string.Format("WriteFile failed: Win32 error {0}.", err), new Win32Exception(err));
+                                }
+                                if (written == 0 || written > toWrite)
+                                {
+                                    throw new IOException(string.Format("WriteFile returned success but wrote invalid byte count {0} (requested {1}).", written, toWrite));
+                                }
+                                chunkWritten += (int)written;
+                            }
+
+                            totalBytesWritten += bytesRead;
+                        }
+
+                        // Probe for extra trailing bytes: exactly ONE Read(..., 1) MUST return 0
+                        byte[] probeTrailing = new byte[1];
+                        int trailingCount = input.Read(probeTrailing, 0, 1);
+                        if (trailingCount < 0 || trailingCount > 1)
+                        {
+                            throw new InvalidOperationException(string.Format("Input stream Read returned invalid trailing byte count {0} (expected 0).", trailingCount));
+                        }
+                        if (trailingCount != 0)
+                        {
+                            throw new InvalidOperationException(string.Format("Input stream contains extra trailing bytes beyond expected size {0}.", expectedSize));
+                        }
+
+                        copySha.TransformFinalBlock(new byte[0], 0, 0);
+                        byte[] hashBytes = copySha.Hash;
+                        StringBuilder sb = new StringBuilder(hashBytes.Length * 2);
+                        for (int i = 0; i < hashBytes.Length; i++)
+                        {
+                            sb.Append(hashBytes[i].ToString("x2"));
+                        }
+                        string copyComputedSha = sb.ToString();
+
+                        if (totalBytesWritten != expectedSize)
+                        {
+                            throw new InvalidOperationException(string.Format("Written byte count mismatch: expected {0}, got {1}.", expectedSize, totalBytesWritten));
+                        }
+                        if (!string.Equals(copyComputedSha, expectedSha256, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(string.Format("Staged stream SHA-256 digest mismatch: expected '{0}', computed '{1}'.", expectedSha256, copyComputedSha));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        primaryCopyEx = ex;
+                        throw;
+                    }
+                    finally
+                    {
+                        if (copySha != null)
+                        {
+                            try
+                            {
+                                copySha.Dispose();
+                            }
+                            catch (Exception dEx)
+                            {
+                                hashDisposeEx = dEx;
+                            }
+                        }
+
+                        if (primaryCopyEx != null && hashDisposeEx != null)
+                        {
+                            throw new AggregateException("Copy operation failed and SHA-256 disposal also failed.", primaryCopyEx, hashDisposeEx);
+                        }
+                        if (primaryCopyEx == null && hashDisposeEx != null)
+                        {
+                            throw hashDisposeEx;
+                        }
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(unmanagedBuf);
+                }
+
+                // Checked FlushFileBuffers through owned handle
+                if (!NativeMethods.FlushFileBuffers(handle))
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    throw new IOException(string.Format("FlushFileBuffers failed: Win32 error {0}.", err), new Win32Exception(err));
+                }
+
+                // Verify handle identity, disk type, size, links, and canonical path after writes and flush
+                lease.AssertFileInformation(expectedSize);
+                string postWriteCanonical = GetCanonicalDosPath(handle);
+                if (!string.Equals(postWriteCanonical, expectedCanonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(string.Format("Post-write canonical path mismatch: expected '{0}', got '{1}'.", expectedCanonical, postWriteCanonical));
+                }
+
+                // Update immutable identity to actual proven expected size and canonical path for handle re-read
+                lease._identity = new SourceFileIdentity(
+                    lease._identity.VolumeSerialNumber,
+                    lease._identity.FileIndex,
+                    expectedSize,
+                    postWriteCanonical
+                );
+
+                // Full independent re-read and hash through the SAME owned handle
+                string recomputedSha = lease.ComputeSha256Internal();
+                if (!string.Equals(recomputedSha, expectedSha256, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(string.Format("Re-read SHA-256 digest mismatch: expected '{0}', computed '{1}'.", expectedSha256, recomputedSha));
+                }
+
+                // Assert metadata and canonical path again after hash
+                lease.AssertFileInformation(expectedSize);
+                string postHashCanonical = GetCanonicalDosPath(handle);
+                if (!string.Equals(postHashCanonical, expectedCanonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(string.Format("Post-hash canonical path mismatch: expected '{0}', got '{1}'.", expectedCanonical, postHashCanonical));
+                }
+
+                // All proofs succeeded: mark lease validated and mutation certain
+                lease._acquisitionValidated = true;
+                lease._mutationUncertain = false;
+                return lease;
+            }
+            catch (Exception ex)
+            {
+                lease._acquisitionValidated = false;
+                lease._mutationUncertain = true;
+                throw new SourceFileLeaseCreationException(
+                    string.Format("Staging file creation or verification failed for '{0}': {1}", absolutePath, ex.Message),
+                    ex,
+                    lease,
+                    absolutePath
+                );
+            }
+            finally
+            {
+                lease._ioInProgress = false;
             }
         }
 
@@ -1018,6 +1310,11 @@ namespace PosDesktop.Updates.Native
 
         private static void ValidateDosPath(string path)
         {
+            if (path == null)
+            {
+                throw new ArgumentNullException("absolutePath");
+            }
+
             if (string.IsNullOrWhiteSpace(path))
             {
                 throw new ArgumentException("Path must not be null, empty, or whitespace.", "absolutePath");
@@ -1280,6 +1577,7 @@ namespace PosDesktop.Updates.Native
             internal const uint DELETE = 0x00010000;
             internal const uint EXCLUSIVE_ACCESS = GENERIC_READ | GENERIC_WRITE | DELETE; // 3221291008
             internal const uint FILE_SHARE_NONE = 0;
+            internal const uint CREATE_NEW = 1;
             internal const uint OPEN_EXISTING = 3;
             internal const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000; // 2097152
             internal const uint FILE_TYPE_DISK = 0x0001;
@@ -1362,6 +1660,20 @@ namespace PosDesktop.Updates.Native
                 out uint lpNumberOfBytesRead,
                 IntPtr lpOverlapped
             );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool WriteFile(
+                IntPtr hFile,
+                IntPtr lpBuffer,
+                uint nNumberOfBytesToWrite,
+                out uint lpNumberOfBytesWritten,
+                IntPtr lpOverlapped
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool FlushFileBuffers(IntPtr hFile);
 
             [DllImport("kernel32.dll", SetLastError = true)]
             [return: MarshalAs(UnmanagedType.Bool)]

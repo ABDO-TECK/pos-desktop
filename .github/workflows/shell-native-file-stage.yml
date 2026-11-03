@@ -1,0 +1,35 @@
+name: Shell Native File Stage Verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Native/SourceFileLease.cs'
+      - 'backend/Native/OwnedChildProcess.cs'
+      - 'scripts/verify-shell-native-file-stage.ps1'
+      - '.github/workflows/shell-native-file-stage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-file-stage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-file-stage:
+    name: Verify Win32 Native File Stage Primitive (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Win32 native file stage verifier
+        shell: pwsh
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-file-stage.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
