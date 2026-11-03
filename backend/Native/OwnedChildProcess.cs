@@ -116,6 +116,7 @@ namespace PosDesktop.Updates.Native
         private string _imagePath;
 
         private bool _created;
+        private bool _rootAssignedToJob;
         private bool _rootDead;
         private bool _jobEmpty;
         private bool _threadClosed;
@@ -134,6 +135,7 @@ namespace PosDesktop.Updates.Native
             this._imagePath = string.Empty;
 
             this._created = false;
+            this._rootAssignedToJob = false;
             this._rootDead = false;
             this._jobEmpty = false;
             this._threadClosed = false;
@@ -366,6 +368,7 @@ namespace PosDesktop.Updates.Native
                     int err = Marshal.GetLastWin32Error();
                     throw new Win32Exception(err, string.Format("AssignProcessToJobObject failed: Win32 error {0}.", err));
                 }
+                owner._rootAssignedToJob = true;
 
                 // Verify process is actually in job using OWN handles
                 bool inJob;
@@ -582,6 +585,8 @@ namespace PosDesktop.Updates.Native
                     return false;
                 }
 
+                Stopwatch sw = Stopwatch.StartNew();
+
                 // Check if already dead
                 uint waitNow = NativeMethods.WaitForSingleObject(this._hProcess, 0);
                 if (waitNow == NativeMethods.WAIT_OBJECT_0)
@@ -602,24 +607,57 @@ namespace PosDesktop.Updates.Native
                 {
                     int termErr = Marshal.GetLastWin32Error();
                     // Fresh wait to check if already dead
-                    uint waitAfterFail = NativeMethods.WaitForSingleObject(this._hProcess, 0);
-                    if (waitAfterFail == NativeMethods.WAIT_OBJECT_0)
+                    uint waitCheck = NativeMethods.WaitForSingleObject(this._hProcess, 0);
+                    if (waitCheck == NativeMethods.WAIT_OBJECT_0)
                     {
                         this._rootDead = true;
                         return true;
                     }
-                    error = termErr != 0 ? termErr : 1;
-                    return false;
+                    else if (termErr == 5 && waitCheck == NativeMethods.WAIT_TIMEOUT)
+                    {
+                        int remainingMs = Math.Max(0, timeoutMilliseconds - (int)sw.ElapsedMilliseconds);
+                        uint waitRes = NativeMethods.WaitForSingleObject(this._hProcess, (uint)remainingMs);
+                        if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                        {
+                            this._rootDead = true;
+                            return true;
+                        }
+                        else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                        {
+                            error = 258; // WAIT_TIMEOUT
+                            return false;
+                        }
+                        else
+                        {
+                            error = Marshal.GetLastWin32Error();
+                            if (error == 0) error = 1;
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        if (termErr == 5 && waitCheck != NativeMethods.WAIT_TIMEOUT)
+                        {
+                            error = Marshal.GetLastWin32Error();
+                            if (error == 0) error = 5;
+                        }
+                        else
+                        {
+                            error = termErr != 0 ? termErr : 1;
+                        }
+                        return false;
+                    }
                 }
 
-                uint waitRes = NativeMethods.WaitForSingleObject(this._hProcess, (uint)timeoutMilliseconds);
-                if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                int remaining = Math.Max(0, timeoutMilliseconds - (int)sw.ElapsedMilliseconds);
+                uint waitSuccess = NativeMethods.WaitForSingleObject(this._hProcess, (uint)remaining);
+                if (waitSuccess == NativeMethods.WAIT_OBJECT_0)
                 {
                     this._rootDead = true;
                     error = 0;
                     return true;
                 }
-                else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                else if (waitSuccess == NativeMethods.WAIT_TIMEOUT)
                 {
                     error = 258; // WAIT_TIMEOUT
                     return false;
@@ -627,6 +665,7 @@ namespace PosDesktop.Updates.Native
                 else
                 {
                     error = Marshal.GetLastWin32Error();
+                    if (error == 0) error = 1;
                     return false;
                 }
             }
@@ -756,23 +795,10 @@ namespace PosDesktop.Updates.Native
                         }
                         else
                         {
-                            if (!NativeMethods.TerminateProcess(this._hProcess, 1))
+                            if (this._rootAssignedToJob)
                             {
-                                int termErr = Marshal.GetLastWin32Error();
-                                uint waitCheck = NativeMethods.WaitForSingleObject(this._hProcess, 0);
-                                if (waitCheck == NativeMethods.WAIT_OBJECT_0)
-                                {
-                                    this._rootDead = true;
-                                }
-                                else
-                                {
-                                    error = termErr != 0 ? termErr : 1;
-                                    return false;
-                                }
-                            }
-
-                            if (!this._rootDead)
-                            {
+                                // Root process was assigned to Job Object, which was already terminated and proven empty.
+                                // Do not redundantly TerminateProcess; wait for own root handle signal within remaining deadline.
                                 int remainingMs = Math.Max(0, timeoutMilliseconds - (int)sw.ElapsedMilliseconds);
                                 uint waitRes = NativeMethods.WaitForSingleObject(this._hProcess, (uint)remainingMs);
                                 if (waitRes == NativeMethods.WAIT_OBJECT_0)
@@ -787,7 +813,75 @@ namespace PosDesktop.Updates.Native
                                 else
                                 {
                                     error = Marshal.GetLastWin32Error();
+                                    if (error == 0) error = 1;
                                     return false;
+                                }
+                            }
+                            else
+                            {
+                                // Root process was NOT assigned to Job Object (e.g. startup failed before job assignment).
+                                // Must explicitly terminate own root process handle and wait.
+                                if (!NativeMethods.TerminateProcess(this._hProcess, 1))
+                                {
+                                    int termErr = Marshal.GetLastWin32Error();
+                                    uint waitCheck = NativeMethods.WaitForSingleObject(this._hProcess, 0);
+                                    if (waitCheck == NativeMethods.WAIT_OBJECT_0)
+                                    {
+                                        this._rootDead = true;
+                                    }
+                                    else if (termErr == 5 && waitCheck == NativeMethods.WAIT_TIMEOUT)
+                                    {
+                                        int remainingMs = Math.Max(0, timeoutMilliseconds - (int)sw.ElapsedMilliseconds);
+                                        uint waitRes = NativeMethods.WaitForSingleObject(this._hProcess, (uint)remainingMs);
+                                        if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                                        {
+                                            this._rootDead = true;
+                                        }
+                                        else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                                        {
+                                            error = 258; // WAIT_TIMEOUT
+                                            return false;
+                                        }
+                                        else
+                                        {
+                                            error = Marshal.GetLastWin32Error();
+                                            if (error == 0) error = 1;
+                                            return false;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (termErr == 5 && waitCheck != NativeMethods.WAIT_TIMEOUT)
+                                        {
+                                            error = Marshal.GetLastWin32Error();
+                                            if (error == 0) error = 5;
+                                        }
+                                        else
+                                        {
+                                            error = termErr != 0 ? termErr : 1;
+                                        }
+                                        return false;
+                                    }
+                                }
+                                else
+                                {
+                                    int remainingMs = Math.Max(0, timeoutMilliseconds - (int)sw.ElapsedMilliseconds);
+                                    uint waitRes = NativeMethods.WaitForSingleObject(this._hProcess, (uint)remainingMs);
+                                    if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                                    {
+                                        this._rootDead = true;
+                                    }
+                                    else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                                    {
+                                        error = 258; // WAIT_TIMEOUT
+                                        return false;
+                                    }
+                                    else
+                                    {
+                                        error = Marshal.GetLastWin32Error();
+                                        if (error == 0) error = 1;
+                                        return false;
+                                    }
                                 }
                             }
                         }

@@ -856,7 +856,17 @@ try {
     }
     Write-Diagnostic "Suite 1: Proved live owner Dispose() throws InvalidOperationException and child remains live."
 
-    # Stop and close owner
+    # Zero-time stop probe: may return true if already settled/closed,
+    # or false with error 258 (WAIT_TIMEOUT), but NEVER Win32 error 5 (access denied).
+    $zeroStopErr1 = 0
+    $zeroStopOk1 = $owner1.TryStopAndClose(0, [ref]$zeroStopErr1)
+    if (-not $zeroStopOk1) {
+        if ($zeroStopErr1 -ne 258) {
+            throw "Suite 1: TryStopAndClose(0) returned unexpected error $zeroStopErr1 (expected 258 WAIT_TIMEOUT if not yet settled)."
+        }
+    }
+
+    # Stop and close owner within full deadline
     $stopErr1 = 0
     $stopOk1 = $owner1.TryStopAndClose(5000, [ref]$stopErr1)
     if (-not $stopOk1 -or $stopErr1 -ne 0 -or -not $owner1.IsClosed) {
