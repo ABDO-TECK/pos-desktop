@@ -431,6 +431,97 @@ function Wait-FileReady {
     throw "Timed out waiting for ready handshake file after $($timeoutMs)ms: $path"
 }
 
+function Get-ExclusiveFileOpenProbe {
+    param(
+        [string]$Path,
+        [string]$Tag = "Sentinel"
+    )
+
+    $openedStream = $null
+    $caughtException = $null
+
+    try {
+        $openedStream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    } catch {
+        $caughtException = $_.Exception
+    }
+
+    if ($openedStream -ne $null) {
+        # Unexpected open success: file was not locked!
+        [void](Register-TrackedStream $openedStream)
+        try {
+            $openedStream.Dispose()
+        } catch {
+            $msg = "Probe stream disposal failed for '$Path': $($_.Exception.Message)"
+            Write-Diagnostic $msg
+            $script:StreamCloseErrors.Add($msg)
+        }
+        Write-Diagnostic "Probe ($Tag): file '$Path' was unexpectedly unlocked (opened successfully, not Win32 error 32)."
+        return [pscustomobject]@{
+            OpenSucceeded      = $true
+            IsSharingViolation = $false
+            NativeCodeKnown    = $true
+            NativeCode         = [int]0
+        }
+    }
+
+    if ($caughtException -eq $null) {
+        Write-Diagnostic "Probe ($Tag): File::Open returned null without exception on '$Path'."
+        return [pscustomobject]@{
+            OpenSucceeded      = $false
+            IsSharingViolation = $false
+            NativeCodeKnown    = $false
+            NativeCode         = [int]-1
+        }
+    }
+
+    $curr = $caughtException
+    $actualIoEx = $null
+    $depth = 0
+    while ($curr -ne $null -and $depth -le 8) {
+        if ($curr -is [System.IO.IOException]) {
+            $actualIoEx = $curr
+            break
+        }
+        $curr = $curr.InnerException
+        $depth++
+    }
+
+    if ($actualIoEx -ne $null) {
+        # Signed HResult low 16 via -band 65535 (never cast negative HResult to uint32)
+        $hresult = $actualIoEx.HResult
+        $nativeCode = [int]($hresult -band 65535)
+        $isSharing = ($nativeCode -eq 32)
+
+        if (-not $isSharing) {
+            Write-Diagnostic "Probe ($Tag): File::Open failed with non-32 IOException. Wrapper: $($caughtException.GetType().FullName), Inner: $($actualIoEx.GetType().FullName), NativeCode: $nativeCode (HResult: $hresult), Message: $($actualIoEx.Message)"
+        }
+
+        return [pscustomobject]@{
+            OpenSucceeded      = $false
+            IsSharingViolation = [bool]$isSharing
+            NativeCodeKnown    = $true
+            NativeCode         = [int]$nativeCode
+        }
+    }
+
+    $innermost = if ($caughtException.InnerException -ne $null) { $caughtException.InnerException } else { $caughtException }
+    $innerCode = [int]($innermost.HResult -band 65535)
+    Write-Diagnostic "Probe ($Tag): File::Open failed with non-IOException. Wrapper: $($caughtException.GetType().FullName), Inner: $($innermost.GetType().FullName), NativeCode: $innerCode (HResult: $($innermost.HResult)), Message: $($caughtException.Message)"
+
+    return [pscustomobject]@{
+        OpenSucceeded      = $false
+        IsSharingViolation = $false
+        NativeCodeKnown    = $false
+        NativeCode         = [int]-1
+    }
+}
+
 # --- Section 5: Synchronous Unified Single-Unit Compilation ---
 $origTemp = $env:TEMP; $origTmp = $env:TMP; $origPoison = $env:POISON_SECRET_VAR
 $codeProvider = $null
@@ -721,6 +812,45 @@ try {
     $fixtureExeLen86 = [System.IO.FileInfo]::new($fixtureExePath86).Length
     Write-Diagnostic "Fixtures ready: x64 ($fixtureExeLen64 bytes, SHA: $controlExeHash64), x86 ($fixtureExeLen86 bytes, SHA: $controlExeHash86)."
 
+    # Helper IO verification controls (positive + negative)
+    Write-Diagnostic "Testing sentinel lock helper with actual IO positive and negative controls..."
+    $controlFile = [System.IO.Path]::Combine($labDir, "helper-control-$nonce.dat")
+    # Fresh lab file with parent FileStream held open with FileShare.None
+    $parentControlFs = Register-TrackedStream ([System.IO.File]::Open($controlFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None))
+
+    # Positive control: locked file probe must fail with Win32 32, not opened
+    $posCheck = Get-ExclusiveFileOpenProbe -Path $controlFile -Tag "Control-Locked"
+
+    # Close parent stream independently without masking probe result; record closure failure into StreamCloseErrors
+    try {
+        $parentControlFs.Dispose()
+    } catch {
+        $msg = "Parent control stream disposal failed for '$controlFile': $($_.Exception.Message)"
+        Write-Diagnostic $msg
+        $script:StreamCloseErrors.Add($msg)
+    }
+
+    if ($posCheck.OpenSucceeded -or -not $posCheck.IsSharingViolation -or -not $posCheck.NativeCodeKnown -or $posCheck.NativeCode -ne 32) {
+        throw "Sentinel lock helper positive control failed: expected locked file with Win32 32 (OpenSucceeded=$($posCheck.OpenSucceeded), IsSharingViolation=$($posCheck.IsSharingViolation), NativeCodeKnown=$($posCheck.NativeCodeKnown), NativeCode=$($posCheck.NativeCode))."
+    }
+
+    # Negative control 1: with parent stream closed, file is unlocked and open succeeds (OpenSucceeded=true, NativeCodeKnown=true, NativeCode=0, NOT sharing violation)
+    $negCheckUnlocked = Get-ExclusiveFileOpenProbe -Path $controlFile -Tag "Control-Unlocked"
+    if (-not $negCheckUnlocked.OpenSucceeded -or $negCheckUnlocked.IsSharingViolation -or -not $negCheckUnlocked.NativeCodeKnown -or $negCheckUnlocked.NativeCode -ne 0) {
+        throw "Sentinel lock helper negative control 1 failed: expected unlocked open success (OpenSucceeded=$($negCheckUnlocked.OpenSucceeded), IsSharingViolation=$($negCheckUnlocked.IsSharingViolation), NativeCodeKnown=$($negCheckUnlocked.NativeCodeKnown), NativeCode=$($negCheckUnlocked.NativeCode))."
+    }
+
+    # Negative control 2: nonexistent lab file path fails with FileNotFound (OpenSucceeded=false, NativeCodeKnown=true, NativeCode=2, NOT 32)
+    $controlNonexistent = [System.IO.Path]::Combine($labDir, "control-nonexistent-$nonce.dat")
+    if ([System.IO.File]::Exists($controlNonexistent)) {
+        throw "Sentinel lock helper negative control 2 failed: control nonexistent path '$controlNonexistent' unexpectedly exists; refusing to delete fixture."
+    }
+    $negCheckMissing = Get-ExclusiveFileOpenProbe -Path $controlNonexistent -Tag "Control-Nonexistent"
+    if ($negCheckMissing.OpenSucceeded -or $negCheckMissing.IsSharingViolation -or -not $negCheckMissing.NativeCodeKnown -or $negCheckMissing.NativeCode -ne 2) {
+        throw "Sentinel lock helper negative control 2 failed: expected missing file error 2 (OpenSucceeded=$($negCheckMissing.OpenSucceeded), IsSharingViolation=$($negCheckMissing.IsSharingViolation), NativeCodeKnown=$($negCheckMissing.NativeCodeKnown), NativeCode=$($negCheckMissing.NativeCode))."
+    }
+    Write-Diagnostic "Sentinel lock helper controls passed: positive (exact 32), unlocked (open succeeded, code 0), nonexistent (exact 2)."
+
     # --- Section 6: Test Suite 1 - Arg / Env / Private CWD / Lease Conflict / Clean Stop ---
     Write-Diagnostic "Starting Suite 1: Arg / Env / Private CWD / Exclusive Lease Conflict / Clean Stop..."
 
@@ -918,6 +1048,9 @@ try {
 
     # Bounded wait for parent ready (guaranteed written ONLY AFTER leaf ready and sentinel locked)
     [void](Wait-FileReady -path $parentReady2 -timeoutMs 15000)
+    if (-not [System.IO.File]::Exists($sentinelFile2)) {
+        throw "Suite 2: Sentinel file does not exist at $sentinelFile2"
+    }
     if (-not [System.IO.File]::Exists($leafReady2)) { throw "Suite 2: Leaf ready file missing." }
     $leafText2 = [System.IO.File]::ReadAllText($leafReady2)
     if ($leafText2.IndexOf("LEAF_READY", [System.StringComparison]::Ordinal) -eq -1) {
@@ -925,28 +1058,22 @@ try {
     }
     Write-Diagnostic "Suite 2: Parent and leaf grandchild are ready."
 
-    # Verify sentinel file is locked exclusively by grandchild leaf
-    $sentinelLocked2 = $false
-    try {
-        $dummySentinelFs = [System.IO.File]::Open($sentinelFile2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        [void](Register-TrackedStream $dummySentinelFs)
-        $dummySentinelFs.Dispose()
-    } catch {
-        if (($_.Exception.HResult -band 0xFFFF) -eq 32) {
-            $sentinelLocked2 = $true
-        }
-    }
-    if (-not $sentinelLocked2) { throw "Suite 2: Sentinel file was unexpectedly unlocked or error was not Win32 32 while leaf alive!" }
-
-    # Observe job active processes >= 2
+    # Observe job active processes >= 2 BEFORE first lock probe
     $obs2 = $owner2.Observe()
     if ($obs2.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Live) {
         throw "Suite 2: Observation RootState is not Live: $($obs2.RootState)"
+    }
+    if (-not $obs2.JobCountKnown) {
+        throw "Suite 2: JobCountKnown is false."
     }
     if ($obs2.ActiveProcesses -lt 2) {
         throw "Suite 2: ActiveProcesses ($($obs2.ActiveProcesses)) is less than 2 (expected parent + grandchild leaf)."
     }
     Write-Diagnostic "Suite 2: Observed $($obs2.ActiveProcesses) active processes in Job Object."
+
+    # Verify sentinel file is locked exclusively by grandchild leaf
+    $sentinelProbe2 = Get-ExclusiveFileOpenProbe -Path $sentinelFile2 -Tag "Suite2-GrandchildLeafLive"
+    if (-not $sentinelProbe2.IsSharingViolation) { throw "Suite 2: Sentinel file was unexpectedly unlocked or error was not Win32 32 while leaf alive!" }
 
     # Terminate root process ONLY
     $termErr2 = 0
@@ -971,17 +1098,8 @@ try {
     }
 
     # Sentinel file MUST still be locked by the living grandchild leaf!
-    $sentinelStillLocked2 = $false
-    try {
-        $dummySentinelFs2 = [System.IO.File]::Open($sentinelFile2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        [void](Register-TrackedStream $dummySentinelFs2)
-        $dummySentinelFs2.Dispose()
-    } catch {
-        if (($_.Exception.HResult -band 0xFFFF) -eq 32) {
-            $sentinelStillLocked2 = $true
-        }
-    }
-    if (-not $sentinelStillLocked2) {
+    $sentinelStillProbe2 = Get-ExclusiveFileOpenProbe -Path $sentinelFile2 -Tag "Suite2-GrandchildLeafAfterRootDeath"
+    if (-not $sentinelStillProbe2.IsSharingViolation) {
         throw "Suite 2: Sentinel file unlocked or error was not Win32 32 when root died; grandchild must still hold it!"
     }
     Write-Diagnostic "Suite 2: Proved root is DEAD while grandchild job member is still LIVE and holding lock."
@@ -1026,17 +1144,8 @@ try {
     Write-Diagnostic "Suite 3: Broker and nested inner leaf are ready."
 
     # Sentinel is locked by inner leaf
-    $sentinelLocked3 = $false
-    try {
-        $dummySentinelFs3 = [System.IO.File]::Open($sentinelFile3, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        [void](Register-TrackedStream $dummySentinelFs3)
-        $dummySentinelFs3.Dispose()
-    } catch {
-        if (($_.Exception.HResult -band 0xFFFF) -eq 32) {
-            $sentinelLocked3 = $true
-        }
-    }
-    if (-not $sentinelLocked3) { throw "Suite 3: Sentinel file was not locked with Win32 error 32 by inner leaf!" }
+    $sentinelProbe3 = Get-ExclusiveFileOpenProbe -Path $sentinelFile3 -Tag "Suite3-InnerLeafLive"
+    if (-not $sentinelProbe3.IsSharingViolation) { throw "Suite 3: Sentinel file was not locked with Win32 error 32 by inner leaf!" }
 
     # Both broker and inner leaf are members of outer job
     $obs3 = $owner3.Observe()
