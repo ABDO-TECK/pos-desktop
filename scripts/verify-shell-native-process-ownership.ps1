@@ -1527,7 +1527,10 @@ try {
 
     # Clean up timeout check owner
     $toCheckCleanErr = 0
-    [void]$ownerTimeoutCheck.TryStopAndClose(5000, [ref]$toCheckCleanErr)
+    $toCheckCleanOk = $ownerTimeoutCheck.TryStopAndClose(5000, [ref]$toCheckCleanErr)
+    if (-not $toCheckCleanOk -or $toCheckCleanErr -ne 0 -or -not $ownerTimeoutCheck.IsClosed) {
+        throw "Suite 4: Failed to clean up timeout check owner (ok=$toCheckCleanOk, err=$toCheckCleanErr, IsClosed=$($ownerTimeoutCheck.IsClosed))."
+    }
 
     # 10. Ready timeout failure must fail and retain owner, not green
     $timeoutReadyPath = [System.IO.Path]::Combine($labDir, "unwritten-ready-$nonce.txt")
@@ -1551,37 +1554,143 @@ try {
     # --- Section 10: Test Suite 5 - Safe Cleanup Gate Uncertainty Test ---
     Write-Diagnostic "Starting Suite 5: Safe cleanup gate uncertainty test..."
 
-    # Start an active process that remains RUNNING
+    # Precondition: verify all previously tracked owners and leases are closed and quiescent
+    foreach ($prevOwnerRec in $script:TrackedOwners) {
+        $stopOk = Stop-TrackedOwner -ownerRec $prevOwnerRec -timeoutMs 5000
+        if (-not $stopOk -or -not $prevOwnerRec.Owner.IsClosed) {
+            throw "Suite 5 precondition failed: previous tracked owner '$($prevOwnerRec.Tag)' could not be closed."
+        }
+        $prevObs = $prevOwnerRec.Owner.Observe()
+        if (($prevObs.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Dead -and $prevObs.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::NotStarted) -or
+            -not $prevObs.JobCountKnown -or $prevObs.ActiveProcesses -ne 0 -or -not $prevObs.IsQuiescent) {
+            throw "Suite 5 precondition failed: previous tracked owner '$($prevOwnerRec.Tag)' is not quiescent (RootState: $($prevObs.RootState), JobCountKnown: $($prevObs.JobCountKnown), ActiveProcesses: $($prevObs.ActiveProcesses), IsQuiescent: $($prevObs.IsQuiescent))."
+        }
+    }
+
+    foreach ($prevLeaseRec in $script:TrackedLeases) {
+        $closeOk = Close-TrackedLease -leaseRec $prevLeaseRec
+        if (-not $closeOk -or -not $prevLeaseRec.Lease.IsClosed) {
+            throw "Suite 5 precondition failed: previous tracked lease '$($prevLeaseRec.Path)' could not be closed."
+        }
+    }
+
+    # Create fresh marked small subdirectory under lab for genuine gate retention witness
+    $suite5Subdir = [System.IO.Path]::Combine($labDir, "suite5-retention-$nonce")
+    [void][System.IO.Directory]::CreateDirectory($suite5Subdir)
+    $suite5MarkerName = ".snpo-suite5-marker"
+    $suite5MarkerPath = [System.IO.Path]::Combine($suite5Subdir, $suite5MarkerName)
+    [System.IO.File]::WriteAllText($suite5MarkerPath, $nonce, [System.Text.Encoding]::UTF8)
+
+    $suite5SentinelPath = [System.IO.Path]::Combine($suite5Subdir, "suite5-sentinel-$nonce.dat")
+    [System.IO.File]::WriteAllBytes($suite5SentinelPath, [System.Text.Encoding]::UTF8.GetBytes("SUITE5_SENTINEL_WITNESS_$nonce"))
+    $suite5LogPath = [System.IO.Path]::Combine($suite5Subdir, "suite5-log-$nonce.txt")
+    [System.IO.File]::WriteAllText($suite5LogPath, "SUITE5_LOG_WITNESS_$nonce", [System.Text.Encoding]::UTF8)
+
+    $markerHashBefore = Compute-Sha256OfFile $suite5MarkerPath
+    $sentinelHashBefore = Compute-Sha256OfFile $suite5SentinelPath
+    $logHashBefore = Compute-Sha256OfFile $suite5LogPath
+
+    $ownerCountBefore = $script:TrackedOwners.Count
+    $leaseCountBefore = $script:TrackedLeases.Count
+    $streamCountBefore = $script:TrackedStreams.Count
+
+    # Start fresh owner5 tracked and observe live root + active job processes before hook
     $owner5 = Safe-StartOwnedProcess -exePath $fixtureExePath -ArgumentVector @("sleep", "300000") -cwd $labDir -env $childEnv -tag "Suite5-GateUncertainty"
     $owner5Rec = ($script:TrackedOwners | Where-Object { $_.Owner -eq $owner5 })
+    if ($owner5Rec -eq $null) {
+        throw "Suite 5: Fresh owner5 record not found in TrackedOwners."
+    }
+
+    $obs5Before = $owner5.Observe()
+    if ($obs5Before.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Live -or -not $obs5Before.JobCountKnown -or $obs5Before.ActiveProcesses -lt 1) {
+        throw "Suite 5: Fresh owner5 not live or job active count < 1 before hook (RootState: $($obs5Before.RootState), JobCountKnown: $($obs5Before.JobCountKnown), ActiveProcesses: $($obs5Before.ActiveProcesses))."
+    }
+
+    $ownerCountExpected = $ownerCountBefore + 1
 
     # Activate test harness observation hook simulating uncertainty on this exact running owner
     $script:CleanupObservationHook = @{ TargetOwner = $owner5; ForceUncertain = $true }
     $script:CleanupHookHits = 0
 
-    $gateResultUncertain = Invoke-SharedCleanupSafetyGate -DryRun
+    $script:Suite5RestorationCallbackInvoked = 0
+    $suite5RestorationCallback = {
+        $script:Suite5RestorationCallbackInvoked++
+    }
+
+    $suite5TargetSpecs = @(
+        @{ Path = $suite5Subdir; MarkerName = $suite5MarkerName; Nonce = $nonce }
+    )
+
+    $gateResultUncertain = Invoke-SharedCleanupSafetyGate -TargetSpecs $suite5TargetSpecs -RestorationCallback $suite5RestorationCallback
     if ($gateResultUncertain -ne 'NEEDSATTENTION') {
         throw "Suite 5: Shared cleanup gate returned '$gateResultUncertain' instead of 'NEEDSATTENTION' when hook active."
     }
     if ($script:CleanupHookHits -ne 1) {
-        throw "Suite 5: Expected 1 hook hit, got $($script:CleanupHookHits)."
+        throw "Suite 5: Expected exactly 1 hook hit, got $($script:CleanupHookHits)."
     }
-    Write-Diagnostic "Suite 5: Proved shared cleanup gate returns NEEDSATTENTION and protects fixtures on uncertainty."
+    if ($script:Suite5RestorationCallbackInvoked -ne 0) {
+        throw "Suite 5: Restoration callback was invoked when gate returned NEEDSATTENTION (hits: $($script:Suite5RestorationCallbackInvoked))."
+    }
+    if (-not [System.IO.Directory]::Exists($suite5Subdir)) {
+        throw "Suite 5: Target subdirectory was deleted despite gate returning NEEDSATTENTION."
+    }
+    if (-not [System.IO.File]::Exists($suite5MarkerPath) -or -not [string]::Equals((Compute-Sha256OfFile $suite5MarkerPath), $markerHashBefore, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Suite 5: Marker file was modified or deleted despite gate returning NEEDSATTENTION."
+    }
+    if (-not [System.IO.File]::Exists($suite5SentinelPath) -or -not [string]::Equals((Compute-Sha256OfFile $suite5SentinelPath), $sentinelHashBefore, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Suite 5: Sentinel file was modified or deleted despite gate returning NEEDSATTENTION."
+    }
+    if (-not [System.IO.File]::Exists($suite5LogPath) -or -not [string]::Equals((Compute-Sha256OfFile $suite5LogPath), $logHashBefore, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Suite 5: Log file was modified or deleted despite gate returning NEEDSATTENTION."
+    }
+    if ($script:TrackedOwners.Count -ne $ownerCountExpected) {
+        throw "Suite 5: Tracked owners registry count changed during uncertain gate execution."
+    }
+    if ($script:TrackedLeases.Count -ne $leaseCountBefore) {
+        throw "Suite 5: Tracked leases registry count changed during uncertain gate execution."
+    }
+    if ($script:TrackedStreams.Count -ne $streamCountBefore) {
+        throw "Suite 5: Tracked streams registry count changed during uncertain gate execution."
+    }
+    Write-Diagnostic "Suite 5: Proved shared cleanup gate returns NEEDSATTENTION and retains fixtures when test harness hook active."
 
-    # Clear hook
+    # Clear hook and verify owner5 is STILL LIVE (prove no accidental kill)
     $script:CleanupObservationHook = $null
 
-    # Stop owner cleanly
-    $stopOk5 = Stop-TrackedOwner $owner5Rec 5000
-    if (-not $stopOk5 -or -not $owner5.IsClosed) {
-        throw "Suite 5: Failed to cleanly stop owner after gate test."
+    $obs5StillLive = $owner5.Observe()
+    if ($obs5StillLive.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Live -or -not $obs5StillLive.JobCountKnown -or $obs5StillLive.ActiveProcesses -lt 1) {
+        throw "Suite 5: Owner5 was terminated or mutated unexpectedly during uncertain gate (RootState: $($obs5StillLive.RootState), JobCountKnown: $($obs5StillLive.JobCountKnown), ActiveProcesses: $($obs5StillLive.ActiveProcesses))."
     }
 
-    # Now verify gate evaluates cleanly with all owners closed
-    $gateResultClean = Invoke-SharedCleanupSafetyGate -DryRun
+    # Stop owner cleanly
+    $stopOk5 = Stop-TrackedOwner -ownerRec $owner5Rec -timeoutMs 5000
+    if (-not $stopOk5 -or -not $owner5.IsClosed) {
+        throw "Suite 5: Failed to cleanly stop owner after gate uncertainty test."
+    }
+    $obs5Final = $owner5.Observe()
+    if (($obs5Final.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Dead -and $obs5Final.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::NotStarted) -or
+        -not $obs5Final.JobCountKnown -or $obs5Final.ActiveProcesses -ne 0 -or -not $obs5Final.IsQuiescent) {
+        throw "Suite 5: Owner5 is not quiescent after stop (RootState: $($obs5Final.RootState), JobCountKnown: $($obs5Final.JobCountKnown), ActiveProcesses: $($obs5Final.ActiveProcesses), IsQuiescent: $($obs5Final.IsQuiescent))."
+    }
+
+    # Now verify gate evaluates cleanly with all owners closed and performs genuine deletion
+    $gateResultClean = Invoke-SharedCleanupSafetyGate -TargetSpecs $suite5TargetSpecs -RestorationCallback $suite5RestorationCallback
     if ($gateResultClean -ne 'CLEANED') {
         throw "Suite 5: Shared cleanup gate returned '$gateResultClean' instead of 'CLEANED' after owner closed."
     }
+
+    if ([System.IO.Directory]::Exists($suite5Subdir)) {
+        throw "Suite 5: Target subdirectory was not deleted by clean gate: $suite5Subdir"
+    }
+    if ($script:Suite5RestorationCallbackInvoked -ne 1) {
+        throw "Suite 5: Restoration callback was not called exactly once (got $($script:Suite5RestorationCallbackInvoked))."
+    }
+    Assert-VictimTreeUnchanged -ExpectedSnapshot $script:VictimSnapshot -VictimPath $victimDir
+    if (-not [System.IO.Directory]::Exists($labDir)) {
+        throw "Suite 5: Main lab directory was deleted prematurely."
+    }
+
+    Write-Diagnostic "Suite 5: Proved genuine cleanup gate deletion of target subdirectory and restoration callback execution."
     Write-Diagnostic "Suite 5: Passed successfully."
 
     $script:AllSuitesPassed = $true
