@@ -584,7 +584,7 @@ namespace PosDesktop.Updates.Native
             }
 
             // Verify RSA PKCS#1 v1.5 SHA256 signature BEFORE any UTF-8 decoding or JSON parsing
-            byte[] manifestHash;
+            byte[] manifestHash = null;
             SHA256 sha256 = null;
             Exception shaPrimary = null;
             Exception shaCleanup = null;
