@@ -645,6 +645,7 @@ $requiredPharEntries = [
     'certs/cacert.pem',
     'Native/SourceFileLease.cs',
     'Native/OwnedChildProcess.cs',
+    'Native/NativeBrokerManifestVerifier.cs',
 ];
 foreach ($requiredPharEntries as $requiredEntry) {
     if (!isset($builtPhar[$requiredEntry])) {

@@ -23,6 +23,7 @@ on:
       - 'backend/composer.lock'
       - 'backend/Native/SourceFileLease.cs'
       - 'backend/Native/OwnedChildProcess.cs'
+      - 'backend/Native/NativeBrokerManifestVerifier.cs'
 
 permissions:
   contents: read
