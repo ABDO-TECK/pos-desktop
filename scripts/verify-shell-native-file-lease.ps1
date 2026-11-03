@@ -412,15 +412,36 @@ public static class Win32NativeFileLeaseOracle {
     }
     public static bool RenameFileHandle(IntPtr hFile, string newPath, bool replaceIfExists, out int errorCode) {
         errorCode = 0; if (hFile == IntPtr.Zero || hFile == new IntPtr(-1)) { errorCode = 6; return false; }
-        int nameByteLength = newPath.Length * 2, allocSize = 20 + nameByteLength;
+        if (newPath == null) { errorCode = 87; return false; }
+        byte[] pathBytes = Encoding.Unicode.GetBytes(newPath);
+        int headerSize = 20;
+        int nameByteLength = pathBytes.Length;
+        int nulTerminatorSize = 2;
+        int allocSize = headerSize + nameByteLength + nulTerminatorSize;
+        if (allocSize != 20 + pathBytes.Length + 2 || nameByteLength != newPath.Length * 2) {
+            errorCode = 87; return false;
+        }
         IntPtr buffer = Marshal.AllocHGlobal(allocSize);
         try {
             for (int i = 0; i < allocSize; i++) Marshal.WriteByte(buffer, i, 0);
             Marshal.WriteInt32(buffer, 0, replaceIfExists ? 1 : 0);
             Marshal.WriteIntPtr(buffer, 8, IntPtr.Zero);
             Marshal.WriteInt32(buffer, 16, nameByteLength);
-            byte[] pathBytes = Encoding.Unicode.GetBytes(newPath);
             Marshal.Copy(pathBytes, 0, new IntPtr(buffer.ToInt64() + 20), pathBytes.Length);
+            Marshal.WriteInt16(buffer, 20 + nameByteLength, (short)0);
+            int readLength = Marshal.ReadInt32(buffer, 16);
+            if (readLength != nameByteLength) {
+                throw new InvalidOperationException(string.Format("FILE_RENAME_INFO length mismatch: expected {0}, got {1}", nameByteLength, readLength));
+            }
+            short trailer = Marshal.ReadInt16(buffer, 20 + nameByteLength);
+            if (trailer != 0) {
+                throw new InvalidOperationException("FILE_RENAME_INFO UTF-16 null trailer is non-zero");
+            }
+            string roundtrip = Marshal.PtrToStringUni(new IntPtr(buffer.ToInt64() + 20), nameByteLength / 2);
+            string nullTerminated = Marshal.PtrToStringUni(new IntPtr(buffer.ToInt64() + 20));
+            if (!string.Equals(roundtrip, newPath, StringComparison.Ordinal) || roundtrip.Length != newPath.Length || !string.Equals(nullTerminated, newPath, StringComparison.Ordinal)) {
+                throw new InvalidOperationException("FILE_RENAME_INFO embedded UTF-16 roundtrip mismatch; silent trimming detected");
+            }
             if (!SetFileInformationByHandle(hFile, 3, buffer, (uint)allocSize)) {
                 errorCode = Marshal.GetLastWin32Error(); return false;
             }
@@ -697,6 +718,8 @@ try {
     if ($finalPathAside -eq $null -or -not [string]::Equals($finalPathAside, $asideExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "GetFinalPathNameByHandle mismatch after rename: expected '$asideExePath', got '$finalPathAside' (error: $pErr)"
     }
+    if (-not [System.IO.File]::Exists($asideExePath)) { throw "Renamed aside executable path does not exist on disk: $asideExePath" }
+    if ([System.IO.File]::Exists($fixtureExePath)) { throw "Original executable path still exists on disk after rename: $fixtureExePath" }
 
     $asideHandleHash = [Win32NativeFileLeaseOracle]::ComputeHandleSha256($hRenameLease, [ref]$hashErr)
     if (-not [string]::Equals($asideHandleHash, $controlExeHash, [System.StringComparison]::OrdinalIgnoreCase)) {
