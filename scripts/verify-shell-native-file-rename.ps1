@@ -1149,7 +1149,7 @@ try {
     $chunkSize = 65536
     $totalReBytes = $chunkCount * $chunkSize
     $reBytes = [byte[]]::new($totalReBytes)
-    for ($i = 0; $i < $totalReBytes; $i++) {
+    for ($i = 0; $i -lt $totalReBytes; $i++) {
         $reBytes[$i] = [byte](($i * 31 + 17) % 251)
     }
     [System.IO.File]::WriteAllBytes($reSrcPath, $reBytes)
