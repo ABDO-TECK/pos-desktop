@@ -522,6 +522,71 @@ function Get-ExclusiveFileOpenProbe {
     }
 }
 
+function Wait-ExclusiveFileRelease {
+    param(
+        $Owner,
+        [string]$Path,
+        [int]$TimeoutMs = 5000
+    )
+
+    if ($null -eq $Owner) {
+        throw "Wait-ExclusiveFileRelease: Owner parameter cannot be null."
+    }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "Wait-ExclusiveFileRelease: Path parameter cannot be null or empty."
+    }
+    if ($TimeoutMs -lt 0 -or $TimeoutMs -gt 5000) {
+        throw "Wait-ExclusiveFileRelease: TimeoutMs must be between 0 and 5000ms (got $TimeoutMs)."
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    while ($true) {
+        # Native process accounting check: require root DEAD, job count known, active 0, and quiescent
+        $obs = $Owner.Observe()
+        if ($obs.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Dead) {
+            throw "Wait-ExclusiveFileRelease: Owner RootState is not Dead: $($obs.RootState)"
+        }
+        if (-not $obs.JobCountKnown) {
+            throw "Wait-ExclusiveFileRelease: Owner JobCountKnown is false."
+        }
+        if ($obs.ActiveProcesses -ne 0) {
+            throw "Wait-ExclusiveFileRelease: Owner ActiveProcesses is not 0: $($obs.ActiveProcesses)"
+        }
+        if (-not $obs.IsQuiescent) {
+            throw "Wait-ExclusiveFileRelease: Owner IsQuiescent is false."
+        }
+
+        # Real File::Open probe with strict error categorization and stream disposal
+        $probe = Get-ExclusiveFileOpenProbe -Path $Path -Tag "ExclusiveReleaseWait"
+
+        if ($probe.OpenSucceeded) {
+            if ($probe.NativeCodeKnown -and $probe.NativeCode -eq 0) {
+                return $probe
+            }
+            throw "Wait-ExclusiveFileRelease: File open succeeded but NativeCode was not 0 (NativeCode=$($probe.NativeCode), Known=$($probe.NativeCodeKnown)) on '$Path'."
+        }
+
+        # Unknown or non-32 IO errors (e.g. FileNotFound 2, AccessDenied 5) fail immediately without retry
+        if (-not $probe.IsSharingViolation -or -not $probe.NativeCodeKnown -or $probe.NativeCode -ne 32) {
+            throw "Wait-ExclusiveFileRelease failed with non-sharing error on '$Path': OpenSucceeded=$($probe.OpenSucceeded), IsSharingViolation=$($probe.IsSharingViolation), NativeCodeKnown=$($probe.NativeCodeKnown), NativeCode=$($probe.NativeCode)"
+        }
+
+        # Sharing violation (Win32 32): bounded poll up to TimeoutMs
+        if ($sw.ElapsedMilliseconds -ge $TimeoutMs) {
+            throw [System.TimeoutException]::new("Wait-ExclusiveFileRelease timed out after $($TimeoutMs)ms waiting for exclusive file release on '$Path' (file remains locked with Win32 sharing violation 32).")
+        }
+
+        $remainingMs = $TimeoutMs - $sw.ElapsedMilliseconds
+        if ($remainingMs -le 0) {
+            throw [System.TimeoutException]::new("Wait-ExclusiveFileRelease timed out after $($TimeoutMs)ms waiting for exclusive file release on '$Path' (file remains locked with Win32 sharing violation 32).")
+        }
+
+        $sleepMs = [Math]::Min(20, [int]$remainingMs)
+        [System.Threading.Thread]::Sleep($sleepMs)
+    }
+}
+
 # --- Section 5: Synchronous Unified Single-Unit Compilation ---
 $origTemp = $env:TEMP; $origTmp = $env:TMP; $origPoison = $env:POISON_SECRET_VAR
 $codeProvider = $null
@@ -1032,6 +1097,66 @@ try {
     if (-not [string]::Equals($exeHashAfter1, $controlExeHash, [System.StringComparison]::Ordinal)) {
         throw "Suite 1: Exe SHA256 digest changed after child process exit!"
     }
+
+    # Small negative control: prove Job accounting 0 alone cannot green physical-release gate
+    # while a file is physically held locked by another process or host stream.
+    $suite1NegControlFile = [System.IO.Path]::Combine($suite1Cwd, "release-neg-control-$nonce.dat")
+    $parentNegFs = Register-TrackedStream ([System.IO.File]::Open($suite1NegControlFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None))
+    $trackedStreamCountBefore = $script:TrackedStreams.Count
+
+    $negTimeoutCaught = $false
+    try {
+        [void](Wait-ExclusiveFileRelease -Owner $owner1 -Path $suite1NegControlFile -TimeoutMs 100)
+    } catch [System.TimeoutException] {
+        $negTimeoutCaught = $true
+    } catch {
+        $curr = $_.Exception
+        while ($curr -ne $null) {
+            if ($curr -is [System.TimeoutException]) {
+                $negTimeoutCaught = $true
+                break
+            }
+            $curr = $curr.InnerException
+        }
+        if (-not $negTimeoutCaught) {
+            throw
+        }
+    }
+
+    if (-not $negTimeoutCaught) {
+        throw "Suite 1 negative control: Wait-ExclusiveFileRelease unexpectedly succeeded while file held locked with FileShare.None!"
+    }
+
+    # Ensure stream tracking registry was not modified or corrupted
+    if ($script:TrackedStreams.Count -ne $trackedStreamCountBefore) {
+        throw "Suite 1 negative control: TrackedStreams registry changed during negative wait."
+    }
+
+    # Ensure file exists and is still locked with exact Win32 error 32
+    if (-not [System.IO.File]::Exists($suite1NegControlFile)) {
+        throw "Suite 1 negative control: control file was unexpectedly deleted during wait: $suite1NegControlFile"
+    }
+    $stillLockedProbe = Get-ExclusiveFileOpenProbe -Path $suite1NegControlFile -Tag "Suite1-NegControl-Locked"
+    if (-not $stillLockedProbe.IsSharingViolation -or -not $stillLockedProbe.NativeCodeKnown -or $stillLockedProbe.NativeCode -ne 32) {
+        throw "Suite 1 negative control: file was not locked with Win32 32 after timeout (OpenSucceeded=$($stillLockedProbe.OpenSucceeded), NativeCode=$($stillLockedProbe.NativeCode))."
+    }
+
+    # Explicitly close and dispose parent stream with error tracking
+    try {
+        $parentNegFs.Dispose()
+    } catch {
+        $msg = "Suite 1 negative control parent stream disposal failed: $($_.Exception.Message)"
+        Write-Diagnostic $msg
+        $script:StreamCloseErrors.Add($msg)
+        throw
+    }
+
+    # Now that parent stream is closed, bounded release proof must succeed
+    $negReleaseProof = Wait-ExclusiveFileRelease -Owner $owner1 -Path $suite1NegControlFile -TimeoutMs 5000
+    if (-not $negReleaseProof.OpenSucceeded -or -not $negReleaseProof.NativeCodeKnown -or $negReleaseProof.NativeCode -ne 0) {
+        throw "Suite 1 negative control: Wait-ExclusiveFileRelease failed after stream closed (code=$($negReleaseProof.NativeCode))."
+    }
+    Write-Diagnostic "Suite 1: Proved job 0 alone cannot green physical-release gate while file is locked."
     Write-Diagnostic "Suite 1: Passed successfully."
 
     # --- Section 7: Test Suite 2 - Root-versus-descendant and Job Isolation ---
@@ -1111,15 +1236,18 @@ try {
         throw "Suite 2: TryStopAndClose failed on job with active grandchild: ok=$stopOk2, err=$stopErr2"
     }
 
-    # Prove Job active processes is now 0 and sentinel is released
+    # Prove Job active processes is now 0, root is Dead, and owner is closed
     $obsFinal2 = $owner2.Observe()
-    if ($obsFinal2.ActiveProcesses -ne 0 -or -not $obsFinal2.IsQuiescent) {
+    if ($obsFinal2.ActiveProcesses -ne 0 -or -not $obsFinal2.IsQuiescent -or $obsFinal2.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Dead) {
         throw "Suite 2: Final observation is not quiescent or ActiveProcesses is not 0: $($obsFinal2.ActiveProcesses)"
     }
 
-    # Sentinel file is NOW unlocked and acquirable
-    $fsUnlocked2 = Register-TrackedStream ([System.IO.File]::Open($sentinelFile2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None))
-    $fsUnlocked2.Dispose()
+    # Bounded actual release proof replaces immediate Open while Root DEAD/job 0 closed cached proof known
+    $releaseProof2 = Wait-ExclusiveFileRelease -Owner $owner2 -Path $sentinelFile2 -TimeoutMs 5000
+    if (-not $releaseProof2.OpenSucceeded -or -not $releaseProof2.NativeCodeKnown -or $releaseProof2.NativeCode -ne 0) {
+        throw "Suite 2: Sentinel file release proof failed (NativeCode=$($releaseProof2.NativeCode))."
+    }
+    Write-Diagnostic "Suite 2: job accounting zero AND actual file open now proven."
     Write-Diagnostic "Suite 2: Passed successfully."
 
     # --- Section 8: Test Suite 3 - REAL host death KILL_ON_JOB_CLOSE proof ---
@@ -1182,9 +1310,27 @@ try {
     }
     Write-Diagnostic "Suite 3: Proved OS KILL_ON_JOB_CLOSE terminated inner leaf (outer ActiveProcesses reached 0 without outer TerminateJob)."
 
-    # Sentinel file lock must now be released
-    $fsUnlocked3 = Register-TrackedStream ([System.IO.File]::Open($sentinelFile3, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None))
-    $fsUnlocked3.Dispose()
+    # Verify bounded outer Observe Root DEAD + known Active 0 before outer TryStop
+    $obsBrokerDead3 = $owner3.Observe()
+    if ($obsBrokerDead3.RootState -ne [PosDesktop.Updates.Native.ChildRootState]::Dead) {
+        throw "Suite 3: Broker root was not Dead after termination: $($obsBrokerDead3.RootState)"
+    }
+    if (-not $obsBrokerDead3.JobCountKnown -or $obsBrokerDead3.ActiveProcesses -ne 0) {
+        throw "Suite 3: Outer job ActiveProcesses is not 0: $($obsBrokerDead3.ActiveProcesses)"
+    }
+    if (-not $obsBrokerDead3.IsQuiescent) {
+        throw "Suite 3: Outer observation is not quiescent: $($obsBrokerDead3.IsQuiescent)"
+    }
+    if ($owner3.IsClosed) {
+        throw "Suite 3: Outer owner was unexpectedly closed before release proof; outer Job must stay open to prove KILL_ON_JOB_CLOSE."
+    }
+
+    # Sentinel file release proof BEFORE outer Stop so outer TerminateJob cannot mask inner KILL_ON_JOB_CLOSE
+    $releaseProof3 = Wait-ExclusiveFileRelease -Owner $owner3 -Path $sentinelFile3 -TimeoutMs 5000
+    if (-not $releaseProof3.OpenSucceeded -or -not $releaseProof3.NativeCodeKnown -or $releaseProof3.NativeCode -ne 0) {
+        throw "Suite 3: Sentinel file release proof failed before outer Stop (NativeCode=$($releaseProof3.NativeCode))."
+    }
+    Write-Diagnostic "Suite 3: job accounting zero AND actual file open now proven before outer stop."
 
     # Now clean up outer handles via TryStopAndClose
     $stopErr3 = 0

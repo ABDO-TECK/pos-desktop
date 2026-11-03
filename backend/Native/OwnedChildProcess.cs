@@ -13,6 +13,19 @@
 // Job Object containment owns ONLY new direct normal descendants, not external processes
 // brokered through ShellExecute, COM, or Windows services.
 //
+// Process handle ownership vs Job accounting vs storage rundown:
+// The class owns the ROOT process handle and Job Object, NOT each individual descendant
+// process handle. Root death is proved separately through that owned handle; Job accounting
+// (ActiveProcesses == 0) proves only that the Job Object active process count has reached zero.
+// However, Job accounting zero does NOT prove that all descendant kernel object rundown or
+// asynchronous file handle releases are complete, nor does it guarantee database quiescence
+// or cold backup safety.
+// IsQuiescent strictly proves that the owned root process is DEAD (or NotStarted) and the known
+// Job active count is 0 (native accounting proof only). It does NOT guarantee that all member
+// kernel rundown has completed, that all file handles have been released, or that storage is free.
+// Callers must independently acquire exclusive leases/file locks and appropriate database proof
+// before touching, mutating, or cleaning files.
+//
 // Native child process termination is not database backup or health proof.
 
 namespace PosDesktop.Updates.Native
@@ -74,6 +87,14 @@ namespace PosDesktop.Updates.Native
         public ChildRootState RootState { get { return this._rootState; } }
         public bool JobCountKnown { get { return this._jobCountKnown; } }
         public int ActiveProcesses { get { return this._activeProcesses; } }
+
+        /// <summary>
+        /// Indicates whether the owned root process is Dead (or NotStarted) and the Job Object active
+        /// process count is known and 0 (native accounting proof only).
+        /// This does NOT guarantee that all member kernel handle rundowns or asynchronous file handle releases
+        /// are complete, nor does it guarantee storage freedom or database cold backup quiescence.
+        /// Callers must acquire exclusive file leases and appropriate database proof before touching files.
+        /// </summary>
         public bool IsQuiescent { get { return this._isQuiescent; } }
         public int LastError { get { return this._lastError; } }
         public string ErrorMessage { get { return this._errorMessage; } }
@@ -188,6 +209,12 @@ namespace PosDesktop.Updates.Native
             }
         }
 
+        /// <summary>
+        /// Gets whether the current observation of the owned process and Job Object is quiescent
+        /// (owned root process is Dead or NotStarted, and known Job active process count is 0).
+        /// Native accounting zero does NOT guarantee that all member kernel handle rundowns or file handles
+        /// are released; callers must acquire exclusive leases and appropriate DB proof before touching files.
+        /// </summary>
         public bool IsQuiescent
         {
             get
@@ -541,6 +568,8 @@ namespace PosDesktop.Updates.Native
                 }
             }
 
+            // IsQuiescent defines native process accounting quiescence ONLY (root Dead + known Job Active 0).
+            // It does not guarantee all member kernel rundown, file handle closure, or storage freedom.
             bool isQuiescent = (rootState == ChildRootState.Dead || rootState == ChildRootState.NotStarted)
                 && jobCountKnown
                 && (activeProcesses == 0);
