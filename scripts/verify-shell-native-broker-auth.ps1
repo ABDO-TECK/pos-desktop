@@ -198,7 +198,7 @@ namespace PosDesktop.Updates.Native.Tests
 
         public static string SignBytes(RSACryptoServiceProvider signer, byte[] data)
         {
-            byte[] hash;
+            byte[] hash = null;
             SHA256 sha = null;
             Exception shaPrimary = null;
             Exception shaCleanup = null;
@@ -245,7 +245,7 @@ namespace PosDesktop.Updates.Native.Tests
 
         public static string ComputeSha256LowerHex(byte[] data)
         {
-            byte[] hash;
+            byte[] hash = null;
             SHA256 sha = null;
             Exception shaPrimary = null;
             Exception shaCleanup = null;
