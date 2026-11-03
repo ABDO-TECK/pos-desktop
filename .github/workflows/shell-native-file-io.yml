@@ -1,0 +1,34 @@
+name: Shell Native File IO Verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Native/SourceFileLease.cs'
+      - 'scripts/verify-shell-native-file-io.ps1'
+      - '.github/workflows/shell-native-file-io.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-file-io-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-file-io:
+    name: Verify Win32 Native File IO Primitive (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Win32 native file IO verifier
+        shell: pwsh
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-file-io.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

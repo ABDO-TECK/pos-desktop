@@ -21,6 +21,7 @@ on:
       - 'scripts/build-shell-delta.php'
       - 'backend/composer.json'
       - 'backend/composer.lock'
+      - 'backend/Native/SourceFileLease.cs'
 
 permissions:
   contents: read

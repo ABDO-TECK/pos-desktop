@@ -643,6 +643,7 @@ $requiredPharEntries = [
     'router.php',
     'version.json',
     'certs/cacert.pem',
+    'Native/SourceFileLease.cs',
 ];
 foreach ($requiredPharEntries as $requiredEntry) {
     if (!isset($builtPhar[$requiredEntry])) {
