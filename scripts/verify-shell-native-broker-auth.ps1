@@ -687,9 +687,9 @@ namespace PosDesktop.Updates.Native.Tests
                 // Nesting depth 64 accepted
                 var sb64 = new StringBuilder();
                 sb64.Append("{\"format\":2,\"minimum_updater_protocol\":2,\"operation\":\"shell_delta\",\"platform\":\"win32\",\"arch\":\"x64\",\"wrap\":");
-                for (int i = 0; i < 62; i++) sb64.Append("{\"w\":");
+                for (int i = 0; i < 63; i++) sb64.Append("{\"w\":");
                 sb64.Append("1");
-                for (int i = 0; i < 62; i++) sb64.Append("}");
+                for (int i = 0; i < 63; i++) sb64.Append("}");
                 sb64.Append("}");
                 byte[] d64Bytes = Encoding.UTF8.GetBytes(sb64.ToString());
                 var d64Env = verifier.VerifyAndParse(d64Bytes, SignBytes(signerA, d64Bytes));
@@ -698,9 +698,9 @@ namespace PosDesktop.Updates.Native.Tests
                 // Nesting depth 65 rejected
                 var sb65 = new StringBuilder();
                 sb65.Append("{\"format\":2,\"minimum_updater_protocol\":2,\"operation\":\"shell_delta\",\"platform\":\"win32\",\"arch\":\"x64\",\"wrap\":");
-                for (int i = 0; i < 63; i++) sb65.Append("{\"w\":");
+                for (int i = 0; i < 64; i++) sb65.Append("{\"w\":");
                 sb65.Append("1");
-                for (int i = 0; i < 63; i++) sb65.Append("}");
+                for (int i = 0; i < 64; i++) sb65.Append("}");
                 sb65.Append("}");
                 assertValidSigThrowsFormat(sb65.ToString());
 
