@@ -1,18 +1,22 @@
 // backend/Native/SourceFileLease.cs
 //
-// INTERNAL native leased-file reader / verified stream-copy primitive.
+// INTERNAL native leased-file reader / verified stream-copy / same-directory rename primitive.
 //
 // Architecture & Trust Notice:
 // Caller MUST authenticate expected metadata from signed SOURCE inventory,
-// select trusted root/paths with ProductInventoryService, and enforce
-// process quiescence, launch interlock, DB state, and health.
+// select trusted root/paths with ProductInventoryService, authorize old and new names,
+// and enforce process quiescence, launch interlock, DB state, and storage proof.
 //
 // This internal component does NOT verify RSA signatures, authorize paths,
-// introspect process IDs (PID), or prove whole-process quiescence/durability.
+// introspect process IDs (PID), record journal/DB state, provide transactional durability,
+// or prove absolute ancestor TOCTOU guarantees. Directory traversal and path checks
+// cannot be claimed absolute against concurrent attacker directory swaps; private
+// authorized root verification is the caller's responsibility.
+//
 // Memory data/view mappings may still change file bytes concurrently, so callers
 // must verify bytes for each copy operation via CopyVerifiedTo.
 //
-// This component provides exclusive read/copy access through the SAME owned
+// This component provides exclusive read/copy/rename access through the SAME owned
 // Win32 handle (share mode 0), blocking ordinary sharing-aware file opens and
 // blocking EXE/DLL image mappings while leased. It does not prevent all concurrently
 // mapped writable memory views, so callers must verify bytes for each copy.
@@ -28,6 +32,10 @@ namespace PosDesktop.Updates.Native
 
     /// <summary>
     /// Captures immutable identity metadata for a leased source file.
+    /// Note: CanonicalPath represents the confirmed canonical path snapshot at creation
+    /// or after the most recent successful verified rename. If IsMutationUncertain is true,
+    /// the on-disk path may have changed or failed in an intermediate state, and CanonicalPath
+    /// must not be assumed current.
     /// </summary>
     public sealed class SourceFileIdentity
     {
@@ -89,6 +97,48 @@ namespace PosDesktop.Updates.Native
     }
 
     /// <summary>
+    /// Exception thrown when a file rename operation enters an uncertain mutation state,
+    /// preserving handle ownership and diagnostic context for caller retention.
+    /// </summary>
+    public sealed class SourceFileLeaseRenameException : Exception
+    {
+        private readonly SourceFileLease _retainedLease;
+        private readonly int _nativeError;
+        private readonly bool _mayHaveMoved;
+        private readonly string _observedCanonicalPath;
+
+        public SourceFileLeaseRenameException(
+            string message,
+            SourceFileLease retainedLease,
+            int nativeError,
+            bool mayHaveMoved,
+            string observedCanonicalPath)
+            : this(message, null, retainedLease, nativeError, mayHaveMoved, observedCanonicalPath)
+        {
+        }
+
+        public SourceFileLeaseRenameException(
+            string message,
+            Exception innerException,
+            SourceFileLease retainedLease,
+            int nativeError,
+            bool mayHaveMoved,
+            string observedCanonicalPath)
+            : base(message, innerException)
+        {
+            this._retainedLease = retainedLease;
+            this._nativeError = nativeError;
+            this._mayHaveMoved = mayHaveMoved;
+            this._observedCanonicalPath = observedCanonicalPath;
+        }
+
+        public SourceFileLease RetainedLease { get { return this._retainedLease; } }
+        public int NativeError { get { return this._nativeError; } }
+        public bool MayHaveMoved { get { return this._mayHaveMoved; } }
+        public string ObservedCanonicalPath { get { return this._observedCanonicalPath; } }
+    }
+
+    /// <summary>
     /// Provides exclusive native file lease semantics and verified stream copying
     /// strictly through an owned Win32 file handle.
     /// </summary>
@@ -101,6 +151,7 @@ namespace PosDesktop.Updates.Native
         private bool _isClosed;
         private bool _ioInProgress;
         private bool _acquisitionValidated;
+        private bool _mutationUncertain;
 
         private SourceFileLease(string expectedSha256)
         {
@@ -110,11 +161,18 @@ namespace PosDesktop.Updates.Native
             this._isClosed = false;
             this._ioInProgress = false;
             this._acquisitionValidated = false;
+            this._mutationUncertain = false;
         }
 
         public SourceFileIdentity Identity
         {
-            get { return this._identity; }
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._identity;
+                }
+            }
         }
 
         public bool IsClosed
@@ -124,6 +182,17 @@ namespace PosDesktop.Updates.Native
                 lock (this._syncLock)
                 {
                     return this._isClosed;
+                }
+            }
+        }
+
+        public bool IsMutationUncertain
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._mutationUncertain;
                 }
             }
         }
@@ -256,6 +325,10 @@ namespace PosDesktop.Updates.Native
                 {
                     throw new ObjectDisposedException("SourceFileLease");
                 }
+                if (this._mutationUncertain)
+                {
+                    throw new InvalidOperationException("Source file lease is in an uncertain mutation state; only closure is permitted.");
+                }
                 if (this._ioInProgress)
                 {
                     throw new InvalidOperationException("Reentrant or concurrent I/O detected.");
@@ -342,6 +415,10 @@ namespace PosDesktop.Updates.Native
                 {
                     throw new ObjectDisposedException("SourceFileLease");
                 }
+                if (this._mutationUncertain)
+                {
+                    throw new InvalidOperationException("Source file lease is in an uncertain mutation state; only closure is permitted.");
+                }
                 if (this._ioInProgress)
                 {
                     throw new InvalidOperationException("Reentrant or concurrent I/O detected.");
@@ -375,6 +452,10 @@ namespace PosDesktop.Updates.Native
                 if (this._isClosed)
                 {
                     throw new ObjectDisposedException("SourceFileLease");
+                }
+                if (this._mutationUncertain)
+                {
+                    throw new InvalidOperationException("Source file lease is in an uncertain mutation state; only closure is permitted.");
                 }
                 if (this._ioInProgress)
                 {
@@ -457,6 +538,303 @@ namespace PosDesktop.Updates.Native
                     this.AssertFileInformation(this._identity.Size);
 
                     return new StreamCopyResult(totalBytesCopied, computedSha256);
+                }
+                finally
+                {
+                    this._ioInProgress = false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Renames the leased file atomically to a new leaf name within the SAME existing parent directory,
+        /// operating strictly through the owned Win32 handle without reopening or releasing the lease.
+        /// Destination must not exist; non-replacing collision semantics are enforced.
+        ///
+        /// Architecture & Trust Notice:
+        /// Caller MUST authenticate SOURCE expected SHA/size, authorize root and old/new names,
+        /// and enforce process quiescence and storage proof. This method does NO signature verification,
+        /// journaling, DB state updates, or absolute ancestor TOCTOU guarantees.
+        /// </summary>
+        public SourceFileIdentity RenameWithinDirectory(string destinationLeafName)
+        {
+            lock (this._syncLock)
+            {
+                if (this._isClosed)
+                {
+                    throw new ObjectDisposedException("SourceFileLease");
+                }
+                if (this._mutationUncertain)
+                {
+                    throw new InvalidOperationException("Source file lease is in an uncertain mutation state; only closure is permitted.");
+                }
+                if (this._ioInProgress)
+                {
+                    throw new InvalidOperationException("Reentrant or concurrent I/O detected.");
+                }
+                if (!this._acquisitionValidated)
+                {
+                    throw new InvalidOperationException("Source file lease is not validated; only closure is permitted.");
+                }
+
+                // Strict destination leaf name validation
+                ValidateDestinationLeafName(destinationLeafName);
+
+                string originalCanonicalPath = this._identity.CanonicalPath;
+                string parentDir = Path.GetDirectoryName(originalCanonicalPath);
+                if (string.IsNullOrEmpty(parentDir))
+                {
+                    throw new InvalidOperationException("Unable to determine directory for current canonical path: " + originalCanonicalPath);
+                }
+
+                string destCanonicalPath = Path.Combine(parentDir, destinationLeafName);
+
+                // Enforce same existing parent directory
+                string destParentDir = Path.GetDirectoryName(destCanonicalPath);
+                if (!string.Equals(parentDir, destParentDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ArgumentException("Destination leaf name must remain within the same parent directory.", "destinationLeafName");
+                }
+
+                // Reject identical or case-only alias BEFORE native call
+                string sourceLeaf = Path.GetFileName(originalCanonicalPath);
+                if (string.Equals(sourceLeaf, destinationLeafName, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ArgumentException("Destination leaf name cannot be identical or a case-only alias of the source file name.", "destinationLeafName");
+                }
+
+                // DOS path and ancestor validation on destination
+                ValidateDosPath(destCanonicalPath);
+
+                // Strict UTF-16 encoding validation (throw on unpaired surrogates)
+                UnicodeEncoding strictEncoding = new UnicodeEncoding(false, false, true);
+                byte[] pathBytes;
+                try
+                {
+                    pathBytes = strictEncoding.GetBytes(destCanonicalPath);
+                }
+                catch (EncoderFallbackException ex)
+                {
+                    throw new ArgumentException("Destination canonical path contains invalid UTF-16 sequences: " + ex.Message, "destinationLeafName", ex);
+                }
+
+                if (destCanonicalPath.Length > 32767 || pathBytes.Length > 65534)
+                {
+                    throw new ArgumentException("Destination canonical path exceeds maximum supported path length.", "destinationLeafName");
+                }
+
+                this._ioInProgress = true;
+                try
+                {
+                    // Preflight verification through OWN handle
+                    string preflightPath = null;
+                    try
+                    {
+                        this.AssertFileInformation(this._identity.Size);
+                        preflightPath = GetCanonicalDosPath(this._handle);
+                        if (!string.Equals(preflightPath, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight canonical path mismatch: expected '{0}', got '{1}'.", originalCanonicalPath, preflightPath));
+                        }
+                        string preflightSha256 = this.ComputeSha256Internal();
+                        if (!string.Equals(preflightSha256, this._expectedSha256, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight SHA-256 digest mismatch: expected '{0}', computed '{1}'.", this._expectedSha256, preflightSha256));
+                        }
+                        this.AssertFileInformation(this._identity.Size);
+                        string preflightPathEnd = GetCanonicalDosPath(this._handle);
+                        if (!string.Equals(preflightPathEnd, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight canonical path changed during hash: expected '{0}', got '{1}'.", originalCanonicalPath, preflightPathEnd));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        this._mutationUncertain = true;
+                        this._acquisitionValidated = false;
+                        string observedPreflight = null;
+                        try { observedPreflight = GetCanonicalDosPath(this._handle); } catch { }
+                        throw new SourceFileLeaseRenameException(
+                            string.Format("Preflight verification of source file failed through owned handle: {0}", ex.Message),
+                            ex,
+                            this,
+                            0,
+                            false,
+                            observedPreflight
+                        );
+                    }
+
+                    // Construct FILE_RENAME_INFO buffer (x64)
+                    const int headerSize = 20;
+                    int nameByteLength = pathBytes.Length;
+                    const int nulTerminatorSize = 2;
+                    int allocSize = headerSize + nameByteLength + nulTerminatorSize;
+                    if (allocSize != 20 + pathBytes.Length + 2 || nameByteLength != destCanonicalPath.Length * 2)
+                    {
+                        throw new InvalidOperationException("FILE_RENAME_INFO buffer size calculation mismatch.");
+                    }
+                    if (allocSize > 65558)
+                    {
+                        throw new InvalidOperationException("FILE_RENAME_INFO buffer size exceeds 32k character limit.");
+                    }
+
+                    IntPtr buffer = Marshal.AllocHGlobal(allocSize);
+                    bool nativeSuccess = false;
+                    int nativeError = 0;
+                    try
+                    {
+                        for (int i = 0; i < allocSize; i++) Marshal.WriteByte(buffer, i, 0);
+                        // ReplaceIfExists = FALSE (0) at offset 0
+                        Marshal.WriteInt32(buffer, 0, 0);
+                        // RootDirectory = IntPtr.Zero at offset 8 (x64)
+                        Marshal.WriteIntPtr(buffer, 8, IntPtr.Zero);
+                        // FileNameLength (DWORD) at offset 16 (UTF-16 byte count excluding NUL)
+                        Marshal.WriteInt32(buffer, 16, nameByteLength);
+                        // FileName (WCHAR[]) at offset 20
+                        Marshal.Copy(pathBytes, 0, new IntPtr(buffer.ToInt64() + 20), pathBytes.Length);
+                        // Explicit two zero bytes trailer
+                        Marshal.WriteInt16(buffer, 20 + nameByteLength, (short)0);
+
+                        // Verification of buffer layout and trailer
+                        int readLength = Marshal.ReadInt32(buffer, 16);
+                        if (readLength != nameByteLength)
+                        {
+                            throw new InvalidOperationException(string.Format("FILE_RENAME_INFO length mismatch: expected {0}, got {1}.", nameByteLength, readLength));
+                        }
+                        short trailer = Marshal.ReadInt16(buffer, 20 + nameByteLength);
+                        if (trailer != 0)
+                        {
+                            throw new InvalidOperationException("FILE_RENAME_INFO UTF-16 null trailer is non-zero.");
+                        }
+                        string roundtrip = Marshal.PtrToStringUni(new IntPtr(buffer.ToInt64() + 20), nameByteLength / 2);
+                        string nullTerminated = Marshal.PtrToStringUni(new IntPtr(buffer.ToInt64() + 20));
+                        if (!string.Equals(roundtrip, destCanonicalPath, StringComparison.Ordinal) ||
+                            roundtrip.Length != destCanonicalPath.Length ||
+                            !string.Equals(nullTerminated, destCanonicalPath, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException("FILE_RENAME_INFO embedded UTF-16 roundtrip mismatch; silent trimming detected.");
+                        }
+
+                        // Mark mutation uncertain IMMEDIATELY before mutating native call
+                        this._mutationUncertain = true;
+
+                        // Mutating native call: exactly ONE call per attempt
+                        nativeSuccess = NativeMethods.SetFileInformationByHandle(this._handle, NativeMethods.FileRenameInfo, buffer, (uint)allocSize);
+                        if (!nativeSuccess)
+                        {
+                            nativeError = Marshal.GetLastWin32Error();
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                    }
+
+                    if (!nativeSuccess)
+                    {
+                        // Native call failed. Prove original file state through OWN handle before clearing uncertainty.
+                        bool reversionVerified = false;
+                        Exception reversionException = null;
+                        try
+                        {
+                            string currentPath = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(currentPath, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: canonical path changed from '{0}' to '{1}'.", originalCanonicalPath, currentPath));
+                            }
+                            this.AssertFileInformation(this._identity.Size);
+
+                            string currentSha256 = this.ComputeSha256Internal();
+                            if (!string.Equals(currentSha256, this._expectedSha256, StringComparison.Ordinal))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: SHA-256 changed from '{0}' to '{1}'.", this._expectedSha256, currentSha256));
+                            }
+
+                            this.AssertFileInformation(this._identity.Size);
+                            string currentPathAfter = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(currentPathAfter, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: canonical path changed after hash from '{0}' to '{1}'.", originalCanonicalPath, currentPathAfter));
+                            }
+
+                            reversionVerified = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            reversionException = ex;
+                        }
+
+                        if (reversionVerified)
+                        {
+                            this._mutationUncertain = false;
+                            throw new IOException(
+                                string.Format("Native rename failed with Win32 error {0}; source file verified unchanged at '{1}'.", nativeError, originalCanonicalPath),
+                                new Win32Exception(nativeError)
+                            );
+                        }
+                        else
+                        {
+                            string observed = null;
+                            try { observed = GetCanonicalDosPath(this._handle); } catch { }
+                            throw new SourceFileLeaseRenameException(
+                                string.Format("Native rename failed with Win32 error {0}, and post-failure verification of original file state also failed: {1}", nativeError, reversionException != null ? reversionException.Message : "unknown"),
+                                reversionException,
+                                this,
+                                nativeError,
+                                true,
+                                observed
+                            );
+                        }
+                    }
+                    else
+                    {
+                        // Native call reported TRUE. Verify destination state through OWN handle.
+                        Exception postVerifyException = null;
+                        try
+                        {
+                            string postPath = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(postPath, destCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Post-rename canonical path mismatch: expected '{0}', got '{1}'.", destCanonicalPath, postPath));
+                            }
+                            this.AssertFileInformation(this._identity.Size);
+                            string postSha256 = this.ComputeSha256Internal();
+                            if (!string.Equals(postSha256, this._expectedSha256, StringComparison.Ordinal))
+                            {
+                                throw new InvalidOperationException(string.Format("Post-rename SHA-256 digest mismatch: expected '{0}', computed '{1}'.", this._expectedSha256, postSha256));
+                            }
+                            this.AssertFileInformation(this._identity.Size);
+                            string postPath2 = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(postPath2, destCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Post-rename canonical path not stable: first '{0}', second '{1}'.", postPath, postPath2));
+                            }
+
+                            this._identity = new SourceFileIdentity(
+                                this._identity.VolumeSerialNumber,
+                                this._identity.FileIndex,
+                                this._identity.Size,
+                                postPath2
+                            );
+                            this._mutationUncertain = false;
+                            return this._identity;
+                        }
+                        catch (Exception ex)
+                        {
+                            postVerifyException = ex;
+                        }
+
+                        string observedAfterTrue = null;
+                        try { observedAfterTrue = GetCanonicalDosPath(this._handle); } catch { }
+                        throw new SourceFileLeaseRenameException(
+                            string.Format("Native rename reported success, but post-rename verification failed: {0}", postVerifyException != null ? postVerifyException.Message : "unknown"),
+                            postVerifyException,
+                            this,
+                            0,
+                            true,
+                            observedAfterTrue
+                        );
+                    }
                 }
                 finally
                 {
@@ -572,6 +950,7 @@ namespace PosDesktop.Updates.Native
 
         private string ComputeSha256Internal()
         {
+            bool priorIoInProgress = this._ioInProgress;
             this._ioInProgress = true;
             try
             {
@@ -633,7 +1012,7 @@ namespace PosDesktop.Updates.Native
             }
             finally
             {
-                this._ioInProgress = false;
+                this._ioInProgress = priorIoInProgress;
             }
         }
 
@@ -737,17 +1116,101 @@ namespace PosDesktop.Updates.Native
             }
         }
 
+        private static void ValidateDestinationLeafName(string leaf)
+        {
+            if (leaf == null)
+            {
+                throw new ArgumentNullException("destinationLeafName");
+            }
+            if (leaf.Length == 0 || leaf.Length > 255)
+            {
+                throw new ArgumentException("Destination leaf name length must be between 1 and 255 characters.", "destinationLeafName");
+            }
+            if (string.IsNullOrWhiteSpace(leaf))
+            {
+                throw new ArgumentException("Destination leaf name must not be empty or whitespace only.", "destinationLeafName");
+            }
+            if (leaf == "." || leaf == "..")
+            {
+                throw new ArgumentException("Destination leaf name must not be '.' or '..'.", "destinationLeafName");
+            }
+            if (leaf.EndsWith(".") || leaf.EndsWith(" "))
+            {
+                throw new ArgumentException("Destination leaf name must not end with a trailing dot or space.", "destinationLeafName");
+            }
+            if (leaf.IndexOf('~') != -1)
+            {
+                throw new ArgumentException("Destination leaf name must not contain 8.3 short-name aliases (~).", "destinationLeafName");
+            }
+
+            for (int i = 0; i < leaf.Length; i++)
+            {
+                char c = leaf[i];
+                if (c < 0x20 || c == 0x7F)
+                {
+                    throw new ArgumentException(string.Format("Destination leaf name contains control character 0x{0:X2}.", (int)c), "destinationLeafName");
+                }
+                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                {
+                    throw new ArgumentException(string.Format("Destination leaf name contains forbidden character '{0}'.", c), "destinationLeafName");
+                }
+                if (char.IsSurrogate(c))
+                {
+                    if (char.IsHighSurrogate(c))
+                    {
+                        if (i + 1 < leaf.Length && char.IsLowSurrogate(leaf[i + 1]))
+                        {
+                            i++;
+                            continue;
+                        }
+                        throw new ArgumentException("Destination leaf name contains an unpaired high surrogate.", "destinationLeafName");
+                    }
+                    else
+                    {
+                        throw new ArgumentException("Destination leaf name contains an unpaired low surrogate.", "destinationLeafName");
+                    }
+                }
+            }
+
+            UnicodeEncoding strictEncoding = new UnicodeEncoding(false, false, true);
+            byte[] testBytes;
+            try
+            {
+                testBytes = strictEncoding.GetBytes(leaf);
+            }
+            catch (EncoderFallbackException ex)
+            {
+                throw new ArgumentException("Destination leaf name is not valid UTF-16: " + ex.Message, "destinationLeafName", ex);
+            }
+            if (testBytes.Length != leaf.Length * 2)
+            {
+                throw new ArgumentException("Destination leaf name byte length mismatch in UTF-16.", "destinationLeafName");
+            }
+
+            string nameWithoutExt = leaf;
+            int dotIdx = leaf.IndexOf('.');
+            if (dotIdx >= 0)
+            {
+                nameWithoutExt = leaf.Substring(0, dotIdx);
+            }
+            if (IsReservedDosDeviceName(leaf) || IsReservedDosDeviceName(nameWithoutExt))
+            {
+                throw new ArgumentException(string.Format("Destination leaf name '{0}' uses a reserved DOS device name.", leaf), "destinationLeafName");
+            }
+        }
+
         private static bool IsReservedDosDeviceName(string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
             string upper = name.ToUpperInvariant();
-            if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL") return true;
+            if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" || upper == "CONIN$" || upper == "CONOUT$") return true;
             if (upper.Length == 4)
             {
                 if (upper.StartsWith("COM") || upper.StartsWith("LPT"))
                 {
                     char c = upper[3];
                     if (c >= '1' && c <= '9') return true;
+                    if (c == '\u00B9' || c == '\u00B2' || c == '\u00B3') return true;
                 }
             }
             return false;
@@ -824,6 +1287,7 @@ namespace PosDesktop.Updates.Native
             internal const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
             internal const uint FILE_BEGIN = 0;
             internal const uint VOLUME_NAME_DOS = 0x0;
+            internal const int FileRenameInfo = 3;
 
             [StructLayout(LayoutKind.Sequential)]
             internal struct FILETIME
@@ -897,6 +1361,15 @@ namespace PosDesktop.Updates.Native
                 uint nNumberOfBytesToRead,
                 out uint lpNumberOfBytesRead,
                 IntPtr lpOverlapped
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool SetFileInformationByHandle(
+                IntPtr hFile,
+                int FileInformationClass,
+                IntPtr lpFileInformation,
+                uint dwBufferSize
             );
         }
     }

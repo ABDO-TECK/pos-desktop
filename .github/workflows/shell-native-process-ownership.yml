@@ -6,6 +6,7 @@ on:
     branches:
       - feat-shell-delta-updates
     paths:
+      - 'backend/Native/SourceFileLease.cs'
       - 'backend/Native/OwnedChildProcess.cs'
       - 'scripts/verify-shell-native-process-ownership.ps1'
       - '.github/workflows/shell-native-process-ownership.yml'
