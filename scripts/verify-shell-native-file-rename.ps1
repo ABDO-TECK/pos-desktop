@@ -479,6 +479,14 @@ namespace PosDesktop.Updates.Native.Testing
     using System.IO;
     using PosDesktop.Updates.Native;
 
+    public static class SourceFileLeaseTestBridge
+    {
+        public static SourceFileIdentity RenameLiteralNull(SourceFileLease lease)
+        {
+            return lease.RenameWithinDirectory((string)null);
+        }
+    }
+
     public sealed class ReentrantCallbackStream : MemoryStream
     {
         private readonly SourceFileLease _lease;
@@ -1037,7 +1045,7 @@ try {
     $invRec = $script:TrackedLeases[$script:TrackedLeases.Count - 1]
 
     $invalidTestCases = @(
-        @{ Label = "Null leaf"; Leaf = $null; ExpectedType = "ArgumentNullException" },
+        @{ Label = "Null leaf"; Leaf = $null; ExpectedType = "ArgumentNullException"; HelperName = "RenameLiteralNull" },
         @{ Label = "Empty string"; Leaf = ""; ExpectedType = "ArgumentException" },
         @{ Label = "Whitespace only"; Leaf = "   "; ExpectedType = "ArgumentException" },
         @{ Label = "Single dot"; Leaf = "."; ExpectedType = "ArgumentException" },
@@ -1083,10 +1091,15 @@ try {
     foreach ($tc in $invalidTestCases) {
         $threwExpected = $false
         try {
-            $null = $invLease.RenameWithinDirectory($tc.Leaf)
+            if ($tc.ContainsKey('HelperName') -and $tc['HelperName'] -eq "RenameLiteralNull") {
+                $null = [PosDesktop.Updates.Native.Testing.SourceFileLeaseTestBridge]::RenameLiteralNull($invLease)
+            } else {
+                $null = $invLease.RenameWithinDirectory($tc.Leaf)
+            }
         } catch {
             $curr = $_.Exception
-            while ($curr -ne $null) {
+            $depth = 0
+            while ($curr -ne $null -and $depth -lt 5) {
                 if ($tc.ExpectedType -eq "ArgumentNullException" -and $curr -is [System.ArgumentNullException]) {
                     $threwExpected = $true
                     break
@@ -1096,6 +1109,7 @@ try {
                     break
                 }
                 $curr = $curr.InnerException
+                $depth++
             }
         }
         if (-not $threwExpected) {
