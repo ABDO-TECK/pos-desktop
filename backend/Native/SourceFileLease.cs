@@ -1420,17 +1420,39 @@ namespace PosDesktop.Updates.Native
                     else
                     {
                         // Native call reported TRUE. Verify through SAME handle: FileStandardInfo.DeletePending TRUE + identity/metadata/bindings.
+                        // On Windows NTFS, setting DeletePending = TRUE on the file's last link immediately decrements
+                        // the reported NumberOfLinks from 1 to 0 (pending handle closure), while older kernels or
+                        // alternative filesystems may report 1 until closed. Therefore, after proven DeletePending == 1,
+                        // NumberOfLinks must be either 0 or 1. No claim is made that all kernel post-mutation states are fault tested.
                         // NO canonical path / hash after delete if OS doesn't guarantee query will work.
                         Exception postVerifyException = null;
                         try
                         {
-                            NativeMethods.FILE_STANDARD_INFO postStandard = this.QueryStandardInfo(expectedSize);
-                            if (postStandard.DeletePending != 1)
+                            NativeMethods.FILE_STANDARD_INFO firstPending = this.QueryPendingStandard(expectedSize);
+                            if (firstPending.DeletePending != 1)
                             {
-                                throw new InvalidOperationException(string.Format("Post-disposition check failed: DeletePending expected 1, got {0}.", postStandard.DeletePending));
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: DeletePending expected 1, got {0}.", firstPending.DeletePending));
+                            }
+                            if (firstPending.NumberOfLinks != 0 && firstPending.NumberOfLinks != 1)
+                            {
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: link count must be 0 or 1, got {0}.", firstPending.NumberOfLinks));
                             }
 
-                            this.AssertFileInformation(expectedSize);
+                            this.AssertFileInformationCore(expectedSize, firstPending.NumberOfLinks);
+
+                            NativeMethods.FILE_STANDARD_INFO secondPending = this.QueryPendingStandard(expectedSize);
+                            if (secondPending.DeletePending != 1)
+                            {
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: DeletePending expected 1 on second query, got {0}.", secondPending.DeletePending));
+                            }
+                            if (secondPending.NumberOfLinks != firstPending.NumberOfLinks)
+                            {
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: link count drifted between queries (first {0}, second {1}).", firstPending.NumberOfLinks, secondPending.NumberOfLinks));
+                            }
+                            if (secondPending.EndOfFile != expectedSize)
+                            {
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: EndOfFile size drifted on second query: expected {0} bytes, actual {1} bytes.", expectedSize, secondPending.EndOfFile));
+                            }
 
                             // On success: mark known pending, close-only mode, clear uncertainty
                             this._isDeletionPending = true;
@@ -1519,6 +1541,21 @@ namespace PosDesktop.Updates.Native
 
         private void AssertFileInformation(long expectedSize)
         {
+            this.AssertFileInformationCore(expectedSize, 1);
+        }
+
+        private void AssertFileInformation(long expectedSize, uint expectedLinkCount)
+        {
+            this.AssertFileInformationCore(expectedSize, expectedLinkCount);
+        }
+
+        private void AssertFileInformationCore(long expectedSize, uint expectedLinkCount)
+        {
+            if (expectedLinkCount != 0 && expectedLinkCount != 1)
+            {
+                throw new ArgumentOutOfRangeException("expectedLinkCount", expectedLinkCount, "Expected link count must be 0 or 1.");
+            }
+
             uint fileType = NativeMethods.GetFileType(this._handle);
             if (fileType != NativeMethods.FILE_TYPE_DISK)
             {
@@ -1542,9 +1579,9 @@ namespace PosDesktop.Updates.Native
                 throw new InvalidOperationException("Target file is a reparse point.");
             }
 
-            if (fi.nNumberOfLinks != 1)
+            if (fi.nNumberOfLinks != expectedLinkCount)
             {
-                throw new InvalidOperationException(string.Format("Target file link count must be exactly 1, got {0}.", fi.nNumberOfLinks));
+                throw new InvalidOperationException(string.Format("Target file link count must be exactly {0}, got {1}.", expectedLinkCount, fi.nNumberOfLinks));
             }
 
             ulong actualSize = ((ulong)fi.nFileSizeHigh << 32) | (ulong)fi.nFileSizeLow;
@@ -1591,6 +1628,11 @@ namespace PosDesktop.Updates.Native
                 throw new InvalidOperationException(string.Format("GetFileInformationByHandleEx returned invalid DeletePending value: {0}.", info.DeletePending));
             }
 
+            if (info.DeletePending != 0)
+            {
+                throw new InvalidOperationException(string.Format("Target file has unexpected non-zero DeletePending: {0}.", info.DeletePending));
+            }
+
             if (info.Directory != 0)
             {
                 throw new InvalidOperationException("Target path is a directory, not a regular file.");
@@ -1607,6 +1649,57 @@ namespace PosDesktop.Updates.Native
             }
 
             return info;
+        }
+
+        private NativeMethods.FILE_STANDARD_INFO QueryPendingStandard(long expectedSize)
+        {
+            if (Marshal.SizeOf(typeof(NativeMethods.FILE_STANDARD_INFO)) != 24)
+            {
+                throw new InvalidOperationException("FILE_STANDARD_INFO struct size mismatch: expected 24 bytes.");
+            }
+
+            NativeMethods.FILE_STANDARD_INFO info;
+            if (!NativeMethods.GetFileInformationByHandleEx(
+                this._handle,
+                NativeMethods.FileStandardInfo,
+                out info,
+                (uint)Marshal.SizeOf(typeof(NativeMethods.FILE_STANDARD_INFO))))
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new IOException(string.Format("GetFileInformationByHandleEx(FileStandardInfo) failed: Win32 error {0}.", err), new Win32Exception(err));
+            }
+
+            if (info.DeletePending != 0 && info.DeletePending != 1)
+            {
+                throw new InvalidOperationException(string.Format("GetFileInformationByHandleEx returned invalid DeletePending value: {0}.", info.DeletePending));
+            }
+
+            if (info.DeletePending != 1)
+            {
+                throw new InvalidOperationException(string.Format("Post-disposition check failed: DeletePending expected 1, got {0}.", info.DeletePending));
+            }
+
+            if (info.Directory != 0)
+            {
+                throw new InvalidOperationException("Target path is a directory, not a regular file.");
+            }
+
+            if (info.NumberOfLinks != 0 && info.NumberOfLinks != 1)
+            {
+                throw new InvalidOperationException(string.Format("Post-disposition link count must be 0 or 1, got {0}.", info.NumberOfLinks));
+            }
+
+            if (info.EndOfFile != expectedSize)
+            {
+                throw new InvalidOperationException(string.Format("File EndOfFile size mismatch: expected {0} bytes, actual {1} bytes.", expectedSize, info.EndOfFile));
+            }
+
+            return info;
+        }
+
+        private NativeMethods.FILE_STANDARD_INFO QueryPendingStandardInfo(long expectedSize)
+        {
+            return this.QueryPendingStandard(expectedSize);
         }
 
         private string ComputeSha256Internal()
