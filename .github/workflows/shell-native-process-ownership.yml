@@ -1,0 +1,34 @@
+name: Shell Native Process Ownership Verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Native/OwnedChildProcess.cs'
+      - 'scripts/verify-shell-native-process-ownership.ps1'
+      - '.github/workflows/shell-native-process-ownership.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-process-ownership-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-process-ownership:
+    name: Verify Win32 Native Process Ownership Primitive (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Win32 native process ownership verifier
+        shell: pwsh
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-process-ownership.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

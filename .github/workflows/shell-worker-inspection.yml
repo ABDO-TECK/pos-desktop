@@ -22,6 +22,7 @@ on:
       - 'backend/composer.json'
       - 'backend/composer.lock'
       - 'backend/Native/SourceFileLease.cs'
+      - 'backend/Native/OwnedChildProcess.cs'
 
 permissions:
   contents: read
