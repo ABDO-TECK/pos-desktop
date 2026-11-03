@@ -1,6 +1,6 @@
 // backend/Native/SourceFileLease.cs
 //
-// INTERNAL native leased-file reader / verified stream-copy / same-directory rename / verified staging primitive.
+// INTERNAL native leased-file reader / verified stream-copy / same-directory rename / verified staging / deletion disposition primitive.
 //
 // Architecture & Trust Notice:
 // Caller MUST authenticate expected metadata from signed SOURCE or TARGET inventory,
@@ -10,7 +10,14 @@
 // For staging operations (CreateNewVerified), the caller MUST authenticate target
 // expected size/SHA-256 and old/new root/names from signed TARGET inventory, authorize a fresh
 // nonce-staging namespace, control ancestor directories, and manage process/launch interlocks,
-// DB state, and transaction journals.
+// DB state, and transaction journals. Caller owns the input stream on both success and failure.
+//
+// For deletion disposition operations (MarkForDeletion), the caller MUST authenticate expected metadata
+// and operation authorization from signed SOURCE/TARGET inventory, ensure verified external backups
+// exist OUTSIDE the root directory and are durably journaled, and enforce whole live transaction quiescence.
+// Marking deletion pending through the owned handle (SetFileInformationByHandle FileDispositionInfo)
+// does NOT prove that the filesystem namespace entry is gone. Exact physical absence after handle closure
+// must be verified independently by the caller/coordinator.
 //
 // This internal component does NOT verify RSA signatures, authorize path inventory,
 // introspect process IDs (PID), record journal/DB state, provide transactional durability
@@ -29,6 +36,7 @@
 namespace PosDesktop.Updates.Native
 {
     using System;
+    using System.Collections.Generic;
     using System.ComponentModel;
     using System.IO;
     using System.Runtime.InteropServices;
@@ -164,6 +172,48 @@ namespace PosDesktop.Updates.Native
     }
 
     /// <summary>
+    /// Exception thrown when a file deletion disposition operation fails or enters an uncertain mutation state,
+    /// preserving handle ownership and diagnostic context for caller retention.
+    /// </summary>
+    public sealed class SourceFileLeaseDispositionException : Exception
+    {
+        private readonly SourceFileLease _retainedLease;
+        private readonly int _nativeError;
+        private readonly bool _mayBePending;
+        private readonly string _observedCanonicalPath;
+
+        public SourceFileLeaseDispositionException(
+            string message,
+            SourceFileLease retainedLease,
+            int nativeError,
+            bool mayBePending,
+            string observedCanonicalPath)
+            : this(message, null, retainedLease, nativeError, mayBePending, observedCanonicalPath)
+        {
+        }
+
+        public SourceFileLeaseDispositionException(
+            string message,
+            Exception innerException,
+            SourceFileLease retainedLease,
+            int nativeError,
+            bool mayBePending,
+            string observedCanonicalPath)
+            : base(message, innerException)
+        {
+            this._retainedLease = retainedLease;
+            this._nativeError = nativeError;
+            this._mayBePending = mayBePending;
+            this._observedCanonicalPath = observedCanonicalPath;
+        }
+
+        public SourceFileLease RetainedLease { get { return this._retainedLease; } }
+        public int NativeError { get { return this._nativeError; } }
+        public bool MayBePending { get { return this._mayBePending; } }
+        public string ObservedCanonicalPath { get { return this._observedCanonicalPath; } }
+    }
+
+    /// <summary>
     /// Provides exclusive native file lease semantics and verified stream copying
     /// strictly through an owned Win32 file handle.
     /// </summary>
@@ -177,6 +227,7 @@ namespace PosDesktop.Updates.Native
         private bool _ioInProgress;
         private bool _acquisitionValidated;
         private bool _mutationUncertain;
+        private bool _isDeletionPending;
 
         private SourceFileLease(string expectedSha256)
         {
@@ -187,6 +238,7 @@ namespace PosDesktop.Updates.Native
             this._ioInProgress = false;
             this._acquisitionValidated = false;
             this._mutationUncertain = false;
+            this._isDeletionPending = false;
         }
 
         public SourceFileIdentity Identity
@@ -218,6 +270,23 @@ namespace PosDesktop.Updates.Native
                 lock (this._syncLock)
                 {
                     return this._mutationUncertain;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the last-known deletion disposition status of this leased file.
+        /// Starts false; becomes true upon successful MarkForDeletion.
+        /// Indicates that the file was marked delete-pending via the owned Win32 handle.
+        /// Does NOT claim or prove filesystem namespace absence after handle closure.
+        /// </summary>
+        public bool IsDeletionPending
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._isDeletionPending;
                 }
             }
         }
@@ -1136,6 +1205,265 @@ namespace PosDesktop.Updates.Native
         }
 
         /// <summary>
+        /// Sets deletion disposition on the leased file strictly through the owned Win32 handle
+        /// (SetFileInformationByHandle with FileDispositionInfo = 4, DeleteFile = true).
+        ///
+        /// The handle remains OPEN and exclusive until caller explicitly calls TryClose or Dispose.
+        /// Once successfully marked:
+        /// - IsDeletionPending becomes true (capturing last-known disposition status).
+        /// - Lease enters close-only mode (_acquisitionValidated = false).
+        /// - All subsequent ReadRange, ComputeSha256, CopyVerifiedTo, RenameWithinDirectory, and MarkForDeletion calls are blocked.
+        ///
+        /// Architecture & Trust Notice:
+        /// Marking deletion pending does NOT prove that the file or its namespace entry is absent.
+        /// The caller MUST authenticate expected metadata from signed SOURCE/target inventory,
+        /// ensure verified backups exist OUTSIDE the root directory and are durably journaled,
+        /// and enforce whole live transaction quiescence.
+        /// Physical absence after handle closure must be verified independently by the caller/coordinator.
+        /// </summary>
+        public void MarkForDeletion()
+        {
+            lock (this._syncLock)
+            {
+                if (this._isClosed)
+                {
+                    throw new ObjectDisposedException("SourceFileLease");
+                }
+                if (this._mutationUncertain)
+                {
+                    throw new InvalidOperationException("Source file lease is in an uncertain mutation state; only closure is permitted.");
+                }
+                if (this._ioInProgress)
+                {
+                    throw new InvalidOperationException("Reentrant or concurrent I/O detected.");
+                }
+                if (this._isDeletionPending)
+                {
+                    throw new InvalidOperationException("File is already marked for deletion; only closure is permitted.");
+                }
+                if (!this._acquisitionValidated)
+                {
+                    throw new InvalidOperationException("Source file lease is not validated; only closure is permitted.");
+                }
+
+                string originalCanonicalPath = this._identity.CanonicalPath;
+                long expectedSize = this._identity.Size;
+
+                this._ioInProgress = true;
+                try
+                {
+                    // Preflight verification through OWN handle
+                    string preflightPath = null;
+                    try
+                    {
+                        this.AssertFileInformation(expectedSize);
+                        preflightPath = GetCanonicalDosPath(this._handle);
+                        if (!string.Equals(preflightPath, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight canonical path mismatch: expected '{0}', got '{1}'.", originalCanonicalPath, preflightPath));
+                        }
+
+                        string preflightSha256 = this.ComputeSha256Internal();
+                        if (!string.Equals(preflightSha256, this._expectedSha256, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight SHA-256 digest mismatch: expected '{0}', computed '{1}'.", this._expectedSha256, preflightSha256));
+                        }
+
+                        this.AssertFileInformation(expectedSize);
+                        string preflightPathEnd = GetCanonicalDosPath(this._handle);
+                        if (!string.Equals(preflightPathEnd, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(string.Format("Preflight canonical path changed during hash: expected '{0}', got '{1}'.", originalCanonicalPath, preflightPathEnd));
+                        }
+
+                        NativeMethods.FILE_STANDARD_INFO preStandard = this.QueryStandardInfo(expectedSize);
+                        if (preStandard.DeletePending != 0)
+                        {
+                            throw new InvalidOperationException("Preflight check failed: file already has deletion pending.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        this._mutationUncertain = true;
+                        this._acquisitionValidated = false;
+                        string observedPreflight = null;
+                        try { observedPreflight = GetCanonicalDosPath(this._handle); } catch { }
+                        throw new SourceFileLeaseDispositionException(
+                            string.Format("Preflight verification of source file failed through owned handle: {0}", ex.Message),
+                            ex,
+                            this,
+                            0,
+                            false,
+                            observedPreflight
+                        );
+                    }
+
+                    // Prepare conservative zeroed 4-byte buffer: first byte 1 (DeleteFile = true), remaining 0
+                    const int allocSize = 4;
+                    IntPtr buffer = Marshal.AllocHGlobal(allocSize);
+                    bool nativeSuccess = false;
+                    int nativeError = 0;
+                    try
+                    {
+                        for (int i = 0; i < allocSize; i++)
+                        {
+                            Marshal.WriteByte(buffer, i, 0);
+                        }
+                        Marshal.WriteByte(buffer, 0, 1);
+
+                        // Mark mutation uncertain IMMEDIATELY before mutating native call
+                        this._mutationUncertain = true;
+
+                        // Mutating native call: exactly ONE call per attempt
+                        nativeSuccess = NativeMethods.SetFileInformationByHandle(
+                            this._handle,
+                            NativeMethods.FileDispositionInfo,
+                            buffer,
+                            (uint)allocSize
+                        );
+                        if (!nativeSuccess)
+                        {
+                            nativeError = Marshal.GetLastWin32Error();
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                    }
+
+                    if (!nativeSuccess)
+                    {
+                        // Native call failed. Prove original file state through OWN handle before clearing uncertainty.
+                        bool reversionVerified = false;
+                        Exception reversionException = null;
+                        try
+                        {
+                            string currentPath = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(currentPath, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: canonical path changed from '{0}' to '{1}'.", originalCanonicalPath, currentPath));
+                            }
+
+                            this.AssertFileInformation(expectedSize);
+
+                            NativeMethods.FILE_STANDARD_INFO revStandard1 = this.QueryStandardInfo(expectedSize);
+                            if (revStandard1.DeletePending != 0)
+                            {
+                                throw new InvalidOperationException("Reversion proof failed: DeletePending is non-zero after failed disposition.");
+                            }
+
+                            string currentSha256 = this.ComputeSha256Internal();
+                            if (!string.Equals(currentSha256, this._expectedSha256, StringComparison.Ordinal))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: SHA-256 changed from '{0}' to '{1}'.", this._expectedSha256, currentSha256));
+                            }
+
+                            this.AssertFileInformation(expectedSize);
+
+                            string currentPathAfter = GetCanonicalDosPath(this._handle);
+                            if (!string.Equals(currentPathAfter, originalCanonicalPath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                throw new InvalidOperationException(string.Format("Reversion proof failed: canonical path changed after hash from '{0}' to '{1}'.", originalCanonicalPath, currentPathAfter));
+                            }
+
+                            NativeMethods.FILE_STANDARD_INFO revStandard2 = this.QueryStandardInfo(expectedSize);
+                            if (revStandard2.DeletePending != 0)
+                            {
+                                throw new InvalidOperationException("Reversion proof failed: DeletePending changed after hash verification.");
+                            }
+
+                            reversionVerified = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            reversionException = ex;
+                        }
+
+                        if (reversionVerified)
+                        {
+                            this._mutationUncertain = false;
+                            throw new IOException(
+                                string.Format("Native deletion disposition failed with Win32 error {0}; source file verified unchanged at '{1}'.", nativeError, originalCanonicalPath),
+                                new Win32Exception(nativeError)
+                            );
+                        }
+                        else
+                        {
+                            this._acquisitionValidated = false;
+                            this._mutationUncertain = true;
+                            this._isDeletionPending = false;
+
+                            string observed = null;
+                            try { observed = GetCanonicalDosPath(this._handle); } catch { }
+
+                            List<Exception> innerExceptions = new List<Exception>();
+                            innerExceptions.Add(new Win32Exception(nativeError));
+                            if (reversionException != null)
+                            {
+                                innerExceptions.Add(reversionException);
+                            }
+                            AggregateException combinedInner = new AggregateException(
+                                string.Format("Native deletion disposition failed with Win32 error {0}, and post-failure verification of original file state also failed.", nativeError),
+                                innerExceptions
+                            );
+
+                            throw new SourceFileLeaseDispositionException(
+                                string.Format("Native deletion disposition failed with Win32 error {0}, and post-failure verification of original file state also failed: {1}", nativeError, reversionException != null ? reversionException.Message : "unknown"),
+                                combinedInner,
+                                this,
+                                nativeError,
+                                true,
+                                observed
+                            );
+                        }
+                    }
+                    else
+                    {
+                        // Native call reported TRUE. Verify through SAME handle: FileStandardInfo.DeletePending TRUE + identity/metadata/bindings.
+                        // NO canonical path / hash after delete if OS doesn't guarantee query will work.
+                        Exception postVerifyException = null;
+                        try
+                        {
+                            NativeMethods.FILE_STANDARD_INFO postStandard = this.QueryStandardInfo(expectedSize);
+                            if (postStandard.DeletePending != 1)
+                            {
+                                throw new InvalidOperationException(string.Format("Post-disposition check failed: DeletePending expected 1, got {0}.", postStandard.DeletePending));
+                            }
+
+                            this.AssertFileInformation(expectedSize);
+
+                            // On success: mark known pending, close-only mode, clear uncertainty
+                            this._isDeletionPending = true;
+                            this._acquisitionValidated = false;
+                            this._mutationUncertain = false;
+                            return;
+                        }
+                        catch (Exception ex)
+                        {
+                            postVerifyException = ex;
+                        }
+
+                        // Post-verification failed despite native TRUE
+                        this._mutationUncertain = true;
+                        this._acquisitionValidated = false;
+                        throw new SourceFileLeaseDispositionException(
+                            string.Format("Native deletion disposition reported success, but post-disposition verification failed: {0}", postVerifyException != null ? postVerifyException.Message : "unknown"),
+                            postVerifyException,
+                            this,
+                            0,
+                            true,
+                            null
+                        );
+                    }
+                }
+                finally
+                {
+                    this._ioInProgress = false;
+                }
+            }
+        }
+
+        /// <summary>
         /// Idempotently closes the owned native file handle. Returns true if successfully closed or already closed.
         /// If CloseHandle fails, returns false with nativeError and preserves handle ownership for caller retention.
         /// Available at all times, including on leases with failed acquisition.
@@ -1238,6 +1566,47 @@ namespace PosDesktop.Updates.Native
                     throw new InvalidOperationException(string.Format("File index changed: expected {0}, got {1}.", this._identity.FileIndex, fileIndex));
                 }
             }
+        }
+
+        private NativeMethods.FILE_STANDARD_INFO QueryStandardInfo(long expectedSize)
+        {
+            if (Marshal.SizeOf(typeof(NativeMethods.FILE_STANDARD_INFO)) != 24)
+            {
+                throw new InvalidOperationException("FILE_STANDARD_INFO struct size mismatch: expected 24 bytes.");
+            }
+
+            NativeMethods.FILE_STANDARD_INFO info;
+            if (!NativeMethods.GetFileInformationByHandleEx(
+                this._handle,
+                NativeMethods.FileStandardInfo,
+                out info,
+                (uint)Marshal.SizeOf(typeof(NativeMethods.FILE_STANDARD_INFO))))
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new IOException(string.Format("GetFileInformationByHandleEx(FileStandardInfo) failed: Win32 error {0}.", err), new Win32Exception(err));
+            }
+
+            if (info.DeletePending != 0 && info.DeletePending != 1)
+            {
+                throw new InvalidOperationException(string.Format("GetFileInformationByHandleEx returned invalid DeletePending value: {0}.", info.DeletePending));
+            }
+
+            if (info.Directory != 0)
+            {
+                throw new InvalidOperationException("Target path is a directory, not a regular file.");
+            }
+
+            if (info.NumberOfLinks != 1)
+            {
+                throw new InvalidOperationException(string.Format("Target file link count must be exactly 1, got {0}.", info.NumberOfLinks));
+            }
+
+            if (info.EndOfFile != expectedSize)
+            {
+                throw new InvalidOperationException(string.Format("File EndOfFile size mismatch: expected {0} bytes, actual {1} bytes.", expectedSize, info.EndOfFile));
+            }
+
+            return info;
         }
 
         private string ComputeSha256Internal()
@@ -1585,7 +1954,28 @@ namespace PosDesktop.Updates.Native
             internal const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
             internal const uint FILE_BEGIN = 0;
             internal const uint VOLUME_NAME_DOS = 0x0;
+            internal const int FileStandardInfo = 1;
             internal const int FileRenameInfo = 3;
+            internal const int FileDispositionInfo = 4;
+
+            [StructLayout(LayoutKind.Explicit, Size = 24)]
+            internal struct FILE_STANDARD_INFO
+            {
+                [FieldOffset(0)]
+                public long AllocationSize;
+
+                [FieldOffset(8)]
+                public long EndOfFile;
+
+                [FieldOffset(16)]
+                public uint NumberOfLinks;
+
+                [FieldOffset(20)]
+                public byte DeletePending;
+
+                [FieldOffset(21)]
+                public byte Directory;
+            }
 
             [StructLayout(LayoutKind.Sequential)]
             internal struct FILETIME
@@ -1632,6 +2022,15 @@ namespace PosDesktop.Updates.Native
             internal static extern bool GetFileInformationByHandle(
                 IntPtr hFile,
                 out BY_HANDLE_FILE_INFORMATION lpFileInformation
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool GetFileInformationByHandleEx(
+                IntPtr hFile,
+                int FileInformationClass,
+                out FILE_STANDARD_INFO lpFileInformation,
+                uint dwBufferSize
             );
 
             [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
