@@ -721,7 +721,7 @@ $cases[] = [
 
 // Negative Case 2: Pin Checked Before Fields (Wrong Pin + Missing Root Key => pin reason)
 $descBadPinMissingKey = $descStable;
-unset($descBadPinMissingKey['format']); // Missing mandatory root key
+unset($descBadPinMissingKey['package']); // Missing descriptor key after the minimum authenticated envelope gates
 [$rawBadPinMissingKey, $sigBadPinMissingKey, $shaBadPinMissingKey] = $encodeAndSign($descBadPinMissingKey, $ephemeralKey);
 
 $cases[] = [
