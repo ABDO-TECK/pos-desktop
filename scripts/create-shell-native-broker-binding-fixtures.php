@@ -2011,7 +2011,6 @@ $cases[] = [
 // Negative Case 39: Invalid Metadata Migration Name
 $descBadMetaMigration = $descStable;
 $descBadMetaMigration['data_compatibility']['metadata_migration'] = '060_unauthorized_migration.sql';
-$descBadMetaMigration['source_data_compatibility']['metadata_migration'] = '060_unauthorized_migration.sql';
 [$rawBadMetaMigration, $sigBadMetaMigration, $shaBadMetaMigration] = $encodeAndSign($descBadMetaMigration, $ephemeralKey);
 
 $cases[] = [
