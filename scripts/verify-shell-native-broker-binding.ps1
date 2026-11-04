@@ -391,7 +391,7 @@ foreach ($case in $fixture.cases) {
             Assert-Condition ($result.Envelope.CanApply -eq $false) "Case '$caseId' envelope immutability verified"
 
             if ($group -eq 'limit_boundary') {
-                [Console]::WriteLine("  [LIMIT PROOF] $caseId: pure binding accepted with CanApply=$($result.CanApply) (honest layer boundary)")
+                [Console]::WriteLine("  [LIMIT PROOF] ${caseId}: pure binding accepted with CanApply=$($result.CanApply) (honest layer boundary)")
             }
         }
         else {
