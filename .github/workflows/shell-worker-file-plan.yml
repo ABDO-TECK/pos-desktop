@@ -1,0 +1,55 @@
+name: Shell Worker File Plan Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Services/ShellDeltaWorkerFilePlanService.php'
+      - 'scripts/verify-shell-worker-file-plan.php'
+      - '.github/workflows/shell-worker-file-plan.yml'
+      - 'backend/Services/ShellDeltaManifestService.php'
+      - 'backend/Services/ProductInventoryService.php'
+      - 'backend/Services/ProductInventory.php'
+      - 'backend/Services/UpdateChannelPolicy.php'
+      - 'backend/Services/UpdateDataCompatibilityService.php'
+      - 'backend/Services/ManifestSignatureService.php'
+      - 'backend/composer.json'
+      - 'backend/composer.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-worker-file-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-file-plan:
+    name: Verify Shell Worker File Plan Slice (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: zip, openssl, mbstring, gd
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          composer install --no-dev --prefer-dist --no-progress --no-interaction --no-scripts --working-dir=backend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run shell worker file plan verification
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-worker-file-plan.php
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
