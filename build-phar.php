@@ -646,6 +646,7 @@ $requiredPharEntries = [
     'Native/SourceFileLease.cs',
     'Native/OwnedChildProcess.cs',
     'Native/NativeBrokerManifestVerifier.cs',
+    'Native/NativeBrokerContextBinding.cs',
 ];
 foreach ($requiredPharEntries as $requiredEntry) {
     if (!isset($builtPhar[$requiredEntry])) {

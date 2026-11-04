@@ -1,0 +1,66 @@
+name: Shell Native Broker Binding Verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Native/NativeBrokerManifestVerifier.cs'
+      - 'backend/Native/NativeBrokerContextBinding.cs'
+      - 'backend/Services/ManifestSignatureService.php'
+      - 'backend/Services/ProductInventoryService.php'
+      - 'backend/Services/ShellDeltaManifestService.php'
+      - 'backend/Services/UpdateChannelPolicy.php'
+      - 'backend/Services/UpdateDataCompatibilityService.php'
+      - 'backend/composer.json'
+      - 'backend/composer.lock'
+      - 'scripts/create-shell-native-broker-binding-fixtures.php'
+      - 'scripts/verify-shell-native-broker-binding.ps1'
+      - '.github/workflows/shell-native-broker-binding.yml'
+      - '.github/workflows/shell-worker-inspection.yml'
+      - 'build-phar.php'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-broker-binding-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-broker-binding:
+    name: Verify Native Broker Context Binding (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: openssl, mbstring
+
+      - name: Install backend dependencies
+        shell: pwsh
+        run: |
+          composer install --no-dev --prefer-dist --no-progress --no-interaction --no-scripts --working-dir=backend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate native broker binding fixtures
+        shell: pwsh
+        run: |
+          $fixturePath = Join-Path $env:RUNNER_TEMP "native-broker-binding-fixtures.json"
+          php scripts/create-shell-native-broker-binding-fixtures.php --output "$fixturePath"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run native broker context binding tests
+        shell: pwsh
+        run: |
+          $fixturePath = Join-Path $env:RUNNER_TEMP "native-broker-binding-fixtures.json"
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-broker-binding.ps1 -FixtureFile "$fixturePath"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
