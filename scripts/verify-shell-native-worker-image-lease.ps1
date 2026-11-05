@@ -493,7 +493,7 @@ function Safe-StartOwnedProcess {
 }
 
 function Safe-AcquireImageLease {
-    param([string]$path, [long]$size, [string]$sha256)
+    param([string]$path, [long]$size, [object]$sha256)
     $lease = $null
     try {
         $lease = [PosDesktop.Updates.Native.WorkerImageReadLease]::Acquire($path, $size, $sha256)
