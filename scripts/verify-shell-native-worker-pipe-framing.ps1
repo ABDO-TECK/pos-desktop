@@ -1237,7 +1237,7 @@ try {
     # 2a: Full 64 MiB (67,108,864 bytes) frame roundtrip
     $ep2 = Safe-CreateEndpoint -Tag "Ep2a"
     $r2a = [System.IO.Path]::Combine($labDir, "ready-2a.txt")
-    $args2a = @("echo_large", $ep2.EndpointName, $r2a)
+    $args2a = @("echo", $ep2.EndpointName, $r2a, "1")
     $w2a = Safe-StartOwnedProcess -exePath $fixtureExePath -ArgumentVector $args2a -cwd $labDir -env (Build-SparseEnvironment) -tag "Worker2a"
     $w2aRec = $script:TrackedOwners[-1]
     $ep2Rec = $script:TrackedEndpoints[-1]
