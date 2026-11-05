@@ -1216,9 +1216,9 @@ try {
         $data = [System.Text.Encoding]::UTF8.GetBytes("FRAME_SEQ_$seq")
         $ep1c.WriteFrame($data, 5000)
         $fr = $ep1c.ReadFrame(5000)
-        if ($fr.Sequence -ne [ulong]$seq) { throw "Suite 1c: Expected sequence $seq, got $($fr.Sequence)" }
-        if ($ep1c.NextTxSequence -ne [ulong]($seq + 1)) { throw "Suite 1c: NextTxSequence mismatch." }
-        if ($ep1c.ExpectedRxSequence -ne [ulong]($seq + 1)) { throw "Suite 1c: ExpectedRxSequence mismatch." }
+        if ($fr.Sequence -ne [System.UInt64]$seq) { throw "Suite 1c: Expected sequence $seq, got $($fr.Sequence)" }
+        if ($ep1c.NextTxSequence -ne [System.UInt64]($seq + 1)) { throw "Suite 1c: NextTxSequence mismatch." }
+        if ($ep1c.ExpectedRxSequence -ne [System.UInt64]($seq + 1)) { throw "Suite 1c: ExpectedRxSequence mismatch." }
     }
 
     if ($ep1c.State -ne [PosDesktop.Updates.Native.PipeEndpointState]::Bound) { throw "Suite 1c: Endpoint state must remain Bound." }
@@ -1575,7 +1575,7 @@ try {
     for ($i = 1; $i -le 1024; $i++) {
         $ep4c.WriteFrame($pingData, 5000)
         $fr = $ep4c.ReadFrame(5000)
-        if ($fr.Sequence -ne [ulong]$i) {
+        if ($fr.Sequence -ne [System.UInt64]$i) {
             throw "Suite 4c: Sequence mismatch at roundtrip ${i}: expected $i, got $($fr.Sequence)"
         }
     }
