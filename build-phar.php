@@ -648,6 +648,7 @@ $requiredPharEntries = [
     'Native/OwnedWorkerPipeEndpoint.cs',
     'Native/NativeBrokerManifestVerifier.cs',
     'Native/NativeBrokerContextBinding.cs',
+    'Native/WorkerImageReadLease.cs',
     'Services/ShellDeltaWorkerFilePlanService.php',
     'Services/ShellDeltaWorkerPipeTransportService.php',
 ];

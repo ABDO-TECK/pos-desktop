@@ -28,6 +28,7 @@ on:
       - 'backend/Native/OwnedWorkerPipeEndpoint.cs'
       - 'backend/Native/NativeBrokerManifestVerifier.cs'
       - 'backend/Native/NativeBrokerContextBinding.cs'
+      - 'backend/Native/WorkerImageReadLease.cs'
 
 permissions:
   contents: read
