@@ -1052,19 +1052,19 @@ try {
 
     $caughtT0 = $null
     try { [void]$ep4c.ConnectOwnedWorker($s4IdleWorker, 0) } catch { $caughtT0 = $_ }
-    if ($caughtT0 -eq $null -or $caughtT0.Exception -isnot [System.ArgumentOutOfRangeException]) {
+    if ($caughtT0 -eq $null -or $caughtT0.Exception.GetBaseException() -isnot [System.ArgumentOutOfRangeException]) {
         throw "Suite 4c: Timeout 0 must throw ArgumentOutOfRangeException."
     }
 
     $caughtTNeg = $null
     try { [void]$ep4c.ConnectOwnedWorker($s4IdleWorker, -50) } catch { $caughtTNeg = $_ }
-    if ($caughtTNeg -eq $null -or $caughtTNeg.Exception -isnot [System.ArgumentOutOfRangeException]) {
+    if ($caughtTNeg -eq $null -or $caughtTNeg.Exception.GetBaseException() -isnot [System.ArgumentOutOfRangeException]) {
         throw "Suite 4c: Negative timeout must throw ArgumentOutOfRangeException."
     }
 
     $caughtTHigh = $null
     try { [void]$ep4c.ConnectOwnedWorker($s4IdleWorker, 30001) } catch { $caughtTHigh = $_ }
-    if ($caughtTHigh -eq $null -or $caughtTHigh.Exception -isnot [System.ArgumentOutOfRangeException]) {
+    if ($caughtTHigh -eq $null -or $caughtTHigh.Exception.GetBaseException() -isnot [System.ArgumentOutOfRangeException]) {
         throw "Suite 4c: Timeout > 30000 must throw ArgumentOutOfRangeException."
     }
     [void](Close-TrackedEndpoint $ep4cRec 5000)
