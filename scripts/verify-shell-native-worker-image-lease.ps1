@@ -496,7 +496,13 @@ function Safe-AcquireImageLease {
     param([string]$path, [long]$size, [object]$sha256)
     $lease = $null
     try {
-        $lease = [PosDesktop.Updates.Native.WorkerImageReadLease]::Acquire($path, $size, $sha256)
+        if ($null -eq $sha256) {
+            # PowerShell .NET method binder coerces $null to empty string ("") for string parameters.
+            # Call test helper shim to pass an actual typed C# null.
+            $lease = [PosDesktop.Updates.Native.Testing.NativeLinkHelper]::AcquireWithNullSha($path, $size)
+        } else {
+            $lease = [PosDesktop.Updates.Native.WorkerImageReadLease]::Acquire($path, $size, $sha256)
+        }
         if ($lease -eq $null) {
             throw "Acquire returned null lease for path: $path"
         }
@@ -687,6 +693,11 @@ namespace PosDesktop.Updates.Native.Testing
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool CloseHandle(IntPtr hObject);
+
+        public static PosDesktop.Updates.Native.WorkerImageReadLease AcquireWithNullSha(string path, long size)
+        {
+            return PosDesktop.Updates.Native.WorkerImageReadLease.Acquire(path, size, null);
+        }
     }
 }
 "@
