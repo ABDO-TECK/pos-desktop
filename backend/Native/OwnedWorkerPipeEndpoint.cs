@@ -15,8 +15,8 @@
 //    and NOT an anti-replay token. Subsequent frame operations must re-verify root/peer state.
 // 4. This primitive provides NO database quiescence proof, NO apply proof, NO schema proof,
 //    and NO file transaction proof. CanApply is unconditionally false.
-// 5. No frame transport, payload read/write, plan file I/O, PHP invocation, snapshot/image
-//    signature verification, or bootstrap is performed by this class.
+// 5. Bounded opaque byte frame transport only. No PHP worker launch, JSON parsing, plan validation,
+//    plan file I/O, snapshot/image signature verification, or bootstrap is performed by this class.
 // 6. Security boundaries:
 //    - lpSecurityAttributes is NULL (default creator DACL). This does NOT isolate against
 //      arbitrary attackers running with the same user privileges or elevated administrator tokens.
@@ -50,6 +50,7 @@ namespace PosDesktop.Updates.Native
     using System.Collections.Generic;
     using System.ComponentModel;
     using System.Diagnostics;
+    using System.IO;
     using System.Runtime.InteropServices;
     using System.Threading;
 
@@ -86,6 +87,70 @@ namespace PosDesktop.Updates.Native
         public long CreationFileTimeTicks { get { return this._creationFileTimeTicks; } }
         public bool CanApply { get { return false; } }
         public DateTime ObservedAtUtc { get { return this._observedAtUtc; } }
+    }
+
+    /// <summary>
+    /// Immutable call-time frame received over an owned worker named pipe.
+    /// Represents bounded opaque byte payload; CanApply is unconditionally false.
+    /// Caller host must authenticate code and payloads independently.
+    /// </summary>
+    public sealed class OwnedWorkerPipeFrame
+    {
+        private readonly ulong _sequence;
+        private readonly byte[] _payload;
+
+        internal OwnedWorkerPipeFrame(ulong sequence, byte[] payload)
+        {
+            if (payload == null)
+            {
+                throw new ArgumentNullException("payload");
+            }
+            this._sequence = sequence;
+            this._payload = new byte[payload.Length];
+            Buffer.BlockCopy(payload, 0, this._payload, 0, payload.Length);
+        }
+
+        public ulong Sequence
+        {
+            get { return this._sequence; }
+        }
+
+        public int PayloadLength
+        {
+            get { return this._payload.Length; }
+        }
+
+        public bool CanApply
+        {
+            get { return false; }
+        }
+
+        public byte[] CopyPayload()
+        {
+            byte[] copy = new byte[this._payload.Length];
+            Buffer.BlockCopy(this._payload, 0, copy, 0, this._payload.Length);
+            return copy;
+        }
+
+        public byte[] ReadRange(int offset, int count)
+        {
+            if (offset < 0 || offset > this._payload.Length)
+            {
+                throw new ArgumentOutOfRangeException("offset", "Offset must be non-negative and within payload bounds.");
+            }
+            if (count < 0 || count > 1048576)
+            {
+                throw new ArgumentOutOfRangeException("count", "Count must be between 0 and 1048576 bytes (1 MiB).");
+            }
+            if (count > (this._payload.Length - offset))
+            {
+                throw new ArgumentOutOfRangeException("count", "Offset and count exceed payload length.");
+            }
+
+            byte[] slice = new byte[count];
+            Buffer.BlockCopy(this._payload, offset, slice, 0, count);
+            return slice;
+        }
     }
 
     /// <summary>
@@ -131,8 +196,19 @@ namespace PosDesktop.Updates.Native
             Pending = 0,
             CompletedSuccess = 1,
             Aborted = 2,
-            UncertainError = 3
+            CompletedFailure = 3,
+            UncertainError = 4
         }
+
+        private enum PendingOperation
+        {
+            None = 0,
+            Connect = 1,
+            Read = 2,
+            Write = 3
+        }
+
+        private const int TransferBufferSize = 65536; // 64 KiB native transfer buffer
 
         private readonly object _syncLock;
         private readonly string _endpointName;
@@ -141,11 +217,16 @@ namespace PosDesktop.Updates.Native
         private IntPtr _hEvent;
         private IntPtr _pOverlapped;
         private IntPtr _hHeap;
+        private IntPtr _pTransferBuffer;
 
-        private bool _connectPending;
+        private PendingOperation _pendingOperation;
+        private volatile bool _isKnownQueued;
         private bool _isBusy;
         private PipeEndpointState _state;
         private OwnedChildProcess _boundWorker;
+
+        private ulong _nextTxSequence;
+        private ulong _expectedRxSequence;
 
         private List<Exception> _cleanupFailures;
         private AggregateException _lastCleanupFailure;
@@ -158,10 +239,14 @@ namespace PosDesktop.Updates.Native
             this._hEvent = IntPtr.Zero;
             this._pOverlapped = IntPtr.Zero;
             this._hHeap = IntPtr.Zero;
-            this._connectPending = false;
+            this._pTransferBuffer = IntPtr.Zero;
+            this._pendingOperation = PendingOperation.None;
+            this._isKnownQueued = false;
             this._isBusy = false;
             this._state = PipeEndpointState.Created;
             this._boundWorker = null;
+            this._nextTxSequence = 1UL;
+            this._expectedRxSequence = 1UL;
             this._cleanupFailures = null;
             this._lastCleanupFailure = null;
         }
@@ -214,6 +299,61 @@ namespace PosDesktop.Updates.Native
                 lock (this._syncLock)
                 {
                     return this._boundWorker;
+                }
+            }
+        }
+
+        public bool IsIoPending
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._pendingOperation != PendingOperation.None;
+                }
+            }
+        }
+
+        public bool IsKnownQueued
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._isKnownQueued;
+                }
+            }
+        }
+
+        public bool IsBusy
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._isBusy;
+                }
+            }
+        }
+
+        public ulong NextTxSequence
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._nextTxSequence;
+                }
+            }
+        }
+
+        public ulong ExpectedRxSequence
+        {
+            get
+            {
+                lock (this._syncLock)
+                {
+                    return this._expectedRxSequence;
                 }
             }
         }
@@ -329,6 +469,14 @@ namespace PosDesktop.Updates.Native
                 }
                 endpoint._pOverlapped = pOverlapped;
 
+                IntPtr pTransferBuffer = NativeMethods.HeapAlloc(hHeap, NativeMethods.HEAP_ZERO_MEMORY, (UIntPtr)TransferBufferSize);
+                if (pTransferBuffer == IntPtr.Zero)
+                {
+                    int err = NativeMethods.ERROR_NOT_ENOUGH_MEMORY; // 8 (application fallback: HeapAlloc does not set Win32 last-error)
+                    throw new Win32Exception(err, "HeapAlloc returned NULL allocating 64KiB transfer buffer (application fallback error 8: ERROR_NOT_ENOUGH_MEMORY; Win32 last-error not set by HeapAlloc).");
+                }
+                endpoint._pTransferBuffer = pTransferBuffer;
+
                 IntPtr hEvent = NativeMethods.CreateEvent(IntPtr.Zero, true, false, null);
                 if (hEvent == IntPtr.Zero)
                 {
@@ -382,6 +530,13 @@ namespace PosDesktop.Updates.Native
 
         private OverlappedCompletionStatus QueryOverlappedStatus(out int win32Error)
         {
+            uint bytesTransferred;
+            return this.QueryOverlappedStatus(out bytesTransferred, out win32Error);
+        }
+
+        private OverlappedCompletionStatus QueryOverlappedStatus(out uint bytesTransferred, out int win32Error)
+        {
+            bytesTransferred = 0;
             win32Error = 0;
             if (this._hPipe == IntPtr.Zero || this._pOverlapped == IntPtr.Zero)
             {
@@ -389,7 +544,6 @@ namespace PosDesktop.Updates.Native
                 return OverlappedCompletionStatus.UncertainError;
             }
 
-            uint bytesTransferred;
             bool gor = NativeMethods.GetOverlappedResult(this._hPipe, this._pOverlapped, out bytesTransferred, false);
             if (gor)
             {
@@ -407,6 +561,24 @@ namespace PosDesktop.Updates.Native
                 return OverlappedCompletionStatus.Aborted;
             }
 
+            // For READ/WRITE ONLY: specific documented terminal pipe error codes (109 BROKEN_PIPE, 232 NO_DATA, 233 PIPE_NOT_CONNECTED)
+            // REQUIRE it was known to be queued in kernel (Native FALSE 997), operation is Read or Write,
+            // and OVERLAPPED.Internal != STATUS_PENDING (0x103). Terminal pipe error codes then prove that
+            // the queued data I/O is no longer pending in the kernel.
+            if (this._isKnownQueued && (this._pendingOperation == PendingOperation.Read || this._pendingOperation == PendingOperation.Write))
+            {
+                if (err == NativeMethods.ERROR_BROKEN_PIPE ||
+                    err == NativeMethods.ERROR_NO_DATA ||
+                    err == NativeMethods.ERROR_PIPE_NOT_CONNECTED)
+                {
+                    long internalStatus = Marshal.ReadIntPtr(this._pOverlapped, 0).ToInt64();
+                    if (internalStatus != NativeMethods.STATUS_PENDING)
+                    {
+                        return OverlappedCompletionStatus.CompletedFailure;
+                    }
+                }
+            }
+
             // Unknown or invalid-handle errors: conservative, NOT completion proof!
             return OverlappedCompletionStatus.UncertainError;
         }
@@ -414,7 +586,7 @@ namespace PosDesktop.Updates.Native
         private bool TryDrainOrCancelPendingIo(long timeoutMilliseconds, out int drainError)
         {
             drainError = 0;
-            if (!this._connectPending)
+            if (this._pendingOperation == PendingOperation.None)
             {
                 return true;
             }
@@ -429,9 +601,12 @@ namespace PosDesktop.Updates.Native
             // Step 1: Check if already completed before issuing CancelIoEx
             int queryErr;
             OverlappedCompletionStatus initialSt = this.QueryOverlappedStatus(out queryErr);
-            if (initialSt == OverlappedCompletionStatus.CompletedSuccess || initialSt == OverlappedCompletionStatus.Aborted)
+            if (initialSt == OverlappedCompletionStatus.CompletedSuccess ||
+                initialSt == OverlappedCompletionStatus.Aborted ||
+                initialSt == OverlappedCompletionStatus.CompletedFailure)
             {
-                this._connectPending = false;
+                this._pendingOperation = PendingOperation.None;
+                this._isKnownQueued = false;
                 drainError = 0;
                 return true;
             }
@@ -456,9 +631,12 @@ namespace PosDesktop.Updates.Native
 
             // Step 3: Check completion immediately (nonblocking poll)
             OverlappedCompletionStatus postCancelSt = this.QueryOverlappedStatus(out queryErr);
-            if (postCancelSt == OverlappedCompletionStatus.CompletedSuccess || postCancelSt == OverlappedCompletionStatus.Aborted)
+            if (postCancelSt == OverlappedCompletionStatus.CompletedSuccess ||
+                postCancelSt == OverlappedCompletionStatus.Aborted ||
+                postCancelSt == OverlappedCompletionStatus.CompletedFailure)
             {
-                this._connectPending = false;
+                this._pendingOperation = PendingOperation.None;
+                this._isKnownQueued = false;
                 drainError = 0;
                 return true;
             }
@@ -490,9 +668,12 @@ namespace PosDesktop.Updates.Native
                 if (waitRes == NativeMethods.WAIT_OBJECT_0)
                 {
                     OverlappedCompletionStatus st = this.QueryOverlappedStatus(out queryErr);
-                    if (st == OverlappedCompletionStatus.CompletedSuccess || st == OverlappedCompletionStatus.Aborted)
+                    if (st == OverlappedCompletionStatus.CompletedSuccess ||
+                        st == OverlappedCompletionStatus.Aborted ||
+                        st == OverlappedCompletionStatus.CompletedFailure)
                     {
-                        this._connectPending = false;
+                        this._pendingOperation = PendingOperation.None;
+                        this._isKnownQueued = false;
                         drainError = 0;
                         return true;
                     }
@@ -521,9 +702,12 @@ namespace PosDesktop.Updates.Native
 
             // Final post-loop check
             OverlappedCompletionStatus finalSt = this.QueryOverlappedStatus(out queryErr);
-            if (finalSt == OverlappedCompletionStatus.CompletedSuccess || finalSt == OverlappedCompletionStatus.Aborted)
+            if (finalSt == OverlappedCompletionStatus.CompletedSuccess ||
+                finalSt == OverlappedCompletionStatus.Aborted ||
+                finalSt == OverlappedCompletionStatus.CompletedFailure)
             {
-                this._connectPending = false;
+                this._pendingOperation = PendingOperation.None;
+                this._isKnownQueued = false;
                 drainError = 0;
                 return true;
             }
@@ -537,6 +721,70 @@ namespace PosDesktop.Updates.Native
 
             drainError = cancelErr != 0 && cancelErr != NativeMethods.ERROR_NOT_FOUND ? cancelErr : NativeMethods.ERROR_IO_INCOMPLETE;
             return false;
+        }
+
+        private Exception ProcessOperationFailure(string operationName, Exception ex)
+        {
+            lock (this._syncLock)
+            {
+                this._state = PipeEndpointState.FaultedCloseOnly;
+            }
+
+            Exception cleanupEx = null;
+            int drainErr = 0;
+            bool drained = false;
+
+            if (this._pendingOperation != PendingOperation.None)
+            {
+                try
+                {
+                    drained = this.TryDrainOrCancelPendingIo(5000L, out drainErr);
+                }
+                catch (Exception cEx)
+                {
+                    cleanupEx = cEx;
+                    drained = false;
+                    this.RecordCleanupFailure(cEx);
+                }
+
+                if (!drained)
+                {
+                    Exception combined = ex;
+                    if (cleanupEx != null || this.LastCleanupFailure != null)
+                    {
+                        List<Exception> inners = new List<Exception>();
+                        inners.Add(ex);
+                        if (cleanupEx != null) inners.Add(cleanupEx);
+                        if (this.LastCleanupFailure != null && this.LastCleanupFailure != cleanupEx)
+                        {
+                            inners.Add(this.LastCleanupFailure);
+                        }
+                        combined = new AggregateException(string.Format("{0} encountered an exception and overlapped I/O cancellation could not be proven complete.", operationName), inners.ToArray());
+                    }
+
+                    int finalErr = drainErr != 0 ? drainErr : NativeMethods.ERROR_IO_INCOMPLETE;
+                    return new OwnedWorkerPipeEndpointException(
+                        string.Format("{0} encountered an exception ({1}) and overlapped I/O cancellation could not be proven complete within 5000ms (drainError={2}). Retained endpoint must be recovered and closed.", operationName, ex.Message, finalErr),
+                        combined,
+                        this,
+                        finalErr
+                    );
+                }
+            }
+
+            if (cleanupEx != null || this.LastCleanupFailure != null)
+            {
+                List<Exception> inners = new List<Exception>();
+                inners.Add(ex);
+                if (cleanupEx != null) inners.Add(cleanupEx);
+                if (this.LastCleanupFailure != null && this.LastCleanupFailure != cleanupEx)
+                {
+                    inners.Add(this.LastCleanupFailure);
+                }
+                return new AggregateException(string.Format("{0} failed and recorded cleanup diagnostics.", operationName), inners.ToArray());
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -618,29 +866,34 @@ namespace PosDesktop.Updates.Native
                 bool connectedImmediately = false;
 
                 // Pre-mark potential pending BEFORE ConnectNamedPipe call so unexpected managed
-                // failure after kernel queue cannot leave _connectPending as false.
-                this._connectPending = true;
+                // failure after kernel queue cannot leave _pendingOperation as None.
+                this._pendingOperation = PendingOperation.Connect;
+                this._isKnownQueued = false;
 
                 bool connectCallSuccess = NativeMethods.ConnectNamedPipe(this._hPipe, this._pOverlapped);
                 int connectCallErr = Marshal.GetLastWin32Error();
 
                 if (connectCallSuccess)
                 {
-                    this._connectPending = false;
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
                     connectedImmediately = true;
                 }
                 else if (connectCallErr == NativeMethods.ERROR_PIPE_CONNECTED)
                 {
-                    this._connectPending = false;
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
                     connectedImmediately = true;
                 }
                 else if (connectCallErr == NativeMethods.ERROR_IO_PENDING)
                 {
-                    // Asynchronous I/O successfully queued; _connectPending remains true
+                    // Asynchronous I/O successfully queued; _isKnownQueued becomes true
+                    this._isKnownQueued = true;
                 }
                 else
                 {
-                    this._connectPending = false;
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
                     lock (this._syncLock)
                     {
                         this._state = PipeEndpointState.FaultedCloseOnly;
@@ -686,7 +939,8 @@ namespace PosDesktop.Updates.Native
                             if (st == OverlappedCompletionStatus.CompletedSuccess)
                             {
                                 ioCompletedSuccessfully = true;
-                                this._connectPending = false;
+                                this._pendingOperation = PendingOperation.None;
+                                this._isKnownQueued = false;
                                 break;
                             }
                             else if (st == OverlappedCompletionStatus.Pending)
@@ -695,7 +949,7 @@ namespace PosDesktop.Updates.Native
                             }
                             else
                             {
-                                // UncertainError or Aborted: NOT success! Do NOT clear _connectPending!
+                                // UncertainError or Aborted: NOT success! Do NOT clear _pendingOperation!
                                 failureReason = string.Format("GetOverlappedResult failed after event signal: Win32 error {0}.", qErr);
                                 failureError = qErr != 0 ? qErr : NativeMethods.ERROR_IO_INCOMPLETE;
                                 break;
@@ -788,65 +1042,11 @@ namespace PosDesktop.Updates.Native
             }
             catch (Exception ex)
             {
-                lock (this._syncLock)
+                Exception toThrow = this.ProcessOperationFailure("Connect", ex);
+                if (toThrow != null)
                 {
-                    this._state = PipeEndpointState.FaultedCloseOnly;
+                    throw toThrow;
                 }
-
-                Exception cleanupEx = null;
-                int drainErr = 0;
-                bool drained = false;
-
-                if (this._connectPending)
-                {
-                    try
-                    {
-                        drained = this.TryDrainOrCancelPendingIo(5000L, out drainErr);
-                    }
-                    catch (Exception cEx)
-                    {
-                        cleanupEx = cEx;
-                        drained = false;
-                        this.RecordCleanupFailure(cEx);
-                    }
-
-                    if (!drained)
-                    {
-                        Exception combined = ex;
-                        if (cleanupEx != null || this.LastCleanupFailure != null)
-                        {
-                            List<Exception> inners = new List<Exception>();
-                            inners.Add(ex);
-                            if (cleanupEx != null) inners.Add(cleanupEx);
-                            if (this.LastCleanupFailure != null && this.LastCleanupFailure != cleanupEx)
-                            {
-                                inners.Add(this.LastCleanupFailure);
-                            }
-                            combined = new AggregateException("Connect encountered an exception and overlapped I/O cancellation could not be proven complete.", inners.ToArray());
-                        }
-
-                        int finalErr = drainErr != 0 ? drainErr : NativeMethods.ERROR_IO_INCOMPLETE;
-                        throw new OwnedWorkerPipeEndpointException(
-                            string.Format("Connect encountered an exception ({0}) and overlapped I/O cancellation could not be proven complete within 5000ms (drainError={1}). Retained endpoint must be recovered and closed.", ex.Message, finalErr),
-                            combined,
-                            this,
-                            finalErr
-                        );
-                    }
-                }
-
-                if (cleanupEx != null || this.LastCleanupFailure != null)
-                {
-                    List<Exception> inners = new List<Exception>();
-                    inners.Add(ex);
-                    if (cleanupEx != null) inners.Add(cleanupEx);
-                    if (this.LastCleanupFailure != null && this.LastCleanupFailure != cleanupEx)
-                    {
-                        inners.Add(this.LastCleanupFailure);
-                    }
-                    throw new AggregateException("Connect failed and recorded cleanup diagnostics.", inners.ToArray());
-                }
-
                 throw;
             }
             finally
@@ -856,6 +1056,73 @@ namespace PosDesktop.Updates.Native
                     this._isBusy = false;
                 }
             }
+        }
+
+        private OwnedWorkerPeerObservation VerifyOwnedPeerCore(OwnedChildProcess bound)
+        {
+            if (bound == null || bound.IsClosed)
+            {
+                lock (this._syncLock)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw new InvalidOperationException("Bound worker root process is null or closed.");
+            }
+
+            ChildProcessObservation flankBefore = bound.Observe();
+            if (flankBefore.RootState != ChildRootState.Live || flankBefore.IsClosed)
+            {
+                lock (this._syncLock)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw new InvalidOperationException(
+                    string.Format("Bound worker root process is not Live before verification query (RootState={0}, IsClosed={1}).",
+                        flankBefore.RootState, flankBefore.IsClosed)
+                );
+            }
+
+            uint clientPid;
+            if (!NativeMethods.GetNamedPipeClientProcessId(this._hPipe, out clientPid))
+            {
+                int err = Marshal.GetLastWin32Error();
+                lock (this._syncLock)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw new Win32Exception(err, string.Format("GetNamedPipeClientProcessId failed during re-verification: Win32 error {0}.", err));
+            }
+
+            ChildProcessObservation flankAfter = bound.Observe();
+            if (flankAfter.RootState != ChildRootState.Live || flankAfter.IsClosed)
+            {
+                lock (this._syncLock)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw new InvalidOperationException(
+                    string.Format("Bound worker root process is not Live after verification query (RootState={0}, IsClosed={1}).",
+                        flankAfter.RootState, flankAfter.IsClosed)
+                );
+            }
+
+            if ((int)clientPid != bound.ProcessId)
+            {
+                lock (this._syncLock)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw new InvalidOperationException(
+                    string.Format("Re-verification failed: kernel client PID {0} does not match bound root PID {1}.",
+                        clientPid, bound.ProcessId)
+                );
+            }
+
+            return new OwnedWorkerPeerObservation(
+                (int)clientPid,
+                bound.CreationFileTimeTicks,
+                DateTime.UtcNow
+            );
         }
 
         /// <summary>
@@ -889,75 +1156,603 @@ namespace PosDesktop.Updates.Native
 
             try
             {
-                if (bound.IsClosed)
-                {
-                    lock (this._syncLock)
-                    {
-                        this._state = PipeEndpointState.FaultedCloseOnly;
-                    }
-                    throw new InvalidOperationException("Bound worker root process is closed.");
-                }
-
-                ChildProcessObservation flankBefore = bound.Observe();
-                if (flankBefore.RootState != ChildRootState.Live || flankBefore.IsClosed)
-                {
-                    lock (this._syncLock)
-                    {
-                        this._state = PipeEndpointState.FaultedCloseOnly;
-                    }
-                    throw new InvalidOperationException(
-                        string.Format("Bound worker root process is not Live before verification query (RootState={0}, IsClosed={1}).",
-                            flankBefore.RootState, flankBefore.IsClosed)
-                    );
-                }
-
-                uint clientPid;
-                if (!NativeMethods.GetNamedPipeClientProcessId(this._hPipe, out clientPid))
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    lock (this._syncLock)
-                    {
-                        this._state = PipeEndpointState.FaultedCloseOnly;
-                    }
-                    throw new Win32Exception(err, string.Format("GetNamedPipeClientProcessId failed during re-verification: Win32 error {0}.", err));
-                }
-
-                ChildProcessObservation flankAfter = bound.Observe();
-                if (flankAfter.RootState != ChildRootState.Live || flankAfter.IsClosed)
-                {
-                    lock (this._syncLock)
-                    {
-                        this._state = PipeEndpointState.FaultedCloseOnly;
-                    }
-                    throw new InvalidOperationException(
-                        string.Format("Bound worker root process is not Live after verification query (RootState={0}, IsClosed={1}).",
-                            flankAfter.RootState, flankAfter.IsClosed)
-                    );
-                }
-
-                if ((int)clientPid != bound.ProcessId)
-                {
-                    lock (this._syncLock)
-                    {
-                        this._state = PipeEndpointState.FaultedCloseOnly;
-                    }
-                    throw new InvalidOperationException(
-                        string.Format("Re-verification failed: kernel client PID {0} does not match bound root PID {1}.",
-                            clientPid, bound.ProcessId)
-                    );
-                }
-
-                return new OwnedWorkerPeerObservation(
-                    (int)clientPid,
-                    bound.CreationFileTimeTicks,
-                    DateTime.UtcNow
-                );
+                return this.VerifyOwnedPeerCore(bound);
             }
             catch
             {
                 lock (this._syncLock)
                 {
                     this._state = PipeEndpointState.FaultedCloseOnly;
+                }
+                throw;
+            }
+            finally
+            {
+                lock (this._syncLock)
+                {
+                    this._isBusy = false;
+                }
+            }
+        }
+
+        private void WriteExactBytes(byte[] buffer, int offset, int count, Stopwatch sw, long totalTimeoutMs, OwnedChildProcess bound)
+        {
+            int writtenSoFar = 0;
+            while (writtenSoFar < count)
+            {
+                long remaining = totalTimeoutMs - sw.ElapsedMilliseconds;
+                if (remaining <= 0L)
+                {
+                    throw new TimeoutException(string.Format("Pipe write timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                ChildProcessObservation obs = bound.Observe();
+                if (obs.RootState != ChildRootState.Live || obs.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is no longer Live during write (RootState={0}, IsClosed={1}).",
+                            obs.RootState, obs.IsClosed)
+                    );
+                }
+
+                int chunkSize = Math.Min(count - writtenSoFar, TransferBufferSize);
+
+                if (!NativeMethods.ResetEvent(this._hEvent))
+                {
+                    int rErr = Marshal.GetLastWin32Error();
+                    if (rErr == 0) rErr = NativeMethods.ERROR_INVALID_HANDLE;
+                    throw new Win32Exception(rErr, string.Format("ResetEvent failed before WriteFile: Win32 error {0}.", rErr));
+                }
+
+                for (int i = 0; i < 32; i++)
+                {
+                    Marshal.WriteByte(this._pOverlapped, i, 0);
+                }
+                Marshal.WriteIntPtr(this._pOverlapped, 24, this._hEvent);
+
+                Marshal.Copy(buffer, offset + writtenSoFar, this._pTransferBuffer, chunkSize);
+
+                this._pendingOperation = PendingOperation.Write;
+                this._isKnownQueued = false;
+
+                bool immediateSuccess = NativeMethods.WriteFile(this._hPipe, this._pTransferBuffer, (uint)chunkSize, IntPtr.Zero, this._pOverlapped);
+                int err = Marshal.GetLastWin32Error();
+
+                if (immediateSuccess)
+                {
+                    uint bytesWritten;
+                    int qErr;
+                    OverlappedCompletionStatus st = this.QueryOverlappedStatus(out bytesWritten, out qErr);
+                    if (st != OverlappedCompletionStatus.CompletedSuccess)
+                    {
+                        throw new Win32Exception(qErr != 0 ? qErr : NativeMethods.ERROR_GEN_FAILURE, string.Format("WriteFile immediate completion query failed: Win32 error {0}.", qErr));
+                    }
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
+
+                    if (bytesWritten == 0)
+                    {
+                        throw new IOException("WriteFile returned immediate success with 0 bytes transferred.");
+                    }
+                    if (bytesWritten > (uint)chunkSize)
+                    {
+                        throw new InvalidOperationException(string.Format("WriteFile transferred {0} bytes, exceeding requested chunk {1}.", bytesWritten, chunkSize));
+                    }
+                    writtenSoFar += (int)bytesWritten;
+                    continue;
+                }
+                else if (err == NativeMethods.ERROR_IO_PENDING)
+                {
+                    this._isKnownQueued = true;
+                    while (true)
+                    {
+                        remaining = totalTimeoutMs - sw.ElapsedMilliseconds;
+                        if (remaining <= 0L)
+                        {
+                            throw new TimeoutException(string.Format("Pipe write timed out after {0}ms waiting for completion.", totalTimeoutMs));
+                        }
+
+                        obs = bound.Observe();
+                        if (obs.RootState != ChildRootState.Live || obs.IsClosed)
+                        {
+                            throw new InvalidOperationException(
+                                string.Format("Bound worker root process is no longer Live during write wait (RootState={0}, IsClosed={1}).",
+                                    obs.RootState, obs.IsClosed)
+                            );
+                        }
+
+                        uint sliceMs = (uint)Math.Min(200L, Math.Max(1L, remaining));
+                        uint waitRes = NativeMethods.WaitForSingleObject(this._hEvent, sliceMs);
+
+                        if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                        {
+                            uint numTransferred;
+                            int qErr;
+                            OverlappedCompletionStatus st = this.QueryOverlappedStatus(out numTransferred, out qErr);
+                            if (st == OverlappedCompletionStatus.CompletedSuccess)
+                            {
+                                this._pendingOperation = PendingOperation.None;
+                                this._isKnownQueued = false;
+
+                                if (numTransferred == 0)
+                                {
+                                    throw new IOException("Write completed with 0 bytes transferred.");
+                                }
+                                if (numTransferred > (uint)chunkSize)
+                                {
+                                    throw new InvalidOperationException(string.Format("Write completed with {0} bytes transferred, exceeding chunk {1}.", numTransferred, chunkSize));
+                                }
+                                writtenSoFar += (int)numTransferred;
+                                break;
+                            }
+                            else if (st == OverlappedCompletionStatus.Pending)
+                            {
+                                continue;
+                            }
+                            else if (st == OverlappedCompletionStatus.CompletedFailure)
+                            {
+                                this._pendingOperation = PendingOperation.None;
+                                this._isKnownQueued = false;
+                                throw new Win32Exception(qErr != 0 ? qErr : NativeMethods.ERROR_BROKEN_PIPE, string.Format("WriteFile completed with pipe error {0}.", qErr));
+                            }
+                            else
+                            {
+                                throw new Win32Exception(qErr != 0 ? qErr : NativeMethods.ERROR_GEN_FAILURE, string.Format("WriteFile GetOverlappedResult returned uncertain error {0}.", qErr));
+                            }
+                        }
+                        else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            int waitErr = Marshal.GetLastWin32Error();
+                            if (waitErr == 0) waitErr = NativeMethods.ERROR_INVALID_HANDLE;
+                            throw new Win32Exception(waitErr, string.Format("WaitForSingleObject failed during write: Win32 error {0}.", waitErr));
+                        }
+                    }
+                }
+                else
+                {
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
+                    if (err == NativeMethods.ERROR_BROKEN_PIPE || err == NativeMethods.ERROR_PIPE_NOT_CONNECTED || err == NativeMethods.ERROR_NO_DATA)
+                    {
+                        throw new EndOfStreamException(string.Format("Pipe broken or disconnected during WriteFile: Win32 error {0}.", err));
+                    }
+                    throw new Win32Exception(err, string.Format("WriteFile failed immediately: Win32 error {0}.", err));
+                }
+            }
+        }
+
+        private void ReadExactBytes(byte[] buffer, int offset, int count, Stopwatch sw, long totalTimeoutMs, OwnedChildProcess bound)
+        {
+            int readSoFar = 0;
+            while (readSoFar < count)
+            {
+                long remaining = totalTimeoutMs - sw.ElapsedMilliseconds;
+                if (remaining <= 0L)
+                {
+                    throw new TimeoutException(string.Format("Pipe read timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                ChildProcessObservation obs = bound.Observe();
+                if (obs.RootState != ChildRootState.Live || obs.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is no longer Live during read (RootState={0}, IsClosed={1}).",
+                            obs.RootState, obs.IsClosed)
+                    );
+                }
+
+                int toRead = Math.Min(count - readSoFar, TransferBufferSize);
+
+                if (!NativeMethods.ResetEvent(this._hEvent))
+                {
+                    int rErr = Marshal.GetLastWin32Error();
+                    if (rErr == 0) rErr = NativeMethods.ERROR_INVALID_HANDLE;
+                    throw new Win32Exception(rErr, string.Format("ResetEvent failed before ReadFile: Win32 error {0}.", rErr));
+                }
+
+                for (int i = 0; i < 32; i++)
+                {
+                    Marshal.WriteByte(this._pOverlapped, i, 0);
+                }
+                Marshal.WriteIntPtr(this._pOverlapped, 24, this._hEvent);
+
+                this._pendingOperation = PendingOperation.Read;
+                this._isKnownQueued = false;
+
+                bool immediateSuccess = NativeMethods.ReadFile(this._hPipe, this._pTransferBuffer, (uint)toRead, IntPtr.Zero, this._pOverlapped);
+                int err = Marshal.GetLastWin32Error();
+
+                if (immediateSuccess)
+                {
+                    uint bytesRead;
+                    int qErr;
+                    OverlappedCompletionStatus st = this.QueryOverlappedStatus(out bytesRead, out qErr);
+                    if (st != OverlappedCompletionStatus.CompletedSuccess)
+                    {
+                        throw new Win32Exception(qErr != 0 ? qErr : NativeMethods.ERROR_GEN_FAILURE, string.Format("ReadFile immediate completion query failed: Win32 error {0}.", qErr));
+                    }
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
+
+                    if (bytesRead == 0)
+                    {
+                        throw new EndOfStreamException("ReadFile returned 0 bytes (pipe client disconnected or EOF).");
+                    }
+                    if (bytesRead > (uint)toRead)
+                    {
+                        throw new InvalidOperationException(string.Format("ReadFile transferred {0} bytes, exceeding requested chunk {1}.", bytesRead, toRead));
+                    }
+                    Marshal.Copy(this._pTransferBuffer, buffer, offset + readSoFar, (int)bytesRead);
+                    readSoFar += (int)bytesRead;
+                    continue;
+                }
+                else if (err == NativeMethods.ERROR_IO_PENDING)
+                {
+                    this._isKnownQueued = true;
+                    while (true)
+                    {
+                        remaining = totalTimeoutMs - sw.ElapsedMilliseconds;
+                        if (remaining <= 0L)
+                        {
+                            throw new TimeoutException(string.Format("Pipe read timed out after {0}ms waiting for completion.", totalTimeoutMs));
+                        }
+
+                        obs = bound.Observe();
+                        if (obs.RootState != ChildRootState.Live || obs.IsClosed)
+                        {
+                            throw new InvalidOperationException(
+                                string.Format("Bound worker root process is no longer Live during read wait (RootState={0}, IsClosed={1}).",
+                                    obs.RootState, obs.IsClosed)
+                            );
+                        }
+
+                        uint sliceMs = (uint)Math.Min(200L, Math.Max(1L, remaining));
+                        uint waitRes = NativeMethods.WaitForSingleObject(this._hEvent, sliceMs);
+
+                        if (waitRes == NativeMethods.WAIT_OBJECT_0)
+                        {
+                            uint numTransferred;
+                            int qErr;
+                            OverlappedCompletionStatus st = this.QueryOverlappedStatus(out numTransferred, out qErr);
+                            if (st == OverlappedCompletionStatus.CompletedSuccess)
+                            {
+                                this._pendingOperation = PendingOperation.None;
+                                this._isKnownQueued = false;
+
+                                if (numTransferred == 0)
+                                {
+                                    throw new EndOfStreamException("Read completed with 0 bytes transferred (pipe client disconnected or EOF).");
+                                }
+                                if (numTransferred > (uint)toRead)
+                                {
+                                    throw new InvalidOperationException(string.Format("Read completed with {0} bytes transferred, exceeding chunk {1}.", numTransferred, toRead));
+                                }
+                                Marshal.Copy(this._pTransferBuffer, buffer, offset + readSoFar, (int)numTransferred);
+                                readSoFar += (int)numTransferred;
+                                break;
+                            }
+                            else if (st == OverlappedCompletionStatus.Pending)
+                            {
+                                continue;
+                            }
+                            else if (st == OverlappedCompletionStatus.CompletedFailure)
+                            {
+                                this._pendingOperation = PendingOperation.None;
+                                this._isKnownQueued = false;
+                                throw new EndOfStreamException(string.Format("ReadFile completed with pipe error {0} (broken pipe or client closed).", qErr));
+                            }
+                            else
+                            {
+                                throw new Win32Exception(qErr != 0 ? qErr : NativeMethods.ERROR_GEN_FAILURE, string.Format("ReadFile GetOverlappedResult returned uncertain error {0}.", qErr));
+                            }
+                        }
+                        else if (waitRes == NativeMethods.WAIT_TIMEOUT)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            int waitErr = Marshal.GetLastWin32Error();
+                            if (waitErr == 0) waitErr = NativeMethods.ERROR_INVALID_HANDLE;
+                            throw new Win32Exception(waitErr, string.Format("WaitForSingleObject failed during read: Win32 error {0}.", waitErr));
+                        }
+                    }
+                }
+                else
+                {
+                    this._pendingOperation = PendingOperation.None;
+                    this._isKnownQueued = false;
+                    if (err == NativeMethods.ERROR_BROKEN_PIPE || err == NativeMethods.ERROR_PIPE_NOT_CONNECTED || err == NativeMethods.ERROR_NO_DATA)
+                    {
+                        throw new EndOfStreamException(string.Format("Pipe broken or disconnected during ReadFile: Win32 error {0}.", err));
+                    }
+                    throw new Win32Exception(err, string.Format("ReadFile failed immediately: Win32 error {0}.", err));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Writes an opaque bounded payload frame over the bound owned worker pipe.
+        /// Transmits a 16-byte fixed framing header (magic ZWP1, LE payload length, LE sequence)
+        /// followed by payload bytes, chunked in 64 KiB transfer blocks.
+        /// Re-verifies peer root identity and enforces single stopwatch deadline.
+        /// Sends a private clone snapshot of the payload. Caller concurrent mutation of their own
+        /// array during the clone call is the caller's responsibility; no atomic concurrent-clone guarantee is claimed.
+        /// </summary>
+        public void WriteFrame(byte[] payload, int timeoutMilliseconds)
+        {
+            if (payload == null)
+            {
+                throw new ArgumentNullException("payload");
+            }
+            if (payload.Length < 1 || payload.Length > 67108864)
+            {
+                throw new ArgumentOutOfRangeException("payload", "Payload length must be between 1 byte and 67108864 bytes (64 MiB).");
+            }
+            if (timeoutMilliseconds < 1 || timeoutMilliseconds > 30000)
+            {
+                throw new ArgumentOutOfRangeException("timeoutMilliseconds", "Timeout must be between 1 and 30000 ms.");
+            }
+
+            // Start ONE stopwatch BEFORE initial peer check, copy, or header work
+            Stopwatch sw = Stopwatch.StartNew();
+            long totalTimeoutMs = (long)timeoutMilliseconds;
+
+            ulong seq;
+            OwnedChildProcess bound;
+            lock (this._syncLock)
+            {
+                if (this._isBusy)
+                {
+                    throw new InvalidOperationException("Pipe endpoint is busy with another operation.");
+                }
+                if (this._state != PipeEndpointState.Bound || this._boundWorker == null)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Cannot write frame: endpoint is not in Bound state (State={0}, HasBoundWorker={1}).",
+                            this._state, this._boundWorker != null)
+                    );
+                }
+                if (this._hPipe == IntPtr.Zero || this._pTransferBuffer == IntPtr.Zero)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                    throw new InvalidOperationException("Pipe handle or transfer buffer is invalid.");
+                }
+                if (this._nextTxSequence > 1024UL)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                    throw new InvalidOperationException("Frame limit of 1024 frames per direction per session reached. Pipe endpoint faulted.");
+                }
+
+                seq = this._nextTxSequence;
+                bound = this._boundWorker;
+                this._isBusy = true;
+            }
+
+            try
+            {
+                // Send private clone so caller array mutation cannot corrupt pipe stream
+                byte[] privatePayload = new byte[payload.Length];
+                Buffer.BlockCopy(payload, 0, privatePayload, 0, payload.Length);
+
+                byte[] header = new byte[16];
+                header[0] = 0x5A; // 'Z'
+                header[1] = 0x57; // 'W'
+                header[2] = 0x50; // 'P'
+                header[3] = 0x31; // '1'
+
+                uint payloadLen = (uint)privatePayload.Length;
+                header[4] = (byte)(payloadLen & 0xFF);
+                header[5] = (byte)((payloadLen >> 8) & 0xFF);
+                header[6] = (byte)((payloadLen >> 16) & 0xFF);
+                header[7] = (byte)((payloadLen >> 24) & 0xFF);
+
+                header[8] = (byte)(seq & 0xFF);
+                header[9] = (byte)((seq >> 8) & 0xFF);
+                header[10] = (byte)((seq >> 16) & 0xFF);
+                header[11] = (byte)((seq >> 24) & 0xFF);
+                header[12] = (byte)((seq >> 32) & 0xFF);
+                header[13] = (byte)((seq >> 40) & 0xFF);
+                header[14] = (byte)((seq >> 48) & 0xFF);
+                header[15] = (byte)((seq >> 56) & 0xFF);
+
+                this.VerifyOwnedPeerCore(bound);
+
+                this.WriteExactBytes(header, 0, 16, sw, totalTimeoutMs, bound);
+                this.WriteExactBytes(privatePayload, 0, privatePayload.Length, sw, totalTimeoutMs, bound);
+
+                // Before increment/return: recheck deadline, VerifyOwnedPeerCore flanked by Root LIVE, recheck deadline again
+                if (sw.ElapsedMilliseconds >= totalTimeoutMs)
+                {
+                    throw new TimeoutException(string.Format("Pipe write timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                ChildProcessObservation flankBefore = bound.Observe();
+                if (flankBefore.RootState != ChildRootState.Live || flankBefore.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is not Live before final write verification query (RootState={0}, IsClosed={1}).",
+                            flankBefore.RootState, flankBefore.IsClosed)
+                    );
+                }
+
+                this.VerifyOwnedPeerCore(bound);
+
+                ChildProcessObservation flankAfter = bound.Observe();
+                if (flankAfter.RootState != ChildRootState.Live || flankAfter.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is not Live after final write verification query (RootState={0}, IsClosed={1}).",
+                            flankAfter.RootState, flankAfter.IsClosed)
+                    );
+                }
+
+                if (sw.ElapsedMilliseconds >= totalTimeoutMs)
+                {
+                    throw new TimeoutException(string.Format("Pipe write timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                lock (this._syncLock)
+                {
+                    this._nextTxSequence++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Exception toThrow = this.ProcessOperationFailure("WriteFrame", ex);
+                if (toThrow != null)
+                {
+                    throw toThrow;
+                }
+                throw;
+            }
+            finally
+            {
+                lock (this._syncLock)
+                {
+                    this._isBusy = false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reads an opaque bounded payload frame over the bound owned worker pipe.
+        /// Receives and validates 16-byte fixed framing header (magic ZWP1, LE payload length, LE sequence),
+        /// receives exact payload bytes chunked via 64 KiB transfer buffer, and returns an immutable frame.
+        /// CanApply is unconditionally false on the returned frame.
+        /// </summary>
+        public OwnedWorkerPipeFrame ReadFrame(int timeoutMilliseconds)
+        {
+            if (timeoutMilliseconds < 1 || timeoutMilliseconds > 30000)
+            {
+                throw new ArgumentOutOfRangeException("timeoutMilliseconds", "Timeout must be between 1 and 30000 ms.");
+            }
+
+            // Start ONE stopwatch BEFORE initial peer check or read work
+            Stopwatch sw = Stopwatch.StartNew();
+            long totalTimeoutMs = (long)timeoutMilliseconds;
+
+            ulong expectedSeq;
+            OwnedChildProcess bound;
+            lock (this._syncLock)
+            {
+                if (this._isBusy)
+                {
+                    throw new InvalidOperationException("Pipe endpoint is busy with another operation.");
+                }
+                if (this._state != PipeEndpointState.Bound || this._boundWorker == null)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Cannot read frame: endpoint is not in Bound state (State={0}, HasBoundWorker={1}).",
+                            this._state, this._boundWorker != null)
+                    );
+                }
+                if (this._hPipe == IntPtr.Zero || this._pTransferBuffer == IntPtr.Zero)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                    throw new InvalidOperationException("Pipe handle or transfer buffer is invalid.");
+                }
+                if (this._expectedRxSequence > 1024UL)
+                {
+                    this._state = PipeEndpointState.FaultedCloseOnly;
+                    throw new InvalidOperationException("Frame limit of 1024 frames per direction per session reached. Pipe endpoint faulted.");
+                }
+
+                expectedSeq = this._expectedRxSequence;
+                bound = this._boundWorker;
+                this._isBusy = true;
+            }
+
+            try
+            {
+                this.VerifyOwnedPeerCore(bound);
+
+                byte[] header = new byte[16];
+                this.ReadExactBytes(header, 0, 16, sw, totalTimeoutMs, bound);
+
+                if (header[0] != 0x5A || header[1] != 0x57 || header[2] != 0x50 || header[3] != 0x31)
+                {
+                    throw new InvalidDataException("Invalid frame header magic bytes (expected ZWP1).");
+                }
+
+                uint payloadLen = (uint)header[4] |
+                                 ((uint)header[5] << 8) |
+                                 ((uint)header[6] << 16) |
+                                 ((uint)header[7] << 24);
+
+                if (payloadLen < 1 || payloadLen > 67108864)
+                {
+                    throw new InvalidDataException(string.Format("Invalid frame payload length {0} bytes (must be between 1 and 67108864 bytes).", payloadLen));
+                }
+
+                ulong seq = (ulong)header[8] |
+                           ((ulong)header[9] << 8) |
+                           ((ulong)header[10] << 16) |
+                           ((ulong)header[11] << 24) |
+                           ((ulong)header[12] << 32) |
+                           ((ulong)header[13] << 40) |
+                           ((ulong)header[14] << 48) |
+                           ((ulong)header[15] << 56);
+
+                if (seq != expectedSeq)
+                {
+                    throw new InvalidDataException(string.Format("Invalid frame sequence. Expected {0}, got {1}.", expectedSeq, seq));
+                }
+
+                byte[] payload = new byte[payloadLen];
+                this.ReadExactBytes(payload, 0, (int)payloadLen, sw, totalTimeoutMs, bound);
+
+                // Construct frozen frame BEFORE final checks (so copy cost is included in deadline)
+                OwnedWorkerPipeFrame frame = new OwnedWorkerPipeFrame(seq, payload);
+
+                // Before increment/return: recheck deadline, VerifyOwnedPeerCore flanked by Root LIVE, recheck deadline again
+                if (sw.ElapsedMilliseconds >= totalTimeoutMs)
+                {
+                    throw new TimeoutException(string.Format("Pipe read timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                ChildProcessObservation flankBefore = bound.Observe();
+                if (flankBefore.RootState != ChildRootState.Live || flankBefore.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is not Live before final read verification query (RootState={0}, IsClosed={1}).",
+                            flankBefore.RootState, flankBefore.IsClosed)
+                    );
+                }
+
+                this.VerifyOwnedPeerCore(bound);
+
+                ChildProcessObservation flankAfter = bound.Observe();
+                if (flankAfter.RootState != ChildRootState.Live || flankAfter.IsClosed)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Bound worker root process is not Live after final read verification query (RootState={0}, IsClosed={1}).",
+                            flankAfter.RootState, flankAfter.IsClosed)
+                    );
+                }
+
+                if (sw.ElapsedMilliseconds >= totalTimeoutMs)
+                {
+                    throw new TimeoutException(string.Format("Pipe read timed out after {0}ms.", totalTimeoutMs));
+                }
+
+                lock (this._syncLock)
+                {
+                    this._expectedRxSequence++;
+                }
+
+                return frame;
+            }
+            catch (Exception ex)
+            {
+                Exception toThrow = this.ProcessOperationFailure("ReadFrame", ex);
+                if (toThrow != null)
+                {
+                    throw toThrow;
                 }
                 throw;
             }
@@ -994,7 +1789,8 @@ namespace PosDesktop.Updates.Native
                 if (this._state == PipeEndpointState.Closed &&
                     this._hPipe == IntPtr.Zero &&
                     this._hEvent == IntPtr.Zero &&
-                    this._pOverlapped == IntPtr.Zero)
+                    this._pOverlapped == IntPtr.Zero &&
+                    this._pTransferBuffer == IntPtr.Zero)
                 {
                     return true;
                 }
@@ -1004,7 +1800,7 @@ namespace PosDesktop.Updates.Native
 
             try
             {
-                if (this._connectPending)
+                if (this._pendingOperation != PendingOperation.None)
                 {
                     if (this._hPipe == IntPtr.Zero || this._pOverlapped == IntPtr.Zero || this._hEvent == IntPtr.Zero)
                     {
@@ -1114,9 +1910,32 @@ namespace PosDesktop.Updates.Native
                     }
                 }
 
+                // Independent Resource 4: _pTransferBuffer
+                if (this._pTransferBuffer != IntPtr.Zero && this._hHeap != IntPtr.Zero)
+                {
+                    try
+                    {
+                        if (NativeMethods.HeapFree(this._hHeap, 0, this._pTransferBuffer))
+                        {
+                            this._pTransferBuffer = IntPtr.Zero;
+                        }
+                        else
+                        {
+                            int err = NativeMethods.ERROR_INVALID_PARAMETER; // 87 (application fallback: HeapFree does not set Win32 last-error)
+                            if (firstCloseError == 0) firstCloseError = err;
+                            this.RecordCleanupFailure(new Win32Exception(err, "HeapFree returned FALSE deallocating transfer buffer (application fallback error 87: ERROR_INVALID_PARAMETER; Win32 last-error not set by HeapFree)."));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (firstCloseError == 0) firstCloseError = NativeMethods.ERROR_INVALID_PARAMETER;
+                        this.RecordCleanupFailure(ex);
+                    }
+                }
+
                 lock (this._syncLock)
                 {
-                    if (this._hPipe == IntPtr.Zero && this._hEvent == IntPtr.Zero && this._pOverlapped == IntPtr.Zero)
+                    if (this._hPipe == IntPtr.Zero && this._hEvent == IntPtr.Zero && this._pOverlapped == IntPtr.Zero && this._pTransferBuffer == IntPtr.Zero)
                     {
                         this._state = PipeEndpointState.Closed;
 
@@ -1229,10 +2048,15 @@ namespace PosDesktop.Updates.Native
             public const int ERROR_INVALID_PARAMETER = 87;
             public const int ERROR_BUSY = 170;
             public const int ERROR_PIPE_CONNECTED = 535;
+            public const int ERROR_BROKEN_PIPE = 109;
+            public const int ERROR_NO_DATA = 232;
+            public const int ERROR_PIPE_NOT_CONNECTED = 233;
             public const int ERROR_OPERATION_ABORTED = 995;
             public const int ERROR_IO_INCOMPLETE = 996;
             public const int ERROR_IO_PENDING = 997;
             public const int ERROR_NOT_FOUND = 1168;
+
+            public const long STATUS_PENDING = 0x00000103L;
 
             [DllImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", CharSet = CharSet.Unicode, SetLastError = true)]
             public static extern IntPtr CreateNamedPipe(
@@ -1261,6 +2085,26 @@ namespace PosDesktop.Updates.Native
                 IntPtr lpOverlapped,
                 out uint lpNumberOfBytesTransferred,
                 [MarshalAs(UnmanagedType.Bool)] bool bWait
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            public static extern bool ReadFile(
+                IntPtr hFile,
+                IntPtr lpBuffer,
+                uint nNumberOfBytesToRead,
+                IntPtr lpNumberOfBytesRead,
+                IntPtr lpOverlapped
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            public static extern bool WriteFile(
+                IntPtr hFile,
+                IntPtr lpBuffer,
+                uint nNumberOfBytesToWrite,
+                IntPtr lpNumberOfBytesWritten,
+                IntPtr lpOverlapped
             );
 
             [DllImport("kernel32.dll", SetLastError = true)]
