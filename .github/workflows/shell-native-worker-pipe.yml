@@ -1,0 +1,35 @@
+name: Shell Native Worker Pipe Verifier
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+    paths:
+      - 'backend/Native/OwnedWorkerPipeEndpoint.cs'
+      - 'backend/Native/OwnedChildProcess.cs'
+      - 'scripts/verify-shell-native-worker-pipe.ps1'
+      - '.github/workflows/shell-native-worker-pipe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-native-worker-pipe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-native-worker-pipe:
+    name: Verify Win32 Native Worker Pipe Connection Primitive (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Win32 native worker pipe verifier
+        shell: pwsh
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-shell-native-worker-pipe.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

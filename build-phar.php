@@ -645,6 +645,7 @@ $requiredPharEntries = [
     'certs/cacert.pem',
     'Native/SourceFileLease.cs',
     'Native/OwnedChildProcess.cs',
+    'Native/OwnedWorkerPipeEndpoint.cs',
     'Native/NativeBrokerManifestVerifier.cs',
     'Native/NativeBrokerContextBinding.cs',
     'Services/ShellDeltaWorkerFilePlanService.php',

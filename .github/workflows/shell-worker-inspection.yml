@@ -24,6 +24,7 @@ on:
       - 'backend/composer.lock'
       - 'backend/Native/SourceFileLease.cs'
       - 'backend/Native/OwnedChildProcess.cs'
+      - 'backend/Native/OwnedWorkerPipeEndpoint.cs'
       - 'backend/Native/NativeBrokerManifestVerifier.cs'
       - 'backend/Native/NativeBrokerContextBinding.cs'
 
