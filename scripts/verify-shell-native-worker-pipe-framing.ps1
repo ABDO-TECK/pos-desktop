@@ -966,7 +966,7 @@ namespace PosDesktop.Updates.Native.FramingFixture
                         string barrierPath = args.Length >= 4 ? args[3] : null;
                         if (!string.IsNullOrEmpty(barrierPath))
                         {
-                            File.WriteAllText(barrierPath, "CONNECTED\r\n", Encoding.UTF8);
+                            File.WriteAllText(barrierPath, "READY\r\nCONNECTED\r\n", Encoding.UTF8);
                         }
 
                         Thread.Sleep(15000);
