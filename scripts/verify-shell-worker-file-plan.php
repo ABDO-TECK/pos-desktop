@@ -309,17 +309,17 @@ try {
     // Shared common POS Desktop.exe (retained)
     $sharedExeHash = hash('sha256', 'SHARED_POS_DESKTOP_EXE');
     $stableExtraSrc = [
-        'resources/app/common.dat' => ['sha256' => hash('sha256', 'COMMON'), 'size' => 100],
-        'resources/app/code.js' => ['sha256' => hash('sha256', 'CODE_OLD'), 'size' => 500],
-        'resources/app/padding.bin' => ['sha256' => hash('sha256', 'PADDING_SHARED'), 'size' => 200],
-        'resources/app/old_module.js' => ['sha256' => hash('sha256', 'OLD'), 'size' => 300],
+        'resources/app.asar.unpacked/frontend/dist/common.dat' => ['sha256' => hash('sha256', 'COMMON'), 'size' => 100],
+        'resources/app.asar.unpacked/frontend/dist/code.js' => ['sha256' => hash('sha256', 'CODE_OLD'), 'size' => 500],
+        'resources/app.asar.unpacked/frontend/dist/padding.bin' => ['sha256' => hash('sha256', 'PADDING_SHARED'), 'size' => 200],
+        'resources/app.asar.unpacked/frontend/dist/old_module.js' => ['sha256' => hash('sha256', 'OLD'), 'size' => 300],
         'resources/portable/mysql/share/mysql_system_tables.sql' => ['sha256' => hash('sha256', 'SQL_STATIC'), 'size' => 400],
     ];
     $stableExtraTgt = [
-        'resources/app/common.dat' => ['sha256' => hash('sha256', 'COMMON'), 'size' => 100], // retain
-        'resources/app/code.js' => ['sha256' => hash('sha256', 'CODE_NEW'), 'size' => 500],   // replace: different hash, same size
-        'resources/app/padding.bin' => ['sha256' => hash('sha256', 'PADDING_SHARED'), 'size' => 250], // replace: SAME hash, DIFFERENT size
-        'resources/app/new_module.js' => ['sha256' => hash('sha256', 'NEW'), 'size' => 600], // create
+        'resources/app.asar.unpacked/frontend/dist/common.dat' => ['sha256' => hash('sha256', 'COMMON'), 'size' => 100], // retain
+        'resources/app.asar.unpacked/frontend/dist/code.js' => ['sha256' => hash('sha256', 'CODE_NEW'), 'size' => 500],   // replace: different hash, same size
+        'resources/app.asar.unpacked/frontend/dist/padding.bin' => ['sha256' => hash('sha256', 'PADDING_SHARED'), 'size' => 250], // replace: SAME hash, DIFFERENT size
+        'resources/app.asar.unpacked/frontend/dist/new_module.js' => ['sha256' => hash('sha256', 'NEW'), 'size' => 600], // create
         'resources/portable/mysql/share/mysql_system_tables.sql' => ['sha256' => hash('sha256', 'SQL_STATIC'), 'size' => 400], // retain engine/sql
     ];
 
@@ -371,27 +371,27 @@ try {
     assertEqual($actionsByPath['POS Desktop.exe']['kind'], 'retain', "Unchanged POS Desktop.exe must be retained");
     assertTrue($actionsByPath['POS Desktop.exe']['source'] !== null && $actionsByPath['POS Desktop.exe']['target'] !== null, "Retain has source and target");
 
-    assertEqual($actionsByPath['resources/app/common.dat']['kind'], 'retain', "common.dat must be retain");
-    assertEqual($actionsByPath['resources/app/code.js']['kind'], 'replace', "code.js must be replace (different hash)");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/common.dat']['kind'], 'retain', "common.dat must be retain");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/code.js']['kind'], 'replace', "code.js must be replace (different hash)");
 
     // CRITICAL: Same hash, different size MUST be replace
-    assertEqual($actionsByPath['resources/app/padding.bin']['kind'], 'replace', "padding.bin must be replace (same hash different size)");
-    assertEqual($actionsByPath['resources/app/padding.bin']['source']['sha256'], $actionsByPath['resources/app/padding.bin']['target']['sha256'], "padding.bin hashes equal");
-    assertTrue($actionsByPath['resources/app/padding.bin']['source']['size'] !== $actionsByPath['resources/app/padding.bin']['target']['size'], "padding.bin sizes different");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/padding.bin']['kind'], 'replace', "padding.bin must be replace (same hash different size)");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/padding.bin']['source']['sha256'], $actionsByPath['resources/app.asar.unpacked/frontend/dist/padding.bin']['target']['sha256'], "padding.bin hashes equal");
+    assertTrue($actionsByPath['resources/app.asar.unpacked/frontend/dist/padding.bin']['source']['size'] !== $actionsByPath['resources/app.asar.unpacked/frontend/dist/padding.bin']['target']['size'], "padding.bin sizes different");
 
-    assertEqual($actionsByPath['resources/app/new_module.js']['kind'], 'create', "new_module.js must be create");
-    assertEqual($actionsByPath['resources/app/new_module.js']['source'], null, "create action source must be null");
-    assertTrue($actionsByPath['resources/app/new_module.js']['target'] !== null, "create action target must be present");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/new_module.js']['kind'], 'create', "new_module.js must be create");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/new_module.js']['source'], null, "create action source must be null");
+    assertTrue($actionsByPath['resources/app.asar.unpacked/frontend/dist/new_module.js']['target'] !== null, "create action target must be present");
 
-    assertEqual($actionsByPath['resources/app/old_module.js']['kind'], 'delete', "old_module.js must be delete");
-    assertTrue($actionsByPath['resources/app/old_module.js']['source'] !== null, "delete action source must be present");
-    assertEqual($actionsByPath['resources/app/old_module.js']['target'], null, "delete action target must be null");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/old_module.js']['kind'], 'delete', "old_module.js must be delete");
+    assertTrue($actionsByPath['resources/app.asar.unpacked/frontend/dist/old_module.js']['source'] !== null, "delete action source must be present");
+    assertEqual($actionsByPath['resources/app.asar.unpacked/frontend/dist/old_module.js']['target'], null, "delete action target must be null");
 
     assertEqual($actionsByPath['resources/portable/mysql/share/mysql_system_tables.sql']['kind'], 'retain', "mysql_system_tables.sql must be retain");
 
     // 1B. Beta Channel (Native version advancement not required: native 13.0.0 -> 13.0.0)
-    $srcInvBeta = createFakeInventory('12.1.0-beta.1', '13.0.0', ['resources/app/data.bin' => ['sha256' => hash('sha256', 'BETA_1'), 'size' => 100]]);
-    $tgtInvBeta = createFakeInventory('12.2.0-beta.2', '13.0.0', ['resources/app/data.bin' => ['sha256' => hash('sha256', 'BETA_2'), 'size' => 100]]);
+    $srcInvBeta = createFakeInventory('12.1.0-beta.1', '13.0.0', ['resources/app.asar.unpacked/frontend/dist/data.bin' => ['sha256' => hash('sha256', 'BETA_1'), 'size' => 100]]);
+    $tgtInvBeta = createFakeInventory('12.2.0-beta.2', '13.0.0', ['resources/app.asar.unpacked/frontend/dist/data.bin' => ['sha256' => hash('sha256', 'BETA_2'), 'size' => 100]]);
 
     $descBeta = createDescriptor($srcInvBeta, $tgtInvBeta, 'beta', $defaultDataCompat);
     [$rawBeta, $sigBeta] = signManifest($descBeta, $ephemeralKey);
@@ -752,47 +752,43 @@ try {
     );
 
     // 4.2 Traversal / Invalid path in inventory
-    $invInvalidPath = $srcInvStable;
-    $invInvalidPath['files']['resources/app/../escaped.txt'] = ['sha256' => hash('sha256', 'BAD'), 'size' => 100];
-    $descInvalidPath = createDescriptor($invInvalidPath, $tgtInvStable, 'stable', $defaultDataCompat);
+    $descInvalidPath = $descStable;
+    $descInvalidPath['source_inventory']['files']['resources/app.asar.unpacked/frontend/dist/../escaped.txt'] = ['sha256' => hash('sha256', 'BAD'), 'size' => 100];
     [$rawInvalidPath, $sigInvalidPath] = signManifest($descInvalidPath, $ephemeralKey);
-    $ctxInvalidPath = createContext($invInvalidPath, 'stable', $defaultDataCompat);
     assertThrows(
-        fn() => $filePlanService->build($rawInvalidPath, $sigInvalidPath, hash('sha256', $rawInvalidPath), $ctxInvalidPath, $tgtCtxStable),
+        fn() => $filePlanService->build($rawInvalidPath, $sigInvalidPath, hash('sha256', $rawInvalidPath), $srcCtxStable, $tgtCtxStable),
         'source_inventory_invalid',
         'Path with directory traversal in inventory must be rejected'
     );
 
     // 4.3 Cross-inventory case collision
     $invCaseSrc = $srcInvStable;
-    $invCaseSrc['files']['resources/app/sample.txt'] = ['sha256' => hash('sha256', 'SAMPLE1'), 'size' => 100];
+    $invCaseSrc['files']['resources/app.asar.unpacked/frontend/dist/sample.txt'] = ['sha256' => hash('sha256', 'SAMPLE1'), 'size' => 100];
     $invCaseTgt = $tgtInvStable;
-    $invCaseTgt['files']['resources/app/SAMPLE.TXT'] = ['sha256' => hash('sha256', 'SAMPLE2'), 'size' => 100];
+    $invCaseTgt['files']['resources/app.asar.unpacked/frontend/dist/SAMPLE.TXT'] = ['sha256' => hash('sha256', 'SAMPLE2'), 'size' => 100];
     $descCase = createDescriptor($invCaseSrc, $invCaseTgt, 'stable', $defaultDataCompat);
     [$rawCase, $sigCase] = signManifest($descCase, $ephemeralKey);
     $ctxCaseSrc = createContext($invCaseSrc, 'stable', $defaultDataCompat);
     $ctxCaseTgt = createContext($invCaseTgt, 'stable', $defaultDataCompat);
     assertThrows(
         fn() => $filePlanService->build($rawCase, $sigCase, hash('sha256', $rawCase), $ctxCaseSrc, $ctxCaseTgt),
-        'path_case_collision',
+        'case_collision',
         'Case collisions across inventories must be rejected'
     );
 
     // 4.4 Protected user-state data path (.env)
-    $invProtected = $srcInvStable;
-    $invProtected['files']['.env'] = ['sha256' => hash('sha256', 'SECRET'), 'size' => 50];
-    $descProtected = createDescriptor($invProtected, $tgtInvStable, 'stable', $defaultDataCompat);
+    $descProtected = $descStable;
+    $descProtected['source_inventory']['files']['.env'] = ['sha256' => hash('sha256', 'SECRET'), 'size' => 50];
     [$rawProtected, $sigProtected] = signManifest($descProtected, $ephemeralKey);
-    $ctxProtected = createContext($invProtected, 'stable', $defaultDataCompat);
     assertThrows(
-        fn() => $filePlanService->build($rawProtected, $sigProtected, hash('sha256', $rawProtected), $ctxProtected, $tgtCtxStable),
+        fn() => $filePlanService->build($rawProtected, $sigProtected, hash('sha256', $rawProtected), $srcCtxStable, $tgtCtxStable),
         'source_inventory_invalid',
         'Protected user-state file (.env) must be rejected'
     );
 
     // 4.5 Mismatched files payload diff
     $descBadDiff = $descStable;
-    $descBadDiff['files'][] = ['path' => 'resources/app/unaccounted.js', 'sha256' => hash('sha256', 'UN'), 'size' => 50];
+    $descBadDiff['files'][] = ['path' => 'resources/app.asar.unpacked/frontend/dist/unaccounted.js', 'sha256' => hash('sha256', 'UN'), 'size' => 50];
     $descBadDiff['package']['uncompressed_size'] += 50;
     [$rawBadDiff, $sigBadDiff] = signManifest($descBadDiff, $ephemeralKey);
     assertThrows(
@@ -882,7 +878,7 @@ try {
 
     // 6.1 Disallow CREATE to resources/portable/mysql/**
     $tgtWithMysqlCreate = $tgtInvStable;
-    $tgtWithMysqlCreate['files']['resources/portable/mysql/bin/mariadbd.exe'] = ['sha256' => hash('sha256', 'ENGINE'), 'size' => 1000];
+    $tgtWithMysqlCreate['files']['resources/portable/mysql/bin/mysqld.exe'] = ['sha256' => hash('sha256', 'ENGINE'), 'size' => 1000];
     $descMysqlCreate = createDescriptor($srcInvStable, $tgtWithMysqlCreate, 'stable', $defaultDataCompat);
     [$rawMysqlCreate, $sigMysqlCreate] = signManifest($descMysqlCreate, $ephemeralKey);
     $ctxMysqlCreate = createContext($tgtWithMysqlCreate, 'stable', $defaultDataCompat);
@@ -906,7 +902,7 @@ try {
 
     // 6.3 Disallow CREATE to any *.sql file
     $tgtWithNewSql = $tgtInvStable;
-    $tgtWithNewSql['files']['resources/app/migrations.sql'] = ['sha256' => hash('sha256', 'NEW_SQL'), 'size' => 100];
+    $tgtWithNewSql['files']['resources/app.asar.unpacked/database/pos_schema.sql'] = ['sha256' => hash('sha256', 'NEW_SQL'), 'size' => 100];
     $descNewSql = createDescriptor($srcInvStable, $tgtWithNewSql, 'stable', $defaultDataCompat);
     [$rawNewSql, $sigNewSql] = signManifest($descNewSql, $ephemeralKey);
     $ctxNewSql = createContext($tgtWithNewSql, 'stable', $defaultDataCompat);
@@ -944,13 +940,13 @@ try {
     // Retained non-shell file in BOTH source and target inventories
     $hugePayloadHash = hash('sha256', 'MAX_SAFE_INTEGER_PAYLOAD');
     $srcExtraMaxSafe = [
-        'resources/app/retained_max_safe.bin' => [
+        'resources/app.asar.unpacked/frontend/dist/retained_max_safe.bin' => [
             'sha256' => $hugePayloadHash,
             'size' => 9007199254740991,
         ],
     ];
     $tgtExtraMaxSafe = [
-        'resources/app/retained_max_safe.bin' => [
+        'resources/app.asar.unpacked/frontend/dist/retained_max_safe.bin' => [
             'sha256' => $hugePayloadHash,
             'size' => 9007199254740991,
         ],
@@ -973,7 +969,7 @@ try {
     // Confirm plan retains EXACT integer MAX (9007199254740991) and hash in source_files, target_files, and actions
     $srcFileEntry = null;
     foreach ($decodedMaxSafe['source_files'] as $f) {
-        if ($f['path'] === 'resources/app/retained_max_safe.bin') {
+        if ($f['path'] === 'resources/app.asar.unpacked/frontend/dist/retained_max_safe.bin') {
             $srcFileEntry = $f;
             break;
         }
@@ -984,7 +980,7 @@ try {
 
     $tgtFileEntry = null;
     foreach ($decodedMaxSafe['target_files'] as $f) {
-        if ($f['path'] === 'resources/app/retained_max_safe.bin') {
+        if ($f['path'] === 'resources/app.asar.unpacked/frontend/dist/retained_max_safe.bin') {
             $tgtFileEntry = $f;
             break;
         }
@@ -995,7 +991,7 @@ try {
 
     $actionEntry = null;
     foreach ($decodedMaxSafe['actions'] as $act) {
-        if ($act['path'] === 'resources/app/retained_max_safe.bin') {
+        if ($act['path'] === 'resources/app.asar.unpacked/frontend/dist/retained_max_safe.bin') {
             $actionEntry = $act;
             break;
         }
@@ -1014,7 +1010,7 @@ try {
 
     // 7.2.1 MAX_SAFE_INTEGER + 1 (9007199254740992) in source inventory
     $descExceedsSafeInt = $descStable;
-    $descExceedsSafeInt['source_inventory']['files']['resources/app/common.dat']['size'] = 9007199254740992;
+    $descExceedsSafeInt['source_inventory']['files']['resources/app.asar.unpacked/frontend/dist/common.dat']['size'] = 9007199254740992;
     [$rawExceeds, $sigExceeds] = signManifest($descExceedsSafeInt, $ephemeralKey);
     assertThrows(
         fn() => $filePlanService->build($rawExceeds, $sigExceeds, hash('sha256', $rawExceeds), $srcCtxStable, $tgtCtxStable),
@@ -1024,7 +1020,7 @@ try {
 
     // 7.2.2 Negative file size (-1) in source inventory
     $descNegSize = $descStable;
-    $descNegSize['source_inventory']['files']['resources/app/common.dat']['size'] = -1;
+    $descNegSize['source_inventory']['files']['resources/app.asar.unpacked/frontend/dist/common.dat']['size'] = -1;
     [$rawNeg, $sigNeg] = signManifest($descNegSize, $ephemeralKey);
     assertThrows(
         fn() => $filePlanService->build($rawNeg, $sigNeg, hash('sha256', $rawNeg), $srcCtxStable, $tgtCtxStable),
@@ -1034,7 +1030,7 @@ try {
 
     // 7.2.3 Fractional file size (10.5) in source inventory
     $descFracSize = $descStable;
-    $descFracSize['source_inventory']['files']['resources/app/common.dat']['size'] = 10.5;
+    $descFracSize['source_inventory']['files']['resources/app.asar.unpacked/frontend/dist/common.dat']['size'] = 10.5;
     [$rawFrac, $sigFrac] = signManifest($descFracSize, $ephemeralKey);
     assertThrows(
         fn() => $filePlanService->build($rawFrac, $sigFrac, hash('sha256', $rawFrac), $srcCtxStable, $tgtCtxStable),
@@ -1044,7 +1040,7 @@ try {
 
     // 7.2.4 String file size ("1000") in source inventory
     $descStrSize = $descStable;
-    $descStrSize['source_inventory']['files']['resources/app/common.dat']['size'] = "1000";
+    $descStrSize['source_inventory']['files']['resources/app.asar.unpacked/frontend/dist/common.dat']['size'] = "1000";
     [$rawStr, $sigStr] = signManifest($descStrSize, $ephemeralKey);
     assertThrows(
         fn() => $filePlanService->build($rawStr, $sigStr, hash('sha256', $rawStr), $srcCtxStable, $tgtCtxStable),
@@ -1054,7 +1050,7 @@ try {
 
     // 7.2.5 Target inventory invalid size (9007199254740992)
     $descTgtExceeds = $descStable;
-    $descTgtExceeds['target_inventory']['files']['resources/app/common.dat']['size'] = 9007199254740992;
+    $descTgtExceeds['target_inventory']['files']['resources/app.asar.unpacked/frontend/dist/common.dat']['size'] = 9007199254740992;
     [$rawTgtExceeds, $sigTgtExceeds] = signManifest($descTgtExceeds, $ephemeralKey);
     assertThrows(
         fn() => $filePlanService->build($rawTgtExceeds, $sigTgtExceeds, hash('sha256', $rawTgtExceeds), $srcCtxStable, $tgtCtxStable),
@@ -1066,7 +1062,7 @@ try {
     // Real negative signed file diff case using synthetic metadata (NO physical huge file on disk).
     $srcInvSingleFile = createFakeInventory('12.1.0', '13.0.0');
     $tgtInvSingleFile = createFakeInventory('12.2.0', '13.0.0', [
-        'resources/app/changed_250mb.bin' => [
+        'resources/app.asar.unpacked/frontend/dist/changed_250mb.bin' => [
             'sha256' => hash('sha256', 'OVERSIZED_CHANGED_FILE'),
             'size' => 262144001, // MAX_SINGLE_FILE_SIZE (262144000) + 1
         ],
@@ -1099,11 +1095,11 @@ try {
     $hugeSrcExtra = [];
     $hugeTgtExtra = [];
 
-    // Use short relative paths: 's/00001' .. 's/19997' and 't/00001' .. 't/19997'
+    // Use allowlisted frontend dist relative paths
     for ($i = 1; $i <= 19997; $i++) {
         $idxStr = str_pad((string) $i, 5, '0', STR_PAD_LEFT);
-        $hugeSrcExtra["s/{$idxStr}"] = ['sha256' => hash('sha256', "src_{$i}"), 'size' => 0];
-        $hugeTgtExtra["t/{$idxStr}"] = ['sha256' => hash('sha256', "tgt_{$i}"), 'size' => 0];
+        $hugeSrcExtra["resources/app.asar.unpacked/frontend/dist/s/{$idxStr}"] = ['sha256' => hash('sha256', "src_{$i}"), 'size' => 0];
+        $hugeTgtExtra["resources/app.asar.unpacked/frontend/dist/t/{$idxStr}"] = ['sha256' => hash('sha256', "tgt_{$i}"), 'size' => 0];
     }
 
     $hugeSrcInv = createFakeInventory('12.1.0', '13.0.0', $hugeSrcExtra, $commonExeHash, $commonAsarHash);
