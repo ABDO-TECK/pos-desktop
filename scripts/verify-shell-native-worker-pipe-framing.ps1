@@ -977,8 +977,37 @@ namespace PosDesktop.Updates.Native.FramingFixture
                     {
                         File.WriteAllText(readyPath, "READY\r\nDISC_IMM\r\n", Encoding.UTF8);
 
-                        string holdPath = args.Length >= 4 ? args[3] : null;
+                        string triggerPath = null;
+                        string closedAckPath = null;
+                        string holdPath = null;
+
+                        if (args.Length >= 6)
+                        {
+                            triggerPath = args[3];
+                            closedAckPath = args[4];
+                            holdPath = args[5];
+                        }
+                        else if (args.Length == 5)
+                        {
+                            triggerPath = args[3];
+                            holdPath = args[4];
+                        }
+                        else if (args.Length >= 4)
+                        {
+                            holdPath = args[3];
+                        }
+
+                        if (!string.IsNullOrEmpty(triggerPath))
+                        {
+                            WaitFile(triggerPath, 15000);
+                        }
+
                         client.Dispose();
+
+                        if (!string.IsNullOrEmpty(closedAckPath))
+                        {
+                            File.WriteAllText(closedAckPath, "READY\r\nCLOSED_ACK\r\n", Encoding.UTF8);
+                        }
 
                         if (!string.IsNullOrEmpty(holdPath))
                         {
@@ -1806,8 +1835,10 @@ try {
     # 5c: Write to disconnected client with root worker process remaining LIVE
     $ep5c = Safe-CreateEndpoint -Tag "Ep5c"
     $r5c = [System.IO.Path]::Combine($labDir, "ready-5c.txt")
+    $trigger5c = [System.IO.Path]::Combine($labDir, "trigger-5c.txt")
+    $closed5c = [System.IO.Path]::Combine($labDir, "closed-5c.txt")
     $hold5c = [System.IO.Path]::Combine($labDir, "hold-5c.txt")
-    $args5c = @("disconnect_immediate", $ep5c.EndpointName, $r5c, $hold5c)
+    $args5c = @("disconnect_immediate", $ep5c.EndpointName, $r5c, $trigger5c, $closed5c, $hold5c)
     $w5c = Safe-StartOwnedProcess -exePath $fixtureExePath -ArgumentVector $args5c -cwd $labDir -env (Build-SparseEnvironment) -tag "Worker5c"
     $w5cRec = $script:TrackedOwners[-1]
     $ep5cRec = $script:TrackedEndpoints[-1]
@@ -1815,7 +1846,11 @@ try {
     [void](Wait-HandshakeFile -path $r5c -timeoutMs 10000)
     [void]$ep5c.ConnectOwnedWorker($w5c, 5000)
 
-    [System.Threading.Thread]::Sleep(100) # allow client to dispose pipe and enter hold loop
+    # Signal fixture to dispose client pipe and enter hold loop
+    [System.IO.File]::WriteAllText($trigger5c, "TRIGGER`r`n", [System.Text.Encoding]::UTF8)
+
+    # Bounded wait for closed ACK marker (actual proof client disposed pipe)
+    [void](Wait-HandshakeFile -path $closed5c -timeoutMs 10000)
 
     # Explicitly Observe Root LIVE BEFORE server write failure
     $obs5cBefore = $w5c.Observe()
