@@ -649,6 +649,7 @@ $requiredPharEntries = [
     'Native/NativeBrokerManifestVerifier.cs',
     'Native/NativeBrokerContextBinding.cs',
     'Services/ShellDeltaWorkerFilePlanService.php',
+    'Services/ShellDeltaWorkerPipeTransportService.php',
 ];
 foreach ($requiredPharEntries as $requiredEntry) {
     if (!isset($builtPhar[$requiredEntry])) {
