@@ -1265,7 +1265,7 @@ try {
                 0x04, 0x00, 0x00, 0x00, # len = 4
                 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 # seq = 1
             )
-            Payload = [byte[]]@(1, 2, 3, 4)
+            Payload = $null # Header rejection must not depend on consuming a body.
             ExpectedError = "magic"
         },
         @{
@@ -1295,7 +1295,7 @@ try {
                 0x04, 0x00, 0x00, 0x00, # len = 4
                 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00 # seq_hi = 1
             )
-            Payload = [byte[]]@(1, 2, 3, 4)
+            Payload = $null # Header rejection must not depend on consuming a body.
             ExpectedError = "sequence"
         },
         @{
@@ -1305,7 +1305,7 @@ try {
                 0x04, 0x00, 0x00, 0x00, # len = 4
                 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 # seq = 2 (expected 1)
             )
-            Payload = [byte[]]@(1, 2, 3, 4)
+            Payload = $null # Header rejection must not depend on consuming a body.
             ExpectedError = "sequence"
         },
         @{
