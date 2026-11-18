@@ -2,8 +2,19 @@ name: Windows in-app shell update acceptance
 
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/shell-inapp-acceptance]
+  pull_request:
+    paths:
+      - '.github/workflows/shell-inapp-acceptance.yml'
+      - 'electron/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'build/**'
+      - 'database/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'build-phar.php'
+      - 'version.json'
 
 permissions:
   contents: read

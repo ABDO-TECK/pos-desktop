@@ -167,14 +167,10 @@ try {
     Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
     Build-Fixture failing '0.0.14' -ReuseFrontendAndPhar
 
-    ./scripts/verify-setup13-shell-data.ps1 -InAppFixture
+    ./scripts/verify-setup13-shell-data.ps1 -Profile in-app
     foreach ($role in @('target', 'failing')) {
         Sign-Fixture (Join-Path $lab 'source/installed-payload') (Join-Path $lab "$role/win-unpacked") (Join-Path $lab 'source-contract.json') (Join-Path $lab "$role/release")
     }
-
-    # Historical signed comparison, with the same target but a different source.
-    # The application-facing fixture never exposes this package.
-    Sign-Fixture (Join-Path $official 'source') (Join-Path $lab 'target/win-unpacked') (Join-Path $lab 'published-source-contract.json') (Join-Path $lab 'historical-release')
 } finally {
     Remove-Item -LiteralPath $key -ErrorAction SilentlyContinue
 }

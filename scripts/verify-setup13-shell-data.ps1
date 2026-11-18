@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch] $InAppFixture)
+param([ValidateSet('setup13-shell', 'in-app', 'historical')] [string] $Profile = 'setup13-shell')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -7,6 +7,7 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
     throw 'Measure packaged database contracts only on GitHub-hosted Windows Actions.'
 }
 
+$InAppFixture = $Profile -cne 'setup13-shell'
 $lab = Join-Path $env:RUNNER_TEMP $(if ($InAppFixture) { 'shell-inapp' } else { 'setup13-shell' })
 
 function Measure-PackagedDatabase {
@@ -94,10 +95,11 @@ function Measure-PackagedDatabase {
     }
 }
 
-if ($InAppFixture) {
-    $published = Join-Path $env:RUNNER_TEMP 'setup13-shell/source'
+if ($Profile -ceq 'in-app') {
     Measure-PackagedDatabase -Root (Join-Path $lab 'source/installed-payload') -Role source -DataDir (Join-Path $lab 'source-data')
     Measure-PackagedDatabase -Root (Join-Path $lab 'target/win-unpacked') -Role target -DataDir (Join-Path $lab 'target-data')
+} elseif ($Profile -ceq 'historical') {
+    $published = Join-Path $env:RUNNER_TEMP 'setup13-shell/source'
     Measure-PackagedDatabase -Root $published -Role published-source -DataDir (Join-Path $lab 'published-source-data')
 } else {
     $installed = Join-Path $lab 'installed'
