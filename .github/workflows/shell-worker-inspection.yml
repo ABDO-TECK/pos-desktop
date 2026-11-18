@@ -29,6 +29,9 @@ on:
       - 'backend/Native/NativeBrokerManifestVerifier.cs'
       - 'backend/Native/NativeBrokerContextBinding.cs'
       - 'backend/Native/WorkerImageReadLease.cs'
+      - 'backend/Native/NativeBrokerWorkerImageSet.cs'
+      - 'backend/Services/ShellDeltaWorkerPlanSessionService.php'
+      - 'backend/cli/shell-worker-plan.php'
 
 permissions:
   contents: read

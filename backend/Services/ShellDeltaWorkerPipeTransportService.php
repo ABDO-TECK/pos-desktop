@@ -93,10 +93,15 @@ final class ShellDeltaWorkerPipeTransportService
      * reads exact chunked payload bytes, and increments expectedRx counter upon full completion.
      * Wire read exceptions transition transport to faulted state and rethrow primary error.
      *
+     * @param int $maximumPayloadBytes Optional upper bound on payload length (1..67108864, defaults to 64 MiB)
      * @return array{can_apply: false, sequence: int, payload: string}
      */
-    public function readFrame(): array
+    public function readFrame(int $maximumPayloadBytes = self::MAX_FRAME_SIZE): array
     {
+        if ($maximumPayloadBytes < self::MIN_FRAME_SIZE || $maximumPayloadBytes > self::MAX_FRAME_SIZE) {
+            throw new InvalidArgumentException("maximumPayloadBytes must be between " . self::MIN_FRAME_SIZE . " and " . self::MAX_FRAME_SIZE . " bytes ({$maximumPayloadBytes} given).");
+        }
+
         if ($this->isFaulted) {
             throw new RuntimeException("Cannot read frame: transport is faulted.");
         }
@@ -121,8 +126,8 @@ final class ShellDeltaWorkerPipeTransportService
             }
 
             $payloadLen = $unpacked['len'];
-            if ($payloadLen < self::MIN_FRAME_SIZE || $payloadLen > self::MAX_FRAME_SIZE) {
-                throw new RuntimeException("Invalid frame payload length {$payloadLen} (must be between 1 and " . self::MAX_FRAME_SIZE . " bytes).");
+            if ($payloadLen < self::MIN_FRAME_SIZE || $payloadLen > $maximumPayloadBytes) {
+                throw new RuntimeException("Invalid frame payload length {$payloadLen} (must be between 1 and " . $maximumPayloadBytes . " bytes).");
             }
 
             if ($unpacked['seq_hi'] !== 0) {
@@ -230,6 +235,47 @@ final class ShellDeltaWorkerPipeTransportService
                 throw new RuntimeException("Pipe write failed (transferred {$transferred} of {$length} bytes).");
             }
             $transferred += $n;
+        }
+    }
+
+    /**
+     * Awaits clean remote peer closure of the named pipe endpoint.
+     *
+     * TERMINAL CLOSING-ONLY API:
+     * Latches the transport into faulted state so no subsequent readFrame or writeFrame
+     * operations can be initiated. Synchronously reads a single byte from the stream
+     * expecting EOF.
+     *
+     * HONEST BLOCKING DEADLINE PRECONDITION:
+     * Like all Win32 named pipe operations on Windows PHP wrappers, this read is
+     * synchronously BLOCKING. The external Native host Job object or process termination
+     * deadline MUST govern this blocking close wait. This method does not invent fake timeouts.
+     *
+     * Verification rules:
+     * - Returns normally ONLY if fread returns '' AND feof($stream) === true.
+     * - Any received byte throws a protocol error for unexpected trailing data.
+     * - Any false return or non-EOF empty read throws an I/O error.
+     * - Exceptions are NOT treated as normal EOF.
+     */
+    public function awaitPeerClose(): void
+    {
+        $this->isFaulted = true;
+
+        if ($this->isClosed || $this->stream === null) {
+            throw new RuntimeException("Cannot await peer close: transport is closed.");
+        }
+
+        $byte = @fread($this->stream, 1);
+        if ($byte === false) {
+            throw new RuntimeException("Pipe read error while awaiting peer close.");
+        }
+
+        if (strlen($byte) > 0) {
+            throw new RuntimeException("Protocol error: unexpected trailing data received while awaiting peer close.");
+        }
+
+        if (!feof($this->stream)) {
+            throw new RuntimeException("Pipe read returned empty without EOF while awaiting peer close.");
         }
     }
 
