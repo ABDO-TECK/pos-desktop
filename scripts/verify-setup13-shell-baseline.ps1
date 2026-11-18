@@ -3,9 +3,8 @@ param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_EVENT_NAME -cne 'push' -or
-    $env:GITHUB_REF -cne 'refs/heads/codex/setup13-shell-delta-acceptance') {
-    throw 'This probe runs only on the dedicated Windows Actions branch.'
+if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
+    throw 'Extract the test source only on GitHub-hosted Windows Actions.'
 }
 
 $runner = Get-Item -LiteralPath $env:RUNNER_TEMP
