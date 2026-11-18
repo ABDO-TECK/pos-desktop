@@ -1,0 +1,44 @@
+name: Setup 13 shell file transaction acceptance
+
+on:
+  push:
+    branches: [codex/setup13-shell-delta-acceptance]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup13-shell-delta-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-transaction:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: openssl, zip, pdo_mysql
+          coverage: none
+
+      - name: Identify and inventory the verified Setup 13 payload
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-baseline.ps1
+
+      - name: Independently inspect full source product coverage
+        shell: pwsh
+        run: php scripts/verify-shell-product-coverage.php --root "$env:RUNNER_TEMP/setup13-shell/source"
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-shell-delta-evidence
+          path: ${{ runner.temp }}/setup13-shell/evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
