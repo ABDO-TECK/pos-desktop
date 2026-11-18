@@ -23,6 +23,17 @@ if ((Get-Item -LiteralPath $archive).Length -ne $archiveSize -or
 $dist = Join-Path $lab 'electron'
 Expand-Archive -LiteralPath $archive -DestinationPath $dist
 
+# electron-builder retains these stock files for a custom electronDist. Match its
+# normal Windows distribution cleanup on the verified input before packaging.
+foreach ($relative in @('resources/default_app.asar', 'version')) {
+    $stockFile = Get-Item -LiteralPath (Join-Path $dist $relative) -Force
+    if ($stockFile.PSIsContainer -or ($stockFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Expected a regular stock Electron file: $relative"
+    }
+    Remove-Item -LiteralPath $stockFile.FullName
+    Write-Host "Removed stock Electron input before packaging: $relative"
+}
+
 # Keep the packaged MariaDB, PHP, Java and printing runtimes byte-for-byte.
 # The Setup archive was verified before extraction and the cold source contains no customer data.
 if (Test-Path -LiteralPath 'portable') { throw 'Unexpected portable directory before candidate staging.' }

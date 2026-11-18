@@ -13,6 +13,7 @@ on:
       - 'scripts/build-shell-delta.php'
       - 'scripts/deployment-inventory.php'
       - 'scripts/verify-shell-path-policy.php'
+      - 'scripts/verify-shell-product-coverage.php'
       - 'build/uninstall-data.ps1'
       - 'backend/Services/ProductInventoryService.php'
       - 'backend/Services/ShellDeltaManifestService.php'
@@ -81,6 +82,11 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: ./scripts/build-setup13-shell-test-candidate.ps1
 
+      - name: Verify product coverage of the freshly extracted candidate
+        id: target-coverage
+        shell: pwsh
+        run: php scripts/verify-shell-product-coverage.php --root (Join-Path $env:RUNNER_TEMP 'setup13-shell/target')
+
       - name: Measure packaged SQL and PHAR compatibility on MariaDB
         shell: pwsh
         run: ./scripts/verify-setup13-shell-data.ps1
@@ -88,6 +94,11 @@ jobs:
       - name: Apply and roll back the signed Format 2 file transaction
         shell: pwsh
         run: php scripts/verify-setup13-shell-transaction.php transaction
+
+      - name: Diagnose candidate path coverage after a later failure
+        if: failure() && steps.target-coverage.outcome == 'success'
+        shell: pwsh
+        run: php scripts/verify-shell-product-coverage.php --root (Join-Path $env:RUNNER_TEMP 'setup13-shell/target')
 
       - name: Run shell inventory, contract, builder and rollback regressions
         if: always() && steps.dependencies.outcome == 'success'
