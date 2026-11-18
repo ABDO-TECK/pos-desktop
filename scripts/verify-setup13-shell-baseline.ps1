@@ -73,7 +73,7 @@ $inventory = Save-PinnedAsset -Id 689979744 -Name $inventoryName -Size 11202 -Sh
 $installer = Save-PinnedAsset -Id $setupId -Name $setupName -Size $setupSize -Sha256 $setupSha256
 $extract = Join-Path $lab 'archive'
 $source = Join-Path $lab 'source'
-& $seven e $installer '$PLUGINSDIRapp-64.7z' "-o$extract" -y
+& $seven e $installer '$PLUGINSDIR\app-64.7z' "-o$extract" -y
 if ($LASTEXITCODE -ne 0) { throw 'Could not extract the exact x64 application archive from Setup.' }
 $archive = Get-Item -LiteralPath (Join-Path $extract 'app-64.7z')
 & $seven x $archive.FullName "-o$source" -y
