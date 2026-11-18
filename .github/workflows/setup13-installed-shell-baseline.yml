@@ -1,0 +1,56 @@
+name: Setup 13 Installed Shell Baseline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-shell-delta-updates
+      - codex/setup13-installed-shell-baseline
+    paths:
+      - '.github/workflows/setup13-installed-shell-baseline.yml'
+      - 'scripts/verify-setup13-installed-shell.ps1'
+      - 'scripts/verify-setup13-installed-inventory.php'
+      - 'scripts/verify-setup13-shell-baseline.ps1'
+      - 'scripts/deployment-inventory.php'
+      - 'build/uninstall-data.ps1'
+      - 'backend/Services/ProductInventoryService.php'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup13-installed-shell-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-layout:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      - name: Acquire verified stable Setup and unpack its matching x64 archive
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-baseline.ps1
+
+      - name: Install per user and compare complete physical layouts
+        shell: pwsh
+        run: ./scripts/verify-setup13-installed-shell.ps1
+
+      - name: Verify published deployment inventory against both layouts
+        shell: pwsh
+        run: php scripts/verify-setup13-installed-inventory.php
+
+      - name: Upload verification evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup13-installed-baseline-evidence
+          path: ${{ runner.temp }}/setup13-shell/evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
