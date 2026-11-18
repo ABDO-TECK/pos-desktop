@@ -9,8 +9,11 @@ on:
     paths:
       - '.github/workflows/setup13-shell-delta-acceptance.yml'
       - 'scripts/*setup13-shell*'
+      - 'scripts/verify-setup13-installed-*'
       - 'scripts/build-shell-delta.php'
+      - 'scripts/deployment-inventory.php'
       - 'scripts/verify-shell-path-policy.php'
+      - 'build/uninstall-data.ps1'
       - 'backend/Services/ProductInventoryService.php'
       - 'backend/Services/ShellDeltaManifestService.php'
       - 'backend/Services/ShellDeltaFileTransactionService.php'
@@ -48,6 +51,13 @@ jobs:
       - name: Identify and extract the verified Setup 13 payload
         shell: pwsh
         run: ./scripts/verify-setup13-shell-baseline.ps1
+
+      - name: Install the published Setup 13 per user and verify installed bytes
+        shell: pwsh
+        run: |
+          ./scripts/verify-setup13-installed-shell.ps1
+          php scripts/verify-setup13-installed-inventory.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Install locked build dependencies
         id: dependencies

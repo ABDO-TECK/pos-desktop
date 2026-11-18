@@ -8,7 +8,7 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
 }
 
 $lab = Join-Path $env:RUNNER_TEMP 'setup13-shell'
-$source = Join-Path $lab 'source'
+$installed = Join-Path $lab 'installed'
 $target = Join-Path $lab 'target'
 
 function Measure-PackagedDatabase {
@@ -94,5 +94,5 @@ function Measure-PackagedDatabase {
     }
 }
 
-Measure-PackagedDatabase -Root $source -Role source -DataDir (Join-Path $source 'resources/portable/mysql/data')
+Measure-PackagedDatabase -Root $installed -Role source -DataDir (Join-Path $installed 'resources/portable/mysql/data')
 Measure-PackagedDatabase -Root $target -Role target -DataDir (Join-Path $lab 'target-data')

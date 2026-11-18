@@ -46,7 +46,7 @@ function measureDatabase(string $lab, string $role): void
     $db = new PDO("mysql:host=127.0.0.1;port={$port};dbname=pos_db;charset=utf8mb4", 'root', '', [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     ]);
-    $dataDir = $role === 'source' ? $lab . '/source/resources/portable/mysql/data' : $lab . '/target-data';
+    $dataDir = $role === 'source' ? $lab . '/installed/resources/portable/mysql/data' : $lab . '/target-data';
     $actual = realpath((string) $db->query('SELECT @@datadir')->fetchColumn());
     ensure($actual !== false && strcasecmp($actual, realpath($dataDir) ?: '') === 0, 'Unexpected MariaDB data directory.');
 
@@ -168,6 +168,7 @@ function verifyManifestChanges(array $descriptor): array
 function verifyTransaction(string $lab): void
 {
     $source = ProductInventoryService::resolveAbsolutePath($lab . '/source');
+    $installed = ProductInventoryService::resolveAbsolutePath($lab . '/installed');
     $target = ProductInventoryService::resolveAbsolutePath($lab . '/target');
     $state = $lab . '/state';
     $packageDir = $lab . '/delta';
@@ -178,6 +179,27 @@ function verifyTransaction(string $lab): void
         && deploymentFiles($source . '/resources/app.asar.unpacked') === $published['files'],
         'The Setup payload does not match its published deployment file hashes.');
     ensure(!file_exists($source . '/Uninstall POS Desktop.exe'), 'The source is expected to be the cold NSIS archive tree.');
+    $setup = readJson($lab . '/evidence/setup-source.json');
+    $installation = readJson($lab . '/evidence/installed-layout.json');
+    $installedDeployment = readJson($lab . '/evidence/installed-deployment-inventory.json');
+    ensure($installation['setup_sha256'] === $setup['setup_sha256'] && $installation['setup_exit_code'] === 0
+        && $installation['app_version'] === '0.0.13' && $installation['electron_version'] === '43.2.0'
+        && $installedDeployment['published_sha256'] === $setup['published_inventory_sha256']
+        && $installedDeployment['matched_managed_files']['installed'] === count($published['files']),
+        'The installed baseline receipt does not match the verified Setup and published deployment inventory.');
+    $installerOwned = $installation['added_files'];
+    ensure(count($installerOwned) === 1 && $installerOwned[0]['path'] === 'Uninstall POS Desktop.exe',
+        'Expected the single pinned NSIS uninstaller recorded by the installed baseline verifier.');
+    $uninstallerPath = $installed . '/' . $installerOwned[0]['path'];
+    $uninstaller = $installerOwned[0];
+    $verifyUninstaller = static function (string $phase) use ($uninstallerPath, $uninstaller): array {
+        clearstatcache(true, $uninstallerPath);
+        ProductInventoryService::assertNoReparse($uninstallerPath);
+        $actual = ['sha256' => hash_file('sha256', $uninstallerPath), 'size' => filesize($uninstallerPath)];
+        ensure($actual['sha256'] === $uninstaller['sha256'] && $actual['size'] === $uninstaller['size'],
+            "The pinned NSIS uninstaller changed during {$phase}.");
+        return $actual;
+    };
 
     $targetPhar = new Phar($target . '/resources/app.asar.unpacked/backend/backend.phar');
     ensure(isset($targetPhar['cli/shell-worker-plan.php']), 'The candidate PHAR is missing the packaged worker plan CLI.');
@@ -186,11 +208,11 @@ function verifyTransaction(string $lab): void
     $contract = readJson($lab . '/source-contract.json');
     ensure($contract === readJson($lab . '/target-contract.json'), 'Live packaged source and target contracts differ.');
 
-    $sourceElectron = checkElectron($source, '43.2.0');
+    $sourceElectron = checkElectron($installed, '43.2.0');
     $targetElectron = checkElectron($target, '43.8.11');
-    $databasePath = $source . '/resources/portable/mysql/data';
+    $databasePath = $installed . '/resources/portable/mysql/data';
     $database = snapshotDatabaseFiles($databasePath);
-    $environmentPath = $source . '/.env';
+    $environmentPath = $installed . '/.env';
     $environment = "POS_ACCEPTANCE_FIXTURE=present\n";
     ensure(!file_exists($environmentPath) && file_put_contents($environmentPath, $environment) === strlen($environment),
         'Could not create a disposable protected configuration sentinel.');
@@ -230,33 +252,40 @@ function verifyTransaction(string $lab): void
     ensure(ShellDeltaManifestService::canonicalInventoryDigest($initial) === $manifest['source_inventory_sha256']
         && ShellDeltaManifestService::canonicalInventoryDigest($expected) === $manifest['target_inventory_sha256'],
         'Signed inventory digests do not describe the full cold source and candidate.');
+    ensure($manifests->buildInventory($installed, '0.0.13') === $initial,
+        'The installed tree differs from the source archive used to build the signed delta.');
+    $uninstallerSnapshots = ['before_prepare' => $verifyUninstaller('baseline')];
 
-    $prepared = $transaction->prepare($source, $state, $raw, $signature, $package, $context);
+    $prepared = $transaction->prepare($installed, $state, $raw, $signature, $package, $context);
     ensure($prepared['phase'] === ShellDeltaFileTransactionService::PHASE_PREPARED
-        && $manifests->buildInventory($source, '0.0.13') === $initial, 'Prepare changed the cold source product tree.');
+        && $manifests->buildInventory($installed, '0.0.13') === $initial, 'Prepare changed the cold installed product tree.');
     $verifyData();
-    echo "Prepared and verified the full source product inventory.\n";
+    $uninstallerSnapshots['after_prepare'] = $verifyUninstaller('prepare');
+    echo "Prepared and verified the full installed source product inventory.\n";
 
     $id = $prepared['operation_id'];
-    $applied = $transaction->apply($source, $state, $id, $context);
+    $applied = $transaction->apply($installed, $state, $id, $context);
     ensure($applied['phase'] === ShellDeltaFileTransactionService::PHASE_FILES_APPLIED
-        && $manifests->buildInventory($source, '0.0.14') === $expected, 'Apply did not produce the exact candidate tree.');
+        && $manifests->buildInventory($installed, '0.0.14') === $expected, 'Apply did not produce the exact candidate tree.');
     $verifyData();
-    $appliedElectron = checkElectron($source, '43.8.11');
-    $frontend = file_get_contents($source . '/resources/app.asar.unpacked/frontend/dist/index.html');
+    $uninstallerSnapshots['after_apply'] = $verifyUninstaller('apply');
+    $appliedElectron = checkElectron($installed, '43.8.11');
+    $frontend = file_get_contents($installed . '/resources/app.asar.unpacked/frontend/dist/index.html');
     ensure(is_string($frontend) && str_contains($frontend, 'name="pos-shell-ci-candidate" content="0.0.14"'),
         'The applied Vite entry document does not contain the candidate version marker.');
     echo "Applied and verified the full target product inventory and runnable Electron version.\n";
 
-    $rolledBack = $transaction->rollback($source, $state, $id, $context);
+    $rolledBack = $transaction->rollback($installed, $state, $id, $context);
     ensure($rolledBack['phase'] === ShellDeltaFileTransactionService::PHASE_ROLLED_BACK
-        && $manifests->buildInventory($source, '0.0.13') === $initial, 'Rollback did not restore the full Setup product inventory.');
+        && $manifests->buildInventory($installed, '0.0.13') === $initial, 'Rollback did not restore the full Setup product inventory.');
     $verifyData();
-    $restoredElectron = checkElectron($source, '43.2.0');
+    $uninstallerSnapshots['after_rollback'] = $verifyUninstaller('rollback');
+    $restoredElectron = checkElectron($installed, '43.2.0');
     echo "Rolled back and verified the full source product inventory, Electron version and cold MariaDB data.\n";
 
     writeJson($lab . '/evidence/transaction.json', [
-        'scope' => 'Cold Setup package file transaction; no NSIS installation, client bootstrap, production signing, or updater integration',
+        'scope' => 'Cold file transaction on a per-user installation from published Setup, with ephemeral signing trust',
+        'baseline_setup_sha256' => $setup['setup_sha256'],
         'application_versions' => ['source' => '0.0.13', 'target' => '0.0.14'],
         'electron_node_mode' => ['source' => $sourceElectron, 'candidate' => $targetElectron,
             'applied' => $appliedElectron, 'restored' => $restoredElectron],
@@ -274,6 +303,7 @@ function verifyTransaction(string $lab): void
         'changed_file_count' => count($manifest['files']),
         'deleted_file_count' => count($manifest['deleted_files']),
         'phases' => [$prepared['phase'], $applied['phase'], $rolledBack['phase']],
+        'unchanged_installer_owned_file' => ['path' => $uninstaller['path'], 'observations' => $uninstallerSnapshots],
         'unchanged_protected_mariadb_file_count' => count($database),
         'unchanged_protected_mariadb_snapshot_sha256' => hash('sha256', json_encode($database, JSON_THROW_ON_ERROR)),
         'unchanged_protected_environment_file' => true,
