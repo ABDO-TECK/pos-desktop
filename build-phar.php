@@ -498,7 +498,12 @@ $stub = <<<PHP
 Phar::mapPhar('backend.phar');
 
 if (php_sapi_name() === 'cli') {
-    // Isolated shell worker inspection command passthrough (reserved prefix)
+    // Isolated shell worker command passthrough (reserved prefix)
+    if (\$argc > 1 && \$argv[1] === 'shell-worker-plan') {
+        require 'phar://backend.phar/cli/shell-worker-plan.php';
+        exit(1);
+    }
+
     if (\$argc > 1 && str_starts_with(\$argv[1], 'shell-worker')) {
         require 'phar://backend.phar/cli/shell-worker-inspect.php';
         exit(1);
@@ -639,6 +644,7 @@ $requiredPharEntries = [
     'cli/verify-database.php',
     'cli/initialize-admin.php',
     'cli/shell-worker-inspect.php',
+    'cli/shell-worker-plan.php',
     'shell-worker-inspection.json',
     'router.php',
     'version.json',
@@ -649,7 +655,9 @@ $requiredPharEntries = [
     'Native/NativeBrokerManifestVerifier.cs',
     'Native/NativeBrokerContextBinding.cs',
     'Native/WorkerImageReadLease.cs',
+    'Native/NativeBrokerWorkerImageSet.cs',
     'Services/ShellDeltaWorkerFilePlanService.php',
+    'Services/ShellDeltaWorkerPlanSessionService.php',
     'Services/ShellDeltaWorkerPipeTransportService.php',
 ];
 foreach ($requiredPharEntries as $requiredEntry) {
