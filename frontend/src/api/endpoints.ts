@@ -116,8 +116,9 @@ export const checkUpdate = (deltaCapable = false, config?: UpdateRequestConfig) 
   ...config,
   headers: { ...config?.headers, 'X-POS-Delta-Handoff': deltaCapable ? '1' : '0' },
 })
-export const applyUpdate = (force = false, deltaCapable = false, background = false) => api.post<ApiResponse<UpdateApplyResult>>('/updates/apply', {
+export const applyUpdate = (force = false, deltaCapable = false, background = false, shellVersion?: string) => api.post<ApiResponse<UpdateApplyResult>>('/updates/apply', {
   ...(force ? { force: true } : {}),
+  ...(shellVersion ? { shell_version: shellVersion } : {}),
   delta_capable: deltaCapable,
   background,
 }, {

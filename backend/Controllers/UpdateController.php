@@ -8,10 +8,13 @@ use App\Helpers\EnvLoader;
 use App\Helpers\JobQueue;
 use App\Helpers\Logger;
 use App\Helpers\Response;
+use App\Requests\ShellUpdateRequest;
 use App\Services\AuthService;
 use App\Services\BackgroundUpdateApplyService;
 use App\Services\BackgroundUpdateCheckService;
 use App\Services\ReleaseVersionPolicy;
+use App\Services\ShellDeltaDeliveryService;
+use App\Services\ShellDeltaManifestService;
 use App\Services\UpdateService;
 use Throwable;
 
@@ -80,6 +83,20 @@ class UpdateController extends Controller
             $bootstrapRequired = true;
         }
 
+        if ($hasUpdate && !empty($remote['shell_advertised'])) {
+            $backgroundService = $this->backgroundUpdateService ?? new BackgroundUpdateCheckService($this->updateService);
+            $checked = $backgroundService->readCache($this->updateService->getContextFingerprint($this->hasDesktopHandoffCapability())) ?? [];
+            if (($checked['latest_version'] ?? null) === $latestVersion) {
+                $hasUpdate = $checked['has_update'];
+                $type = $checked['update_type'] ?? $type;
+                $bootstrapRequired = $checked['bootstrap_required'] ?? false;
+                $filesCount = $checked['files_count'] ?? null;
+            } elseif (!$this->updateService->hasLegacyReleaseAssets($remote)) {
+                $hasUpdate = false;
+                $type = 'none';
+            }
+        }
+
         $releaseInfo = [
             'title' => $compatibility['compatible'] ? ($remote['tag_name'] ?? ($latestVersion ? "Release v{$latestVersion}" : null)) : null,
             'tag_name' => $compatibility['compatible'] ? ($remote['tag_name'] ?? ($latestVersion ? "v{$latestVersion}" : null)) : null,
@@ -87,8 +104,8 @@ class UpdateController extends Controller
             'released_at' => $compatibility['compatible'] ? ($remote['released_at'] ?? null) : null,
             'files_count' => $filesCount,
             'release_url' => $compatibility['compatible'] ? ($remote['release_url'] ?? null) : null,
-            'download_url' => $compatibility['compatible'] ? ($remote['delta_url'] ?? ($remote['download_url'] ?? null)) : null,
-            'full_package_url' => $compatibility['compatible'] ? ($remote['full_package_url'] ?? null) : null,
+            'download_url' => $compatibility['compatible'] && $type !== ShellDeltaManifestService::OPERATION ? ($remote['delta_url'] ?? ($remote['download_url'] ?? null)) : null,
+            'full_package_url' => $compatibility['compatible'] && $type !== ShellDeltaManifestService::OPERATION ? ($remote['full_package_url'] ?? null) : null,
         ];
 
         $interruptedUpdate = $this->updateService->getDeltaUpdateService()->detectInterruptedUpdate();
@@ -172,7 +189,16 @@ class UpdateController extends Controller
         }
 
         $force = isset($body['force']) ? filter_var($body['force'], FILTER_VALIDATE_BOOLEAN) : true;
-        $result = $this->updateService->checkForUpdate($this->hasDesktopHandoffCapability(), $force);
+        $deltaCapable = $this->hasDesktopHandoffCapability();
+        $details = $this->updateService->getContextFingerprint($deltaCapable);
+        $result = $this->updateService->checkForUpdate($deltaCapable, $force);
+        if (in_array($result['update_type'] ?? null, [ShellDeltaManifestService::OPERATION, 'bootstrap'], true)
+            || ($result['status'] ?? null) === 'invalid_shell_release') {
+            $backgroundService = $this->backgroundUpdateService ?? new BackgroundUpdateCheckService($this->updateService);
+            if ($details['fingerprint'] === $this->updateService->getContextFingerprint($deltaCapable)['fingerprint']) {
+                $backgroundService->writeCache($details, $result);
+            }
+        }
         return Response::success($result);
     }
 
@@ -242,6 +268,17 @@ class UpdateController extends Controller
         $user = $this->authService->user();
         $body  = $this->getBody();
         $force = isset($body['force']) && filter_var($body['force'], FILTER_VALIDATE_BOOLEAN);
+        $shellVersion = null;
+        $deltaCapable = $this->hasDesktopHandoffCapability($body);
+        if (array_key_exists('shell_version', $body)) {
+            $shellVersion = (new ShellUpdateRequest($body))->version();
+            $handoffToken = getenv('POS_SHELL_DELTA_HANDOFF_TOKEN');
+            $handoffHeader = (string) ($_SERVER['HTTP_X_POS_SHELL_DELTA_HANDOFF'] ?? '');
+            if (!$deltaCapable || ShellDeltaDeliveryService::installedNativeVersion() === null
+                || !is_string($handoffToken) || strlen($handoffToken) !== 64 || !hash_equals($handoffToken, $handoffHeader)) {
+                return Response::error('يلزم تحديث تطبيق سطح المكتب لتمكين تحديث ملفات التطبيق.', 426);
+            }
+        }
 
         $rawBackground = $body['background'] ?? ($_GET['background'] ?? null);
         $isBackground = false;
@@ -256,7 +293,7 @@ class UpdateController extends Controller
         if ($isBackground) {
             $applyService = $this->backgroundUpdateApplyService
                 ?? new \App\Services\BackgroundUpdateApplyService($this->updateService);
-            $schedResult = $applyService->scheduleApply($force, $this->hasDesktopHandoffCapability($body), $user['id'] ?? null);
+            $schedResult = $applyService->scheduleApply($force, $deltaCapable, $user['id'] ?? null, $shellVersion);
             if (!$schedResult['ok']) {
                 $code = $schedResult['code'] ?? 500;
                 return Response::error($schedResult['error'] ?? 'فشل جدولة التحديث.', $code, $schedResult);
@@ -274,7 +311,9 @@ class UpdateController extends Controller
         ]);
 
         // Execute update
-        $result = $this->updateService->applyUpdate($force, $this->hasDesktopHandoffCapability($body));
+        $result = $shellVersion === null
+            ? $this->updateService->applyUpdate($force, $deltaCapable)
+            : $this->updateService->applySelectedShellUpdate($shellVersion, $deltaCapable);
         $durationMs = round((microtime(true) - $startTime) * 1000, 2);
 
         if (!$result['ok']) {

@@ -60,6 +60,11 @@ class EnvLoader
             $key   = trim(substr($line, 0, $eqPos));
             $value = trim(substr($line, $eqPos + 1));
 
+            // Native capability and baseline come from the packaged Electron process.
+            if (in_array(strtoupper($key), ['POS_SHELL_DELTA_HANDOFF', 'POS_SHELL_DELTA_NATIVE_VERSION', 'POS_SHELL_DELTA_HANDOFF_TOKEN'], true)) {
+                continue;
+            }
+
             // إزالة علامات الاقتباس المحيطة
             if (
                 (str_starts_with($value, '"') && str_ends_with($value, '"')) ||

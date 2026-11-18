@@ -31,6 +31,7 @@ export function isValidSettledResult(data: unknown): data is UpdateCheckResult {
 interface UpdateState {
   hasUpdate: boolean;
   latestVersion: string | null;
+  updateType: AvailableUpdateType | null;
   currentVersion: string | null;
   channel: 'stable' | 'beta' | null;
   installedChannel: 'stable' | 'beta' | 'retired' | null;
@@ -69,6 +70,7 @@ const POLL_INTERVAL_MS = 2_000                 // 2 seconds
 const useUpdateStore = create<UpdateState>((set, get) => ({
   hasUpdate: false,
   latestVersion: null,
+  updateType: null,
   currentVersion: null,
   channel: null,
   installedChannel: null,
@@ -92,6 +94,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
       channel,
       hasUpdate: false,
       latestVersion: null,
+      updateType: null,
       changelog: [],
       updatesUnreachable: false,
       updateErrorMessage: '',
@@ -111,6 +114,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
     set({
       hasUpdate: false,
       latestVersion: null,
+      updateType: null,
       changelog: [],
       updatesUnreachable: false,
       updateErrorMessage: '',
@@ -288,6 +292,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
           set({
             currentVersion: localVersion,
+            ...(data.status === 'invalid_shell_release' ? { hasUpdate: false, latestVersion: null, updateType: null } : {}),
             isPending: false,
             updatesUnreachable: true,
             updateErrorMessage: formatUpdateError(data),
@@ -325,6 +330,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
         set({
           hasUpdate: Boolean(data.has_update),
           latestVersion: data.latest_version || null,
+          updateType: data.update_type ?? null,
           currentVersion: localVersion,
           changelog: data.changelog || [],
           lastChecked: nowSuccess,
@@ -405,6 +411,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
         const stateUpdate = {
           hasUpdate: Boolean(data?.has_update),
           latestVersion: data?.latest_version || null,
+          updateType: data?.update_type ?? null,
           currentVersion: localVersion,
           changelog: data?.changelog || [],
           lastChecked: (!isUnreachable && isValid) ? nowAttempt : get().lastChecked,

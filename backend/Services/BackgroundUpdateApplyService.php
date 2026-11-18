@@ -37,7 +37,7 @@ class BackgroundUpdateApplyService
      * - No post-dispatch row payload mutation
      * - Never leaks internal scheduling exceptions to HTTP
      */
-    public function scheduleApply(bool $force = false, bool $deltaCapable = true, ?int $userId = null): array
+    public function scheduleApply(bool $force = false, bool $deltaCapable = true, ?int $userId = null, ?string $shellVersion = null): array
     {
         if (!EnvLoader::getBool('ENABLE_AUTO_UPDATE', true)) {
             return [
@@ -71,6 +71,10 @@ class BackgroundUpdateApplyService
             $existing = $stmt->fetch(\PDO::FETCH_ASSOC);
 
             if ($existing) {
+                $existingPayload = json_decode((string) $existing['payload'], true);
+                if (($existingPayload['shell_version'] ?? null) !== $shellVersion) {
+                    return ['ok' => false, 'code' => 409, 'status' => 'busy', 'error' => 'هناك مهمة تحديث أخرى قيد التنفيذ.'];
+                }
                 return [
                     'ok'      => true,
                     'job_id'  => (int) $existing['id'],
@@ -87,6 +91,9 @@ class BackgroundUpdateApplyService
                 'user_id'       => $userId,
                 'created_at'    => date('Y-m-d\TH:i:sP'),
             ];
+            if ($shellVersion !== null) {
+                $payload['shell_version'] = $shellVersion;
+            }
 
             $jobId = JobQueue::dispatchUnique('apply_update', $payload, 10, 1);
 
@@ -138,6 +145,9 @@ class BackgroundUpdateApplyService
             }
 
             // Existing job returned by dispatchUnique: retain ORIGINAL immutable payload and file
+            if (($rowPayload['shell_version'] ?? null) !== $shellVersion) {
+                return ['ok' => false, 'code' => 409, 'status' => 'busy', 'error' => 'هناك مهمة تحديث أخرى قيد التنفيذ.'];
+            }
             return [
                 'ok'      => true,
                 'job_id'  => $jobId,
@@ -168,6 +178,7 @@ class BackgroundUpdateApplyService
         $operationId = (string) ($payload['operation_id'] ?? '');
         $force = (bool) ($payload['force'] ?? false);
         $deltaCapable = (bool) ($payload['delta_capable'] ?? true);
+        $shellVersion = $payload['shell_version'] ?? null;
 
         if ($actualJobId !== null && $actualJobId > 0) {
             $this->saveJobData($actualJobId, [
@@ -179,7 +190,13 @@ class BackgroundUpdateApplyService
         }
 
         try {
-            $result = $this->updateService->applyUpdate($force, $deltaCapable, $operationId !== '' ? $operationId : null);
+            if ($shellVersion !== null && !ShellDeltaDeliveryService::isVersionSelector($shellVersion)) {
+                throw new JobFailure('Invalid queued shell update version.', 400);
+            }
+            $ownerOperation = $operationId !== '' ? $operationId : null;
+            $result = $shellVersion === null
+                ? $this->updateService->applyUpdate($force, $deltaCapable, $ownerOperation)
+                : $this->updateService->applySelectedShellUpdate($shellVersion, $deltaCapable, $ownerOperation);
             $sanitizedResult = $this->sanitizeResult($result);
 
             $saved = true;
@@ -299,6 +316,8 @@ class BackgroundUpdateApplyService
                         : '';
 
                     if ($persistedRequiresHandoff && $targetHandoffVersion !== '') {
+                        $handoffOperation = ($payloadData['update_type'] ?? null) === ShellDeltaManifestService::OPERATION
+                            ? ShellDeltaManifestService::OPERATION : 'electron_delta_install';
                         $stateErrorAbsent = !isset($state['error']) || $state['error'] === null || $state['error'] === '';
                         $noRecoveryMarkers = empty($state['primary_error'])
                             && empty($state['secondary_errors'])
@@ -324,7 +343,7 @@ class BackgroundUpdateApplyService
                             $isOwnedActiveOperation
                             && is_array($state)
                             && ($state['state'] ?? null) === 'completed'
-                            && ($state['operation'] ?? null) === 'electron_delta_install'
+                            && ($state['operation'] ?? null) === $handoffOperation
                             && ($state['phase'] ?? null) === 'completed'
                             && $stateErrorAbsent
                             && $noRecoveryMarkers
