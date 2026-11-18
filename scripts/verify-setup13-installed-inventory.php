@@ -59,7 +59,19 @@ $service = new ProductInventoryService();
 $archive = $service->buildInventory($lab . '/source', '0.0.13');
 $installed = $service->buildInventory($lab . '/installed', '0.0.13');
 if (isset($installed['files'][$uninstaller]) || $archive !== $installed) {
-    throw new RuntimeException('The installed and published product inventories differ.');
+    throw new RuntimeException('The installed and extracted product inventories differ.');
+}
+
+$footprint = json_decode(
+    (string) file_get_contents($lab . '/evidence/extracted-footprint.json'),
+    true,
+    64,
+    JSON_THROW_ON_ERROR
+);
+$extractedFiles = $footprint['files'];
+ksort($extractedFiles, SORT_STRING);
+if ($archive['files'] !== $extractedFiles) {
+    throw new RuntimeException('The product inventory must cover every file in the extracted Setup archive.');
 }
 
 $forbidden = $installed;

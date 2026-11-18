@@ -246,10 +246,12 @@ if ($extra.Count -ne 1 -or $extra[0].path -cne $uninstallerName -or
     $extra[0].size -ne $uninstallerSize -or $extra[0].sha256 -cne $uninstallerSha256) {
     throw 'Expected only the pinned installer-owned uninstaller. See installed-layout.json.'
 }
-$expectedUninstaller = [regex]::Escape((Join-Path $installed $uninstallerName))
+$expectedUninstallCommand = '"{0}" /currentuser' -f (Join-Path $installed $uninstallerName)
 if ($registrations.Count -ne 1 -or $registrations[0].scope -cne 'current-user' -or
+    $registrations[0].subkey -cne '90a2ff53-faef-56f7-9850-17442841706a' -or
+    $registrations[0].display_name -cne 'POS Desktop 0.0.13' -or
     $registrations[0].display_version -cne '0.0.13' -or
-    $registrations[0].uninstall_command -notmatch ('^"?' + $expectedUninstaller + '"?(?:\s|$)')) {
+    $registrations[0].uninstall_command -ine $expectedUninstallCommand) {
     throw 'The new POS Desktop registration must be per-user and point to the installed uninstaller.'
 }
 if ($app.version -cne '0.0.13' -or $summary.executable_product_version -cne '0.0.13.0') {
