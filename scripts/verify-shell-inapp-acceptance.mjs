@@ -20,7 +20,7 @@ const roaming = path.join(profile, 'roaming');
 const shared = path.join(profile, 'shared');
 const dataDir = path.join(shared, 'POS System');
 const configDir = path.join(roaming, 'POS System');
-const failureTrace = path.join(profile, 'candidate-failure.json');
+const failureTrace = path.join(roaming, 'candidate-failure.json');
 const releaseRoot = path.join(lab, scenario === 'rollback' ? 'failing' : 'target', 'release');
 const evidence = path.join(lab, 'evidence');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -170,7 +170,7 @@ async function screenshot(app, name) {
   fs.copyFileSync(path.join(profile, 'diagnostics', name+'.png'), path.join(evidence, name+'.png'));
 }
 
-for (const folder of [local, roaming, shared, path.join(profile, 'chromium')]) {
+for (const folder of [local, roaming, shared, path.join(local, 'pos-ci-chromium')]) {
   fs.mkdirSync(folder, { recursive: true });
 }
 const fixture = await startReleaseFixture(lab, releaseRoot, requests);
@@ -178,8 +178,6 @@ const app = createDesktopLab(installRoot, path.join(profile, 'diagnostics'), {
   LOCALAPPDATA: local,
   APPDATA: roaming,
   PROGRAMDATA: shared,
-  POS_CI_CHROMIUM_PROFILE: path.join(profile, 'chromium'),
-  POS_CI_FAILURE_TRACE: failureTrace,
   HTTPS_PROXY: fixture.proxyUrl,
   NO_PROXY: 'localhost,127.0.0.1',
 });

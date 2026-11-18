@@ -12,6 +12,20 @@ $lab = Join-Path $env:RUNNER_TEMP 'shell-inapp'
 $official = Join-Path $env:RUNNER_TEMP 'setup13-shell'
 New-Item -ItemType Directory -Path (Join-Path $lab 'evidence') | Out-Null
 
+# The public Setup is the benchmark baseline. Record the actual shipped JS
+# inventory gap that prevents it from being the source of the new UI proof.
+$officialAsar = Join-Path $official 'source/resources/app.asar'
+$files = node -e 'const asar = require("@electron/asar"); console.log(JSON.stringify(asar.listPackage(process.argv[1])));' $officialAsar | ConvertFrom-Json
+$files = @($files | ForEach-Object { $_.Replace('\', '/').TrimStart('/') })
+if ('electron/services/shell-update.js' -cin $files) {
+    throw 'Unexpected in-app Format 2 client in published Setup 0.0.13.'
+}
+[ordered]@{
+    scope = 'Static archive inventory of the verified published Setup 0.0.13'
+    app_asar_sha256 = (Get-FileHash -LiteralPath $officialAsar).Hash.ToLowerInvariant()
+    in_app_format2_client_present = $false
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $lab 'evidence/published-client-scope.json') -Encoding utf8NoBOM
+
 $runtimeVersion = '43.8.11'
 $runtimeName = "electron-v$runtimeVersion-win32-x64.zip"
 $runtimeSha = '25de7bab4a1b940776b2cc06cb9d2698fec903554188be5977394a0373b75904'
@@ -62,7 +76,7 @@ try {
 # to drive and observe the same renderer after the supervisor launches it.
 $mainPath = 'electron/main.js'
 $main = Get-Content -LiteralPath $mainPath -Raw
-$debugSwitch = "require('electron').app.commandLine.appendSwitch('remote-debugging-port', '19231'); if (process.env.POS_CI_CHROMIUM_PROFILE) require('electron').app.setPath('userData', process.env.POS_CI_CHROMIUM_PROFILE);"
+$debugSwitch = "require('electron').app.commandLine.appendSwitch('remote-debugging-port', '19231'); require('electron').app.setPath('userData', require('node:path').join(process.env.LOCALAPPDATA, 'pos-ci-chromium'));"
 Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $main) -Encoding utf8NoBOM
 $indexPath = 'frontend/index.html'
 $index = Get-Content -LiteralPath $indexPath -Raw
@@ -146,12 +160,10 @@ try {
 
     # Start the real MariaDB/PHP pair and fail before the desktop reaches sign-in.
     # This trace witnesses execution. The supervisor independently owns recovery.
-    $startup = '    await startCoreRuntime({ maxAttempts: 2 });'
-    if ($main.IndexOf($startup) -lt 0 -or $main.IndexOf($startup) -ne $main.LastIndexOf($startup)) {
-        throw 'Expected the unique packaged startup anchor.'
-    }
-    $failure = "    require('node:fs').writeFileSync(process.env.POS_CI_FAILURE_TRACE, JSON.stringify({ pid: process.pid, phpPort, mysqlPort })); process.exit(78);"
-    $badMain = $main.Replace($startup, $startup + [Environment]::NewLine + $failure)
+    $startup = [regex]::Matches($main, '(?m)^    (?:const started = )?await startCoreRuntime\(\{ maxAttempts: [^\r\n]+ \}\);')
+    if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
+    $failure = "    fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({ pid: process.pid, phpPort, mysqlPort })); process.exit(78);"
+    $badMain = $main.Insert($startup[0].Index + $startup[0].Length, [Environment]::NewLine + $failure)
     Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
     Build-Fixture failing '0.0.14' -ReuseFrontendAndPhar
 
