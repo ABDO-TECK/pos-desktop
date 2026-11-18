@@ -85,8 +85,10 @@ if ($LASTEXITCODE) { throw 'Could not extract the exact x64 candidate applicatio
 $payload = Get-Item -LiteralPath (Join-Path $extract 'app-64.7z')
 & $seven x $payload.FullName "-o$target" -y
 if ($LASTEXITCODE) { throw 'Could not unpack the candidate application archive.' }
-if ((Get-Item -LiteralPath (Join-Path $target 'POS Desktop.exe')).VersionInfo.ProductVersion -cne '0.0.14') {
-    throw 'Packaged Windows executable version is inconsistent with the test version.'
+$windowsVersion = (Get-Item -LiteralPath (Join-Path $target 'POS Desktop.exe')).VersionInfo.ProductVersion
+$expectedWindowsVersion = '^{0}(?:\.0)?$' -f [regex]::Escape($version.version)
+if ($windowsVersion -cnotmatch $expectedWindowsVersion) {
+    throw "Packaged Windows executable version '$windowsVersion' is inconsistent with $($version.version)."
 }
 
 $asar = Join-Path $target 'resources/app.asar'
@@ -99,6 +101,7 @@ if ($LASTEXITCODE -or $packageVersion -cne '0.0.14') {
     checkout_commit = $env:GITHUB_SHA
     redistributable_sha256 = $redistHash
     asar_package_version = $packageVersion
+    windows_product_version = $windowsVersion
     scope = 'Unpublished NSIS x64 application archive built from the checkout and extracted on this runner'
     candidate_installer_sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     candidate_installer_size = $installer.Length
