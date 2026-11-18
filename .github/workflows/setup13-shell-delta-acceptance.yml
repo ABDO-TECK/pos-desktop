@@ -1,0 +1,123 @@
+name: Setup 13 shell file transaction acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/setup13-shell-delta-acceptance
+      - feat-shell-delta-updates
+    paths:
+      - '.github/workflows/setup13-shell-delta-acceptance.yml'
+      - 'scripts/*setup13-shell*'
+      - 'scripts/verify-setup13-installed-*'
+      - 'scripts/build-shell-delta.php'
+      - 'scripts/deployment-inventory.php'
+      - 'scripts/verify-shell-path-policy.php'
+      - 'scripts/verify-shell-product-coverage.php'
+      - 'build/uninstall-data.ps1'
+      - 'backend/Services/ProductInventoryService.php'
+      - 'backend/Services/ShellDeltaManifestService.php'
+      - 'backend/Services/ShellDeltaFileTransactionService.php'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup13-shell-delta-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packaged-transaction:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Identify and extract the verified Setup 13 payload
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-baseline.ps1
+
+      - name: Install the published Setup 13 per user and verify installed bytes
+        shell: pwsh
+        run: |
+          ./scripts/verify-setup13-installed-shell.ps1
+          php scripts/verify-setup13-installed-inventory.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Install locked build dependencies
+        id: dependencies
+        shell: pwsh
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
+          COMPOSER_PROCESS_TIMEOUT: '600'
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build the isolated Electron test candidate
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: ./scripts/build-setup13-shell-test-candidate.ps1
+
+      - name: Verify product coverage of the freshly extracted candidate
+        id: target-coverage
+        shell: pwsh
+        run: php scripts/verify-shell-product-coverage.php --root (Join-Path $env:RUNNER_TEMP 'setup13-shell/target')
+
+      - name: Measure packaged SQL and PHAR compatibility on MariaDB
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-data.ps1
+
+      - name: Apply and roll back the signed Format 2 file transaction
+        shell: pwsh
+        run: php scripts/verify-setup13-shell-transaction.php transaction
+
+      - name: Diagnose candidate path coverage after a later failure
+        if: failure() && steps.target-coverage.outcome == 'success'
+        shell: pwsh
+        run: php scripts/verify-shell-product-coverage.php --root (Join-Path $env:RUNNER_TEMP 'setup13-shell/target')
+
+      - name: Run shell inventory, contract, builder and rollback regressions
+        if: always() && steps.dependencies.outcome == 'success'
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-path-policy.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-delta-contract.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-delta-builder.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-file-transaction.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup13-shell-delta-evidence
+          path: ${{ runner.temp }}/setup13-shell/evidence/*.json
+          if-no-files-found: warn
+          retention-days: 14

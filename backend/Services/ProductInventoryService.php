@@ -24,6 +24,8 @@ final class ProductInventoryService
     public const MAX_PATH_LENGTH = 260;
     public const MAX_SAFE_INTEGER = 9007199254740991;
 
+    private const NSIS_UNINSTALLER = 'Uninstall POS Desktop.exe';
+
     /**
      * Managed Electron root files needed for normal packaged tree.
      */
@@ -256,8 +258,8 @@ final class ProductInventoryService
             return ['ok' => true, 'reason_code' => null];
         }
 
-        // 5. resources root files
-        if ($path === 'resources/uninstall-data.ps1') {
+        // 5. Exact resources shipped as part of the NSIS application payload.
+        if (in_array($path, ['resources/uninstall-data.ps1', 'resources/app-update.yml', 'resources/elevate.exe'], true)) {
             return ['ok' => true, 'reason_code' => null];
         }
 
@@ -727,6 +729,10 @@ final class ProductInventoryService
             if ($item->isFile()) {
                 $relative = ltrim(substr($pathname, $rootLen), '/');
                 if (self::isProtectedPath($relative)) {
+                    continue;
+                }
+                // The confined root uninstaller belongs to NSIS. Signed paths still use the product allowlist.
+                if ($relative === self::NSIS_UNINSTALLER) {
                     continue;
                 }
                 $discoveredPaths[] = $relative;
