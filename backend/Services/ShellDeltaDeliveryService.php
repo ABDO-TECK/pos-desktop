@@ -127,12 +127,17 @@ final class ShellDeltaDeliveryService
                 return null;
             }
 
+            $size = $descriptor['package']['size'];
+            $freeBytes = @disk_free_space($parent);
+            if ($freeBytes === false || $freeBytes < $size) {
+                return 'shell_stage_insufficient_space';
+            }
+
             $temporary = $parent . '/.shell-delta-' . bin2hex(random_bytes(12));
             if (!@mkdir($temporary, 0700)) {
                 return 'shell_stage_unavailable';
             }
             $temporary = ProductInventoryService::resolveAbsolutePath($temporary);
-            $size = $descriptor['package']['size'];
             $this->updates->setUpdateState('downloading', $stateContext + ['download_bytes' => 0, 'total_bytes' => $size]);
             $download = $this->provider->downloadBoundedAssetFile(
                 $verified['url'],

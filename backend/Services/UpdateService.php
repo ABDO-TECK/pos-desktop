@@ -1045,6 +1045,10 @@ class UpdateService
     {
         $lock = new UpdateOperationLock($this->deltaUpdateService->getStorageDir());
         $state = $this->deltaUpdateService->getUpdateState();
+        if ($shellVersion !== null && (!empty($state['requires_recovery']) || ($state['reason_code'] ?? null) === 'recovery_required')) {
+            return ['ok' => false, 'code' => 409, 'error' => 'يلزم إكمال استرجاع التحديث السابق قبل تثبيت تحديث جديد.',
+                'data' => ['reason_code' => 'recovery_required']];
+        }
         if (UpdateOperationLock::isActiveState($state)) {
             return $this->updateCoordinationFailure($state['owner_id'] ?? null, $state['operation'] ?? null);
         }
@@ -1747,6 +1751,8 @@ class UpdateService
                 if (($pending['state'] ?? null) === 'desktop_handoff_pending'
                     && ($pending['operation'] ?? null) === ShellDeltaManifestService::OPERATION
                     && ($pending['operation_id'] ?? null) === $context['operation_id']
+                    && ($pending['owner_id'] ?? null) === $context['owner_id']
+                    && ($pending['to_version'] ?? null) === $version
                     && ($pending['target_version'] ?? null) === $version) {
                     return ['ok' => true, 'data' => [
                         'ok' => true,
@@ -1769,6 +1775,7 @@ class UpdateService
             'data_schema_incompatible', 'data_compatibility_unverifiable' =>
                 'تعذر التحقق من تطابق بنية قاعدة البيانات مع حزمة التحديث.',
             'shell_package_download_failed', 'shell_release_assets_unreachable' => 'تعذر تحميل حزمة تحديث تطبيق سطح المكتب.',
+            'shell_stage_insufficient_space' => 'مساحة القرص غير كافية لتحميل حزمة تحديث تطبيق سطح المكتب.',
             default => 'تعذر التحقق من حزمة تحديث تطبيق سطح المكتب أو تجهيزها.',
         };
         return ['ok' => false, 'code' => 422, 'error' => $message, 'data' => ['reason_code' => $reason, 'logs' => [$message]]];
