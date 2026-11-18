@@ -28,6 +28,21 @@ Expand-Archive -LiteralPath $archive -DestinationPath $dist
 if (Test-Path -LiteralPath 'portable') { throw 'Unexpected portable directory before candidate staging.' }
 Copy-Item -LiteralPath (Join-Path $source 'resources/portable') -Destination 'portable' -Recurse
 
+# The redistributable is embedded alongside the application archive by NSIS.
+# Verify it against the project pin before reusing it in the unpublished Setup.
+$seven = (Get-Command 7z.exe -ErrorAction Stop).Source
+$prerequisites = [IO.Path]::GetFullPath((Join-Path $PWD 'build/prerequisites'))
+$runtimeManifest = Get-Content -LiteralPath 'scripts/desktop-runtime.json' -Raw | ConvertFrom-Json
+if ($runtimeManifest.vcredist.archiveName -cne 'vc_redist.x64.exe') { throw 'Unexpected redistributable archive name.' }
+$sourceSetup = Join-Path $lab 'POS-Desktop-Setup-0.0.13.exe'
+& $seven e $sourceSetup '$PLUGINSDIR\vc_redist.x64.exe' "-o$prerequisites" -y
+if ($LASTEXITCODE) { throw 'Could not extract the pinned prerequisite from the verified Setup.' }
+$redistributable = Join-Path $prerequisites $runtimeManifest.vcredist.archiveName
+$redistHash = (Get-FileHash -LiteralPath $redistributable -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($redistHash -cne $runtimeManifest.vcredist.sha256.ToLowerInvariant()) {
+    throw 'Extracted Visual C++ redistributable does not match the project pin.'
+}
+
 # The frontend sources at the branch base match the Setup tag. Build a controlled
 # HTML metadata change through Vite so the probe exercises a physical frontend replacement.
 $index = Get-Content -LiteralPath 'frontend/index.html' -Raw
@@ -63,7 +78,6 @@ $builderArgs = @('--win', '--x64', '--publish', 'never',
 & ./node_modules/.bin/electron-builder.cmd @builderArgs
 if ($LASTEXITCODE) { throw 'Could not build the unpublished NSIS test candidate.' }
 $installer = Get-Item -LiteralPath (Join-Path $out 'POS-Desktop-Setup-0.0.14.exe')
-$seven = (Get-Command 7z.exe -ErrorAction Stop).Source
 $extract = Join-Path $lab 'target-archive'
 $target = Join-Path $lab 'target'
 & $seven e $installer.FullName '$PLUGINSDIR\app-64.7z' "-o$extract" -y
@@ -75,8 +89,16 @@ if ((Get-Item -LiteralPath (Join-Path $target 'POS Desktop.exe')).VersionInfo.Pr
     throw 'Packaged Windows executable version is inconsistent with the test version.'
 }
 
+$asar = Join-Path $target 'resources/app.asar'
+$packageVersion = node -e "const asar = require('@electron/asar'); console.log(JSON.parse(asar.extractFile(process.argv[1], 'package.json')).version)" $asar
+if ($LASTEXITCODE -or $packageVersion -cne '0.0.14') {
+    throw 'Packaged app.asar version is inconsistent with the test version.'
+}
+
 [ordered]@{
     checkout_commit = $env:GITHUB_SHA
+    redistributable_sha256 = $redistHash
+    asar_package_version = $packageVersion
     scope = 'Unpublished NSIS x64 application archive built from the checkout and extracted on this runner'
     candidate_installer_sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     candidate_installer_size = $installer.Length

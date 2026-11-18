@@ -179,6 +179,10 @@ function verifyTransaction(string $lab): void
         'The Setup payload does not match its published deployment file hashes.');
     ensure(!file_exists($source . '/Uninstall POS Desktop.exe'), 'The source is expected to be the cold NSIS archive tree.');
 
+    $targetPhar = new Phar($target . '/resources/app.asar.unpacked/backend/backend.phar');
+    ensure(isset($targetPhar['cli/shell-worker-plan.php']), 'The candidate PHAR is missing the packaged worker plan CLI.');
+    unset($targetPhar);
+
     $contract = readJson($lab . '/source-contract.json');
     ensure($contract === readJson($lab . '/target-contract.json'), 'Live packaged source and target contracts differ.');
 
@@ -196,7 +200,7 @@ function verifyTransaction(string $lab): void
     };
 
     $publicKey = buildSignedDelta($lab, $source, $target, $packageDir);
-    $manifests = new ShellDeltaManifestService(new ManifestSignatureService(null, [$publicKey]));
+    $manifests = new ShellDeltaManifestService(new ManifestSignatureService(null, [$publicKey], false, false));
     $transaction = new ShellDeltaFileTransactionService($manifests);
     $context = [
         'version' => '0.0.13',
@@ -209,6 +213,11 @@ function verifyTransaction(string $lab): void
     ensure($raw !== false && $signature !== false, 'Signed builder outputs are missing.');
     $verified = $manifests->verify($raw, $signature, $context);
     ensure($verified['ok'], 'The Format 2 manifest failed production signature and context validation.');
+    $signatureBytes = base64_decode(trim($signature), true);
+    ensure($signatureBytes !== false && $signatureBytes !== '', 'The builder signature did not decode.');
+    $signatureBytes[0] = chr(ord($signatureBytes[0]) ^ 1);
+    $altered = $manifests->verify($raw, base64_encode($signatureBytes), $context);
+    ensure(!$altered['ok'] && $altered['reason_code'] === 'signature_invalid', 'Altered RSA signature was accepted.');
     $manifest = $verified['descriptor'];
     ensure($manifest['format'] === 2 && $manifest['purpose'] === 'regular'
         && $manifest['version'] === '0.0.14' && $manifest['native_version'] === '0.0.14'
@@ -252,11 +261,13 @@ function verifyTransaction(string $lab): void
         'electron_node_mode' => ['source' => $sourceElectron, 'candidate' => $targetElectron,
             'applied' => $appliedElectron, 'restored' => $restoredElectron],
         'published_deployment_files_verified' => count($published['files']),
+        'candidate_worker_plan_cli_packaged' => true,
         'source_inventory_sha256' => $manifest['source_inventory_sha256'],
         'target_inventory_sha256' => $manifest['target_inventory_sha256'],
         'source_inventory_files' => count($initial['files']),
         'target_inventory_files' => count($expected['files']),
         'format2_manifest_sha256' => hash('sha256', $raw),
+        'altered_signature_rejected_under_ephemeral_trust' => true,
         'format2_package_sha256' => hash_file('sha256', $package),
         'format2_package_size' => filesize($package),
         'required_changed_files' => $changes,
