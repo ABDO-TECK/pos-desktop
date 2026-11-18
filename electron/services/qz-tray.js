@@ -110,4 +110,12 @@ function stopQZTray() {
   }
 }
 
-module.exports = { startQZTray, stopQZTray };
+async function stopQZTrayAndWait() {
+  const child = qzProcess;
+  if (!child) return;
+  const { stopPhpServerAwaitable } = require('./php-server');
+  await stopPhpServerAwaitable({ processRef: child, timeoutMs: 4000 });
+  if (qzProcess === child) qzProcess = null;
+}
+
+module.exports = { startQZTray, stopQZTray, stopQZTrayAndWait };

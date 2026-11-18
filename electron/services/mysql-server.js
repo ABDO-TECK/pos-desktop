@@ -352,7 +352,14 @@ async function startMySQL(preferredPort = 3307, options = {}) {
   const runtimePaths = getMysqlPaths();
   const maxStartupAttempts = Math.max(1, Number(options.maxStartupAttempts) || 3);
   const startupTimeoutMs = Math.max(5000, Number(options.startupTimeoutMs) || 30000);
-  initializeMysqlDataDirectory(runtimePaths);
+  if (options.probation && !isMysqlDataDirectoryInitialized(runtimePaths.dataDir)) {
+    throw new Error('The existing MariaDB directory is unavailable for shell update health.');
+  }
+  const storedCredentials = options.probation
+    ? loadStoredDatabaseCredentials(require('../utils/paths').getDatabaseCredentialsPath())
+    : null;
+  if (options.probation && !storedCredentials) throw new Error('Stored MariaDB credentials are unavailable.');
+  if (!options.probation) initializeMysqlDataDirectory(runtimePaths);
 
   let lastError = null;
   for (let attempt = 1; attempt <= maxStartupAttempts; attempt += 1) {
@@ -409,7 +416,7 @@ async function startMySQL(preferredPort = 3307, options = {}) {
         args,
         cwd: runtimePaths.binaryDir,
       });
-      const credentials = initDatabase(selectedPort, runtimePaths);
+      const credentials = storedCredentials || initDatabase(selectedPort, runtimePaths);
       lastMysqlError = null;
       return {
         ...credentials,
@@ -559,6 +566,44 @@ function stopMySQL() {
   });
 }
 
+async function stopMySQLCleanly() {
+  const child = mysqlProcess;
+  const port = mysqlPort;
+  const runtime = getMysqlPaths();
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null || !port || !runtime.mysqlAdminPath) {
+    throw new Error('Owned, running MariaDB could not be established before shutdown.');
+  }
+
+  let done;
+  let timeout;
+  const exit = new Promise((resolve, reject) => {
+    done = (code, signal) => code === 0 && signal === null
+      ? resolve()
+      : reject(new Error('MariaDB did not report a clean process exit.'));
+    child.once('exit', done);
+    timeout = setTimeout(() => reject(new Error('MariaDB did not exit cleanly before the deadline.')), 15000);
+  });
+  try {
+    await Promise.all([
+      exit,
+      new Promise((resolve, reject) => {
+        execFile(runtime.mysqlAdminPath, [
+          '--no-defaults', '--protocol=tcp', '--host=127.0.0.1', '--user=root', '--port=' + port, 'shutdown',
+        ], { cwd: runtime.binaryDir, windowsHide: true, timeout: 12000 }, (error) => {
+          if (error) reject(new Error('MariaDB did not acknowledge a clean shutdown.'));
+          else resolve();
+        });
+      }),
+    ]);
+    if (mysqlProcess !== child || child.exitCode !== 0) throw new Error('Owned MariaDB shutdown state changed.');
+    mysqlProcess = null;
+    mysqlPort = null;
+  } finally {
+    child.removeListener('exit', done);
+    clearTimeout(timeout);
+  }
+}
+
 function getLastMysqlError() {
   return lastMysqlError;
 }
@@ -570,6 +615,7 @@ module.exports = {
   isMysqlDataDirectoryInitialized,
   startMySQL,
   stopMySQL,
+  stopMySQLCleanly,
   resetDatabase,
   getLastMysqlError,
   waitForMysqlReady,
