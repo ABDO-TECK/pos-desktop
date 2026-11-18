@@ -204,10 +204,12 @@ function createBackendEnv({ mysqlPort, dbCredentials, apiPort }) {
   } = require('../utils/paths');
 
   const packaged = isPackaged();
+  const shellUpdate = require('./shell-update').shellBackendEnvironment();
   const isLanDeployment = process.env.POS_LAN_ENABLED === 'true';
 
   return {
     ...process.env,
+    ...shellUpdate,
     DB_HOST: '127.0.0.1',
     DB_PORT: String(mysqlPort),
     DB_NAME: process.env.DB_NAME || 'pos_db',
@@ -517,20 +519,22 @@ async function startPhpServer(options = {}) {
     const selectedPort = await findAvailablePort(preferredPort + attempt - 1);
     try {
       console.log(`[PHP] Startup attempt ${attempt}/${maxStartupAttempts}; selected port ${selectedPort}.`);
-      if (Array.isArray(startupMigrations)) {
+      if (!options.probation && Array.isArray(startupMigrations)) {
         await runDatabaseMigrations({
           mysqlPort,
           dbCredentials,
           apiPort: selectedPort,
           migrations: startupMigrations,
         });
-      } else {
+      } else if (!options.probation) {
         await runDatabaseMigrations({ mysqlPort, dbCredentials, apiPort: selectedPort });
       }
 
       const env = {
         ...createBackendEnv({ mysqlPort, dbCredentials, apiPort: selectedPort }),
         PHP_CLI_SERVER_WORKERS: '4',
+        POS_SHELL_PROBATION_TOKEN: options.probation?.token || '',
+        POS_SHELL_PROBATION_GATE: options.probation?.gate || '',
       };
       const sysTempDir = getTempDir();
       const args = [
@@ -639,8 +643,8 @@ async function startPhpServer(options = {}) {
   );
 }
 
-async function startPHP(port, mysqlPort, dbCredentials) {
-  return startPhpServer({ preferredPort: port, mysqlPort, dbCredentials });
+async function startPHP(port, mysqlPort, dbCredentials, options = {}) {
+  return startPhpServer({ ...options, preferredPort: port, mysqlPort, dbCredentials });
 }
 
 function waitForHealth(baseUrl, options = {}) {
@@ -676,7 +680,8 @@ function waitForHealth(baseUrl, options = {}) {
         return;
       }
 
-      const req = http.get(`${baseUrl}/api/health`, (res) => {
+      const headers = options.probationToken ? { 'X-POS-Shell-Health': options.probationToken } : {};
+      const req = http.get(`${baseUrl}/api/health`, { headers }, (res) => {
         let rawData = '';
         res.on('data', (chunk) => { rawData += chunk; });
         res.on('end', () => {

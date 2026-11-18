@@ -146,7 +146,7 @@ function getHttpsProxyInfo() {
   };
 }
 
-function closeProxyServer() {
+function closeProxyServer({ disconnect = false } = {}) {
   return new Promise((resolve) => {
     const server = proxyServer;
     proxyServer = null;
@@ -164,6 +164,7 @@ function closeProxyServer() {
     }
 
     server.close(() => resolve());
+    if (disconnect) server.closeAllConnections();
   });
 }
 
@@ -297,8 +298,8 @@ async function enableLanAccess(phpPort, httpsPort = 8443) {
   }
 }
 
-function stopHttpsProxy() {
-  return closeProxyServer();
+function stopHttpsProxy(options) {
+  return closeProxyServer(options);
 }
 
 module.exports = {

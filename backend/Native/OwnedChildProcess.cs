@@ -700,6 +700,48 @@ namespace PosDesktop.Updates.Native
             }
         }
 
+        public uint GetExitedRootCode()
+        {
+            lock (this._syncLock)
+            {
+                if (this._hProcess == IntPtr.Zero || !this.Observe().RootState.Equals(ChildRootState.Dead))
+                    throw new InvalidOperationException("Owned root exit has not been established.");
+                uint code;
+                if (!NativeMethods.GetExitCodeProcess(this._hProcess, out code))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                return code;
+            }
+        }
+
+        // The caller must publish a durable accepted health decision before
+        // dropping job termination. Any failure before this point keeps the job armed.
+        public void ReleaseHealthyRuntime()
+        {
+            lock (this._syncLock)
+            {
+                if (this._isClosed || this.Observe().RootState != ChildRootState.Live)
+                    throw new InvalidOperationException("A dead or unknown candidate cannot be admitted.");
+                var limits = new NativeMethods.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                uint size = (uint)Marshal.SizeOf(typeof(NativeMethods.JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                uint length;
+                if (!NativeMethods.QueryInformationJobObject(this._hJob, NativeMethods.JobObjectExtendedLimitInformation, ref limits, size, out length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                limits.BasicLimitInformation.LimitFlags &= ~NativeMethods.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (!NativeMethods.SetInformationJobObject(this._hJob, NativeMethods.JobObjectExtendedLimitInformation, ref limits, size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+
+                if (!NativeMethods.CloseHandle(this._hJob))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                this._hJob = IntPtr.Zero;
+                this._jobClosed = true;
+                if (!NativeMethods.CloseHandle(this._hProcess))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                this._hProcess = IntPtr.Zero;
+                this._processClosed = true;
+                this._isClosed = true;
+            }
+        }
+
         /// <summary>
         /// Terminates the Job Object and root process if not already dead/empty, waits within a monotonic deadline
         /// until the root is proven DEAD and job active processes reach 0, then independently closes all handles.
@@ -1658,6 +1700,10 @@ namespace PosDesktop.Updates.Native
             [DllImport("kernel32.dll", SetLastError = true)]
             [return: MarshalAs(UnmanagedType.Bool)]
             internal static extern bool CloseHandle(IntPtr hObject);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
 
             [DllImport("kernel32.dll", SetLastError = true)]
             [return: MarshalAs(UnmanagedType.Bool)]

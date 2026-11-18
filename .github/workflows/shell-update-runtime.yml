@@ -1,0 +1,46 @@
+name: Shell update runtime verification
+
+on:
+  push:
+    branches: ['codex/shell-runtime-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: zip, openssl, mbstring, pdo_mysql
+          coverage: none
+      - name: Verify runtime JavaScript and PHP syntax
+        shell: pwsh
+        run: |
+          $js = git ls-files 'electron/*.js' 'electron/services/*.js'
+          foreach ($file in $js) {
+            node --check $file
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          $php = @('build-phar.php', 'backend/router.php', 'backend/Services/ShellDeltaFileTransactionService.php', 'backend/Services/ShellUpdateHealthService.php', 'backend/cli/shell-transaction.php')
+          foreach ($file in $php) {
+            php -l $file
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Clean up a live owned child after its candidate exits
+        shell: pwsh
+        run: ./scripts/verify-shell-update-process.ps1
+      - name: Run signed file transaction recovery suite
+        shell: pwsh
+        run: php scripts/verify-shell-file-transaction.php
+
