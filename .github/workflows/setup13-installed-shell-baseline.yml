@@ -35,6 +35,7 @@ jobs:
           coverage: none
 
       - name: Acquire verified stable Setup and unpack its matching x64 archive
+        id: acquire
         shell: pwsh
         run: ./scripts/verify-setup13-shell-baseline.ps1
 
@@ -42,7 +43,8 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-setup13-installed-shell.ps1
 
-      - name: Verify published deployment inventory against both layouts
+      - name: Verify published deployment inventory and physical product policy
+        if: ${{ !cancelled() && steps.acquire.outcome == 'success' }}
         shell: pwsh
         run: php scripts/verify-setup13-installed-inventory.php
 

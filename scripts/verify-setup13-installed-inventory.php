@@ -9,6 +9,9 @@ if (PHP_OS_FAMILY !== 'Windows' || getenv('GITHUB_ACTIONS') !== 'true'
 }
 
 require_once __DIR__ . '/deployment-inventory.php';
+require_once __DIR__ . '/../backend/Services/ProductInventoryService.php';
+
+use App\Services\ProductInventoryService;
 
 $lab = getenv('RUNNER_TEMP') . '/setup13-shell';
 $published = json_decode(
@@ -44,3 +47,39 @@ if (file_put_contents($lab . '/evidence/installed-deployment-inventory.json', $e
     throw new RuntimeException('Could not record installed deployment inventory evidence.');
 }
 echo "All {$verified['installed']} publishable files matched both physical layouts.\n";
+
+$uninstaller = 'Uninstall POS Desktop.exe';
+foreach ([$uninstaller, strtolower($uninstaller), 'resources/' . $uninstaller] as $installerPath) {
+    if (ProductInventoryService::validatePathSet([$installerPath])['ok']) {
+        throw new RuntimeException("Installer-owned path unexpectedly eligible for a signed manifest: {$installerPath}");
+    }
+}
+
+$service = new ProductInventoryService();
+$archive = $service->buildInventory($lab . '/source', '0.0.13');
+$installed = $service->buildInventory($lab . '/installed', '0.0.13');
+if (isset($installed['files'][$uninstaller]) || $archive !== $installed) {
+    throw new RuntimeException('The installed and published product inventories differ.');
+}
+
+$forbidden = $installed;
+$forbidden['files'][$uninstaller] = [
+    'sha256' => hash_file('sha256', $lab . '/installed/' . $uninstaller),
+    'size' => filesize($lab . '/installed/' . $uninstaller),
+];
+if ($service->validateInventory($forbidden)['ok'] || !$service->validateInventory($installed)['ok']) {
+    throw new RuntimeException('The inventory validator must accept the product map and reject installer-owned files.');
+}
+
+$evidence = [
+    'version' => $installed['version'],
+    'native_shell_version' => $installed['native_version'],
+    'native_shell_sha256' => $installed['native_shell']['sha256'],
+    'matching_product_files' => count($installed['files']),
+    'installer_owned_file_ineligible_for_manifest' => true,
+];
+$encoded = json_encode($evidence, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+if (file_put_contents($lab . '/evidence/installed-product-inventory.json', $encoded) !== strlen($encoded)) {
+    throw new RuntimeException('Could not record installed product inventory evidence.');
+}
+echo "All {$evidence['matching_product_files']} managed product files matched both physical inventories.\n";

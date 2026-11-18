@@ -15,6 +15,9 @@ $source = Join-Path $lab 'source'
 $installed = Join-Path $lab 'installed'
 $setup = Join-Path $lab 'POS-Desktop-Setup-0.0.13.exe'
 $uninstallerName = 'Uninstall POS Desktop.exe'
+$uninstallerSha256 = 'c796be036cc225bc36fd665b7ee0c0215de61fb3f9082204710619b04edeae4b'
+$uninstallerSize = 443419
+$updaterCache = Join-Path $env:LOCALAPPDATA 'pos-desktop-updater'
 
 function Write-Receipt {
     param([string] $Name, $Data)
@@ -69,13 +72,20 @@ function Get-PosRegistrations {
     foreach ($root in $registryRoots) {
         if (-not (Test-Path -LiteralPath $root.path)) { continue }
         foreach ($key in Get-ChildItem -LiteralPath $root.path) {
-            if ($key.GetValue('DisplayName') -cne 'POS Desktop') { continue }
+            $name = $key.GetValue('DisplayName')
+            $location = $key.GetValue('InstallLocation')
+            $uninstallCommand = $key.GetValue('UninstallString')
+            if ([string]$name -notlike '*POS Desktop*' -and [string]$location -ine $installed -and
+                [string]$uninstallCommand -notlike "*$installed*") {
+                continue
+            }
             [ordered]@{
                 scope = $root.scope
                 subkey = $key.PSChildName
+                display_name = $name
                 display_version = $key.GetValue('DisplayVersion')
-                install_location = $key.GetValue('InstallLocation')
-                uninstall_command = $key.GetValue('UninstallString')
+                install_location = $location
+                uninstall_command = $uninstallCommand
             }
         }
     }
@@ -142,7 +152,11 @@ Write-Receipt 'extracted-footprint.json' $archiveFootprint
 Write-Host "Running immutable Setup 0.0.13 per user into $installed"
 $process = Start-Process -FilePath $setup -ArgumentList @('/S', '/currentuser', "/D=$installed") -WindowStyle Hidden -PassThru
 try {
-    if (-not $process.WaitForExit(180000)) { throw 'Setup 0.0.13 did not exit in 180 seconds.' }
+    if (-not $process.WaitForExit(180000)) {
+        $process.Kill($true)
+        [void]$process.WaitForExit(10000)
+        throw 'Setup 0.0.13 did not exit in 180 seconds.'
+    }
     if ($process.ExitCode -ne 0) { throw "Setup 0.0.13 failed with exit code $($process.ExitCode)." }
 } finally {
     $process.Dispose()
@@ -174,11 +188,23 @@ $addedDirectories = @($installedFootprint.directories | Where-Object { $_ -cnoti
 $removedDirectories = @($archiveFootprint.directories | Where-Object { $_ -cnotin $installedFootprint.directories })
 $protectedResults = @(foreach ($witness in $witnesses) {
     $after = Get-TreeFootprint $witness.root
+    $changedWitnesses = @($witness.before.files.Keys | Where-Object {
+        -not $after.files.ContainsKey($_) -or
+        $after.files[$_].sha256 -cne $witness.before.files[$_].sha256 -or
+        $after.files[$_].size -ne $witness.before.files[$_].size
+    })
+    $addedWitnessFiles = @(foreach ($relative in $after.files.Keys) {
+        if (-not $witness.before.files.ContainsKey($relative)) {
+            $record = $after.files[$relative]
+            [ordered]@{ path = $relative; sha256 = $record.sha256; size = $record.size }
+        }
+    })
     [ordered]@{
         root = $witness.root
-        directory_count = $after.directories.Count
-        file_count = $after.files.Count
-        unchanged = (ConvertTo-Json $witness.before -Compress -Depth 8) -ceq (ConvertTo-Json $after -Compress -Depth 8)
+        fixture_file_count = $witness.before.files.Count
+        changed_or_removed_fixture_files = $changedWitnesses
+        added_files = $addedWitnessFiles
+        directories_unchanged = ($after.directories -join '\n') -ceq ($witness.before.directories -join '\n')
     }
 })
 $registrations = @(Get-PosRegistrations)
@@ -205,12 +231,20 @@ $summary = [ordered]@{
 Write-Receipt 'installed-layout.json' $summary
 Write-Host "Compared $($archiveFootprint.files.Count) extracted files with $($installedFootprint.files.Count) installed files."
 $extra | ForEach-Object { Write-Host "NSIS extra: $($_.path), $($_.size) bytes, SHA-256 $($_.sha256)" }
+Write-Host "Installed app $($app.version), Electron $electronVersion, PE ProductVersion $($summary.executable_product_version)."
+Write-Host "Registrations: $(ConvertTo-Json -InputObject $registrations -Compress)"
+foreach ($witness in $protectedResults) {
+    foreach ($file in $witness.added_files) {
+        Write-Host "External lifecycle file: $($witness.root)/$($file.path), $($file.size) bytes, SHA-256 $($file.sha256)"
+    }
+}
 
 if ($missing.Count -ne 0 -or $changed.Count -ne 0 -or $addedDirectories.Count -ne 0 -or $removedDirectories.Count -ne 0) {
     throw 'Setup installed a different set of managed bytes or directories. See installed-layout.json.'
 }
-if ($extra.Count -ne 1 -or $extra[0].path -cne $uninstallerName -or $extra[0].size -le 0) {
-    throw 'Expected one installer-owned uninstaller and no other extra files. See installed-layout.json.'
+if ($extra.Count -ne 1 -or $extra[0].path -cne $uninstallerName -or
+    $extra[0].size -ne $uninstallerSize -or $extra[0].sha256 -cne $uninstallerSha256) {
+    throw 'Expected only the pinned installer-owned uninstaller. See installed-layout.json.'
 }
 $expectedUninstaller = [regex]::Escape((Join-Path $installed $uninstallerName))
 if ($registrations.Count -ne 1 -or $registrations[0].scope -cne 'current-user' -or
@@ -218,10 +252,20 @@ if ($registrations.Count -ne 1 -or $registrations[0].scope -cne 'current-user' -
     $registrations[0].uninstall_command -notmatch ('^"?' + $expectedUninstaller + '"?(?:\s|$)')) {
     throw 'The new POS Desktop registration must be per-user and point to the installed uninstaller.'
 }
-if ($app.version -cne '0.0.13' -or $summary.executable_product_version -cne '0.0.13') {
-    throw 'Expected both application and desktop executable version 0.0.13.'
+if ($app.version -cne '0.0.13' -or $summary.executable_product_version -cne '0.0.13.0') {
+    throw 'Expected application version 0.0.13 and PE ProductVersion 0.0.13.0.'
 }
-if ($protectedResults.Count -ne 8 -or @($protectedResults | Where-Object { -not $_.unchanged }).Count -ne 0) {
-    throw 'An exact product-owned protected witness tree changed during installation.'
+if ($protectedResults.Count -ne 8 -or @($protectedResults | Where-Object {
+    -not $_.directories_unchanged -or $_.fixture_file_count -ne 3 -or $_.changed_or_removed_fixture_files.Count -ne 0
+}).Count -ne 0) {
+    throw 'Protected witness data was modified or removed during installation.'
 }
-Write-Host "Setup 0.0.13 physical parity, Electron $electronVersion, and all eight protected witness trees verified."
+$cacheResult = @($protectedResults | Where-Object { $_.root -ieq $updaterCache })
+if ($cacheResult.Count -ne 1 -or $cacheResult[0].added_files.Count -ne 1 -or
+    $cacheResult[0].added_files[0].path -cne 'installer.exe' -or
+    $cacheResult[0].added_files[0].sha256 -cne $expected.setup_sha256 -or
+    $cacheResult[0].added_files[0].size -ne $expected.setup_size -or
+    @($protectedResults | Where-Object { $_.root -ine $updaterCache -and $_.added_files.Count -ne 0 }).Count -ne 0) {
+    throw 'Expected the exact pinned Setup copy in the installer-owned updater cache and no other protected-root additions.'
+}
+Write-Host "Setup 0.0.13 physical parity, Electron $electronVersion, and all 24 protected witness files verified."
