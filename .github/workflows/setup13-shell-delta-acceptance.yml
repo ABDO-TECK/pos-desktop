@@ -10,6 +10,7 @@ on:
       - '.github/workflows/setup13-shell-delta-acceptance.yml'
       - 'scripts/*setup13-shell*'
       - 'scripts/build-shell-delta.php'
+      - 'scripts/verify-shell-path-policy.php'
       - 'backend/Services/ProductInventoryService.php'
       - 'backend/Services/ShellDeltaManifestService.php'
       - 'backend/Services/ShellDeltaFileTransactionService.php'
@@ -49,6 +50,7 @@ jobs:
         run: ./scripts/verify-setup13-shell-baseline.ps1
 
       - name: Install locked build dependencies
+        id: dependencies
         shell: pwsh
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -76,6 +78,19 @@ jobs:
       - name: Apply and roll back the signed Format 2 file transaction
         shell: pwsh
         run: php scripts/verify-setup13-shell-transaction.php transaction
+
+      - name: Run shell inventory, contract, builder and rollback regressions
+        if: always() && steps.dependencies.outcome == 'success'
+        shell: pwsh
+        run: |
+          php scripts/verify-shell-path-policy.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-delta-contract.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-delta-builder.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-shell-file-transaction.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Upload acceptance evidence
         if: always()

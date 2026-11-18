@@ -295,6 +295,8 @@ assertCondition($syntaxStreamSql['ok'] === false && $syntaxStreamSql['reason_cod
 // Positive 2: Root and Portable Manifests
 $manifestAndRootFiles = [
     'resources/uninstall-data.ps1',
+    'resources/app-update.yml',
+    'resources/elevate.exe',
     'resources/portable/runtime-manifest.json',
     'resources/portable/printing-manifest.json',
 ];
@@ -428,6 +430,20 @@ assertCondition($posSetCheck['ok'] === true, 'All positive representative paths 
 // Negative 1: Root wrong uninstall path (must NOT allow uninstall-data.ps1 at root)
 $badRootUninstall = ProductInventoryService::validateProductPath('uninstall-data.ps1');
 assertCondition($badRootUninstall['ok'] === false && $badRootUninstall['reason_code'] === 'path_unauthorized', 'Root uninstall-data.ps1 rejected as path_unauthorized');
+
+$unsupportedSetupPaths = [
+    'app-update.yml',
+    'elevate.exe',
+    'resources/elevate-helper.exe',
+    'resources/nested/elevate.exe',
+    'resources/app-update.yaml',
+    'resources/nested/app-update.yml',
+    'Uninstall POS Desktop.exe',
+];
+foreach ($unsupportedSetupPaths as $path) {
+    $res = ProductInventoryService::validateProductPath($path);
+    assertCondition($res['ok'] === false && $res['reason_code'] === 'path_unauthorized', "Unknown Setup path rejected: {$path}");
+}
 
 // Negative 2: Unknown executables per vendor folder
 $unknownExes = [

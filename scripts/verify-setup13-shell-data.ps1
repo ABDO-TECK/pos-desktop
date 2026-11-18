@@ -9,7 +9,7 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
 
 $lab = Join-Path $env:RUNNER_TEMP 'setup13-shell'
 $source = Join-Path $lab 'source'
-$target = Join-Path $lab 'package/win-unpacked'
+$target = Join-Path $lab 'target'
 
 function Measure-PackagedDatabase {
     param([string] $Root, [string] $Role, [string] $DataDir)

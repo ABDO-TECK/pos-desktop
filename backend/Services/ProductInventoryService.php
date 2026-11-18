@@ -256,8 +256,8 @@ final class ProductInventoryService
             return ['ok' => true, 'reason_code' => null];
         }
 
-        // 5. resources root files
-        if ($path === 'resources/uninstall-data.ps1') {
+        // 5. Exact resources shipped as part of the NSIS application payload.
+        if (in_array($path, ['resources/uninstall-data.ps1', 'resources/app-update.yml', 'resources/elevate.exe'], true)) {
             return ['ok' => true, 'reason_code' => null];
         }
 

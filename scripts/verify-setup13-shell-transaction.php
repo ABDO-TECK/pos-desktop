@@ -168,7 +168,7 @@ function verifyManifestChanges(array $descriptor): array
 function verifyTransaction(string $lab): void
 {
     $source = ProductInventoryService::resolveAbsolutePath($lab . '/source');
-    $target = ProductInventoryService::resolveAbsolutePath($lab . '/package/win-unpacked');
+    $target = ProductInventoryService::resolveAbsolutePath($lab . '/target');
     $state = $lab . '/state';
     $packageDir = $lab . '/delta';
     ensure(mkdir($state), 'Could not create the isolated transaction state directory.');

@@ -58,25 +58,30 @@ php scripts/verify-phar-runtime.php
 if ($LASTEXITCODE) { throw 'Candidate backend PHAR runtime verification failed.' }
 
 $out = Join-Path $lab 'package'
-$builderArgs = @('--win', '--x64', '--dir', '--publish', 'never',
+$builderArgs = @('--win', '--x64', '--publish', 'never',
     "-c.electronVersion=$runtimeVersion", "-c.electronDist=$dist", "-c.directories.output=$out")
 & ./node_modules/.bin/electron-builder.cmd @builderArgs
-if ($LASTEXITCODE) { throw 'Could not build the unpacked Electron test candidate.' }
-$target = Join-Path $out 'win-unpacked'
-
-# These two resources come from the NSIS packaging step, so an electron-builder
-# directory build does not define their disposition. Keep the Setup 13 bytes.
-foreach ($relative in @('resources/app-update.yml', 'resources/elevate.exe')) {
-    $destination = Join-Path $target $relative
-    Copy-Item -LiteralPath (Join-Path $source $relative) -Destination $destination -Force
-}
+if ($LASTEXITCODE) { throw 'Could not build the unpublished NSIS test candidate.' }
+$installer = Get-Item -LiteralPath (Join-Path $out 'POS-Desktop-Setup-0.0.14.exe')
+$seven = (Get-Command 7z.exe -ErrorAction Stop).Source
+$extract = Join-Path $lab 'target-archive'
+$target = Join-Path $lab 'target'
+& $seven e $installer.FullName '$PLUGINSDIR\app-64.7z' "-o$extract" -y
+if ($LASTEXITCODE) { throw 'Could not extract the exact x64 candidate application archive.' }
+$payload = Get-Item -LiteralPath (Join-Path $extract 'app-64.7z')
+& $seven x $payload.FullName "-o$target" -y
+if ($LASTEXITCODE) { throw 'Could not unpack the candidate application archive.' }
 if ((Get-Item -LiteralPath (Join-Path $target 'POS Desktop.exe')).VersionInfo.ProductVersion -cne '0.0.14') {
     throw 'Packaged Windows executable version is inconsistent with the test version.'
 }
 
 [ordered]@{
     checkout_commit = $env:GITHUB_SHA
-    scope = 'Unpacked Electron test candidate built from the checkout on this runner'
+    scope = 'Unpublished NSIS x64 application archive built from the checkout and extracted on this runner'
+    candidate_installer_sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    candidate_installer_size = $installer.Length
+    payload_sha256 = (Get-FileHash -LiteralPath $payload.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    payload_size = $payload.Length
     application_version = $version.version
     frontend_build_marker = 'pos-shell-ci-candidate'
     electron_runtime = "v$runtimeVersion"
