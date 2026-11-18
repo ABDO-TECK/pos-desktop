@@ -430,6 +430,8 @@ class GitHubReleaseProvider
 
         // Each baseline has its own signed manifest and ZIP. Never apply a
         // package built for another installed version or mix asset signatures.
+        $signatureUrl = $assetsMap['manifest.sig'] ?? $signatureUrl;
+        $fullPackageUrl = $assetsMap['full-package.zip'] ?? $fullPackageUrl;
         $versionedManifests = array_filter(array_keys($assetsMap), static fn (string $name): bool => preg_match('/^manifest-.*\.json$/', $name) === 1);
         $unsupportedBaseline = false;
         if ($versionedManifests) {

@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'codex/shell-delivery-*'
+      - 'codex/*shell*'
+      - feat-shell-delta-updates
     paths:
       - '.github/workflows/shell-release-delivery.yml'
       - 'scripts/verify-shell-release-delivery.php'
@@ -28,7 +29,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: zip, openssl, pdo_sqlite, sqlite3, pdo_mysql, mysqli, curl, mbstring
+          extensions: zip, openssl, pdo_sqlite, sqlite3, pdo_mysql, mysqli, curl, mbstring, gd, dom, xml, xmlwriter
           coverage: none
       - name: Verify shell cataloguing and legacy asset isolation
         run: php scripts/verify-shell-release-delivery.php
