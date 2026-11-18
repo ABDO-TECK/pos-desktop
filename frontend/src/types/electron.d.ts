@@ -44,7 +44,7 @@ interface Window {
   electronAPI?: ElectronAPI;
   posRuntime?: {
     getApiBaseUrl: () => Promise<string | null>;
-    getDeltaCapability: () => Promise<{ capable: boolean; protocol: number }>;
+    getDeltaCapability: () => Promise<{ capable: boolean; protocol: number; shellDelta?: boolean }>;
     enableLanAccess: () => Promise<{
       enabled: boolean;
       port: number;

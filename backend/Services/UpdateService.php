@@ -105,6 +105,19 @@ class UpdateService
         return $this->signatureService;
     }
 
+    private function shellDelivery(): ShellDeltaDeliveryService
+    {
+        $pinnedKey = $this->rootDir . '/backend/certs/update_public_key.pem';
+        $manifests = new ShellDeltaManifestService(new ManifestSignatureService($pinnedKey, [], false));
+        return new ShellDeltaDeliveryService($this->githubProvider, $manifests, $this->deltaUpdateService);
+    }
+
+    public function hasLegacyReleaseAssets(array $release): bool
+    {
+        return !empty($release['manifest_url']) && !empty($release['signature_url'])
+            && (!empty($release['delta_url']) || isset($release['assets']['full-package.zip']));
+    }
+
     public function getTelemetryService(): UpdateTelemetryService
     {
         if ($this->telemetryService === null) {
@@ -310,6 +323,7 @@ class UpdateService
             'update_engine_version' => $engineVersion,
             'channel'               => $channel,
             'delta_capable'         => $deltaCapable,
+            'shell_native_version'  => ShellDeltaDeliveryService::installedNativeVersion(),
             'require_signature'     => $requireSignature,
             'signature_keys_hash'   => $signatureKeysHash,
             'allowed_hosts_hash'    => $allowedHostsHash,
@@ -372,6 +386,8 @@ class UpdateService
                         'signature_url' => $ghRelease['signature_url'],
                         'delta_url' => $ghRelease['delta_url'],
                         'full_package_url' => $ghRelease['full_package_url'],
+                        'shell_advertised' => $ghRelease['shell_advertised'] ?? false,
+                        'shell_assets' => $ghRelease['shell_assets'] ?? [],
                         'assets' => $ghRelease['assets'],
                         'channel' => $ghRelease['channel'] ?? $targetChannel,
                         'no_eligible_release' => $noEligibleRelease,
@@ -807,11 +823,35 @@ class UpdateService
         $isDelta = false;
         $bootstrapRequired = false;
         $deltaManifest = null;
+        $shellFailure = null;
+        $shellDescriptor = null;
         $manifestUrl = $remote['manifest_url'] ?? null;
         $signatureUrl = $remote['signature_url'] ?? null;
         $deltaUrl = $remote['delta_url'] ?? null;
 
-        if ($hasUpdate) {
+        if ($hasUpdate && !empty($remote['shell_advertised'])) {
+            $nativeVersion = $deltaCapable ? ShellDeltaDeliveryService::installedNativeVersion() : null;
+            $hasLegacyAssets = $this->hasLegacyReleaseAssets($remote);
+            if ($nativeVersion !== null || !$hasLegacyAssets) {
+                $shell = $this->shellDelivery()->inspect($remote, $currentVersion, $clientChannel, $nativeVersion);
+                $reason = $shell['reason_code'];
+                $inapplicableSource = in_array($reason, ['source_version_mismatch', 'source_native_version_mismatch'], true);
+                if ($reason === null) {
+                    $shellDescriptor = $shell['descriptor'];
+                    $bootstrapRequired = $nativeVersion === null;
+                    $updateType = $bootstrapRequired ? 'bootstrap' : 'shell_delta';
+                    $isDelta = !$bootstrapRequired;
+                    $manifestUrl = $signatureUrl = $deltaUrl = null;
+                } elseif (!$inapplicableSource || !$hasLegacyAssets) {
+                    $shellFailure = $deltaReasonCode = $reason;
+                    $deltaReason = 'تعذر التحقق من توافق حزمة تحديث تطبيق سطح المكتب مع هذا التثبيت.';
+                    $hasUpdate = false;
+                    $updateType = 'none';
+                }
+            }
+        }
+
+        if ($hasUpdate && $shellDescriptor === null) {
             $manifestContent = null;
             $signatureContent = null;
 
@@ -932,19 +972,19 @@ class UpdateService
                 'success'               => true,
                 'metadata'              => [
                     'is_delta'    => $isDelta,
-                    'files_count' => $deltaManifest ? count($deltaManifest['files'] ?? []) : null,
+                    'files_count' => $shellDescriptor || $deltaManifest ? count(($shellDescriptor ?? $deltaManifest)['files'] ?? []) : null,
                     'update_type' => $updateType,
                 ],
             ]);
         }
 
         return [
-            'success'               => true,
+            'success'               => $shellFailure === null,
 
-            'status'                => $hasUpdate ? 'update_available' : 'no_update_available',
+            'status'                => $shellFailure !== null ? 'invalid_shell_release' : ($hasUpdate ? 'update_available' : 'no_update_available'),
             'ok'                    => true,
             'updates_disabled'      => false,
-            'updates_unreachable'   => false,
+            'updates_unreachable'   => $shellFailure !== null,
             'message'               => $hasUpdate ? 'يتوفر تحديث جديد.' : ($deltaReason ?? 'النظام محدّث لأحدث إصدار.'),
             'current_version'       => $currentVersion,
             'latest_version'        => $latestVersion,
@@ -957,7 +997,7 @@ class UpdateService
             'latestVersion'         => $latestVersion,
             'updateAvailable'       => $hasUpdate,
             'checkedUrl'            => $checkedUrl,
-            'errorCode'             => null,
+            'errorCode'             => $shellFailure,
             'details'               => null,
             'source'                => 'github_release',
             'release_tag'           => $remote['tag_name'] ?? "v{$latestVersion}",
@@ -971,7 +1011,7 @@ class UpdateService
             'manifest_url'          => $manifestUrl,
             'signature_url'         => $signatureUrl,
             'delta_url'             => $deltaUrl,
-            'files_count'           => $deltaManifest ? count($deltaManifest['files'] ?? []) : null,
+            'files_count'           => $shellDescriptor || $deltaManifest ? count(($shellDescriptor ?? $deltaManifest)['files'] ?? []) : null,
             'fallback_reason'       => $deltaReason,
             'fallback_reason_code'  => $deltaReasonCode,
             'compatibility_reason'  => $deltaReason,
@@ -986,6 +1026,22 @@ class UpdateService
      * @return array ['ok' => bool, 'data' => array|null, 'error' => string|null, 'code' => int]
      */
     public function applyUpdate(bool $force, bool $deltaCapable = true, ?string $operationId = null): array
+    {
+        return $this->applyWithUpdateLease($force, $deltaCapable, $operationId, null);
+    }
+
+    public function applySelectedShellUpdate(string $version, bool $deltaCapable, ?string $operationId = null): array
+    {
+        if (!ShellDeltaDeliveryService::isVersionSelector($version)) {
+            return ['ok' => false, 'code' => 400, 'error' => 'Invalid shell update version.'];
+        }
+        if (!$deltaCapable || ShellDeltaDeliveryService::installedNativeVersion() === null) {
+            return ['ok' => false, 'code' => 426, 'error' => 'يلزم تحديث تطبيق سطح المكتب لتمكين تحديث ملفات التطبيق.'];
+        }
+        return $this->applyWithUpdateLease(false, $deltaCapable, $operationId, $version);
+    }
+
+    private function applyWithUpdateLease(bool $force, bool $deltaCapable, ?string $operationId, ?string $shellVersion): array
     {
         $lock = new UpdateOperationLock($this->deltaUpdateService->getStorageDir());
         $state = $this->deltaUpdateService->getUpdateState();
@@ -1024,7 +1080,7 @@ class UpdateService
             }
             $this->deltaUpdateService->setUpdateState('applying', $stateContext);
 
-            $result = $this->applyUpdateUnlocked($force, $deltaCapable);
+            $result = $this->applyUpdateUnlocked($force, $deltaCapable, $shellVersion);
             if (!$result['ok']) {
                 $currentState = $this->deltaUpdateService->getUpdateState();
                 if (!in_array($currentState['state'] ?? null, [
@@ -1053,7 +1109,7 @@ class UpdateService
         }
     }
 
-    private function applyUpdateUnlocked(bool $force, bool $deltaCapable = true): array
+    private function applyUpdateUnlocked(bool $force, bool $deltaCapable, ?string $shellVersion): array
     {
         $output = [];
         $currentVersion = $this->getLocalVersion()['version'] ?? '0.0.0';
@@ -1097,7 +1153,7 @@ class UpdateService
 
         // الخطوة 1: جلب معلومات الإصدار البعيد
         $output[] = '🌐 الاتصال بخادم التحديثات...';
-        $remote = $this->fetchRemoteVersion();
+        $remote = $this->fetchRemoteVersion(force: $shellVersion !== null);
         if (!$remote) {
             return ['ok' => false, 'error' => 'تعذر الاتصال بخادم التحديثات. تحقق من اتصالك بالإنترنت.', 'code' => 502, 'data' => ['logs' => $output]];
         }
@@ -1153,6 +1209,18 @@ class UpdateService
         }
         $releaseTag = $remote['tag_name'] ?? "v{$targetVersion}";
         $output[] = "✅ الإصدار المتاح: {$releaseTag}";
+
+        if ($shellVersion !== null) {
+            if ($shellVersion !== $targetVersion || empty($remote['shell_advertised'])) {
+                return ['ok' => false, 'code' => 409, 'error' => 'تغيّر الإصدار المتاح. افحص التحديثات واختر التثبيت مجدداً.',
+                    'data' => ['reason_code' => 'shell_release_changed']];
+            }
+            return $this->stageShellUpdate($remote, $currentVersion, $clientChannel);
+        }
+        if (!empty($remote['shell_advertised']) && !$this->hasLegacyReleaseAssets($remote)) {
+            return ['ok' => false, 'code' => 426, 'error' => 'يلزم تطبيق سطح المكتب الذي يدعم حزمة التحديث المحددة.',
+                'data' => ['reason_code' => 'shell_handoff_required']];
+        }
 
         // التحقق مما إذا كان هناك مانيفست دلتا متوافق
         $potentialManifest = $remote['manifest'] ?? (isset($remote['files']) && is_array($remote['files']) ? $remote : null);
@@ -1645,6 +1713,65 @@ class UpdateService
             'changelog'      => $remote['changelog'] ?? [],
             'logs'           => $output,
         ]];
+    }
+
+    private function stageShellUpdate(array $release, string $currentVersion, string $channel): array
+    {
+        $delivery = $this->shellDelivery();
+        $nativeVersion = ShellDeltaDeliveryService::installedNativeVersion();
+        $verified = $delivery->inspect($release, $currentVersion, $channel, $nativeVersion);
+        $reason = $verified['reason_code'];
+        if ($reason === null) {
+            $state = $this->deltaUpdateService->getUpdateState() ?? [];
+            $version = $verified['descriptor']['version'];
+            $context = [
+                'operation' => ShellDeltaManifestService::OPERATION,
+                'operation_id' => $state['operation_id'] ?? null,
+                'owner_id' => $state['owner_id'] ?? null,
+                'from_version' => $currentVersion,
+                'to_version' => $version,
+                'target_version' => $version,
+                'error' => null,
+                'update_completed' => false,
+                'phase' => 'staging',
+            ];
+            $this->deltaUpdateService->setUpdateState('verifying', $context);
+            $reason = $delivery->verifyInstalledSource(dirname($this->rootDir, 2), $verified['descriptor']);
+            if ($reason === null) {
+                $reason = $delivery->stage($verified, $context);
+            }
+            if ($reason === null) {
+                $context['phase'] = 'desktop_handoff_pending';
+                $this->deltaUpdateService->setUpdateState('desktop_handoff_pending', $context);
+                $pending = $this->deltaUpdateService->getUpdateState() ?? [];
+                if (($pending['state'] ?? null) === 'desktop_handoff_pending'
+                    && ($pending['operation'] ?? null) === ShellDeltaManifestService::OPERATION
+                    && ($pending['operation_id'] ?? null) === $context['operation_id']
+                    && ($pending['target_version'] ?? null) === $version) {
+                    return ['ok' => true, 'data' => [
+                        'ok' => true,
+                        'verified' => true,
+                        'latest_version' => $version,
+                        'update_type' => ShellDeltaManifestService::OPERATION,
+                        'requires_desktop_handoff' => true,
+                        'handoff_version' => $version,
+                        'logs' => ['تم التحقق من حزمة تحديث تطبيق سطح المكتب وتجهيزها للتثبيت.'],
+                    ]];
+                }
+                $reason = 'shell_handoff_state_unavailable';
+            }
+        }
+
+        Logger::warning('Shell update staging rejected', ['reason_code' => $reason, 'version' => $release['version']]);
+        $message = match ($reason) {
+            'source_inventory_mismatch', 'source_file_mismatch', 'source_native_version_mismatch', 'source_version_mismatch' =>
+                'ملفات التثبيت الحالية لا تطابق الإصدار الذي تعتمد عليه الحزمة.',
+            'data_schema_incompatible', 'data_compatibility_unverifiable' =>
+                'تعذر التحقق من تطابق بنية قاعدة البيانات مع حزمة التحديث.',
+            'shell_package_download_failed', 'shell_release_assets_unreachable' => 'تعذر تحميل حزمة تحديث تطبيق سطح المكتب.',
+            default => 'تعذر التحقق من حزمة تحديث تطبيق سطح المكتب أو تجهيزها.',
+        };
+        return ['ok' => false, 'code' => 422, 'error' => $message, 'data' => ['reason_code' => $reason, 'logs' => [$message]]];
     }
 
     public function rollbackUpdate(?string $snapshotPath = null): array

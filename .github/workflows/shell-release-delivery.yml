@@ -28,15 +28,19 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: zip, openssl, pdo_sqlite, sqlite3
+          extensions: zip, openssl, pdo_sqlite, sqlite3, pdo_mysql, mysqli, curl, mbstring
           coverage: none
       - name: Verify shell cataloguing and legacy asset isolation
         run: php scripts/verify-shell-release-delivery.php
       - name: Verify legacy release channels and background update contracts
         run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-release-channels.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           php scripts/verify-update-background.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-admin-update-center.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/setup-node@v4
         with:

@@ -13,10 +13,34 @@ class UpdateAssetDownloader
         private string $token = '',
         private int $budgetSeconds = 900,
         private int $maxAttempts = 3,
-        private int $retryDelayMilliseconds = 1000
+        private int $retryDelayMilliseconds = 1000,
+        private ?int $maxBytes = null,
     ) {}
 
     protected int $currentAttempt = 1;
+
+    /** Read a bounded text asset without relying on Content-Length. */
+    public function read(string $url): ?string
+    {
+        if ($this->maxBytes === null || !$this->caBundle || !is_file($this->caBundle)
+            || str_starts_with($this->caBundle, 'phar://') || parse_url($url, PHP_URL_SCHEME) !== 'https') {
+            return null;
+        }
+        $stream = fopen('php://temp', 'w+b');
+        if ($stream === false) {
+            return null;
+        }
+        try {
+            $result = $this->transfer($url, $stream, $this->budgetSeconds, null);
+            if ($result['success'] === false || $result['http_code'] !== 200 || !rewind($stream)) {
+                return null;
+            }
+            $bytes = stream_get_contents($stream);
+            return $bytes === false ? null : $bytes;
+        } finally {
+            fclose($stream);
+        }
+    }
 
     public function download(string $url, string $destination, ?Closure $progress = null): array
     {
@@ -126,6 +150,17 @@ class UpdateAssetDownloader
                 return 0;
             },
         ]);
+        if ($this->maxBytes !== null) {
+            $remainingBytes = $this->maxBytes;
+            curl_setopt($handle, CURLOPT_WRITEFUNCTION, static function ($ch, string $chunk) use ($file, &$remainingBytes): int {
+                $length = strlen($chunk);
+                if ($length > $remainingBytes || fwrite($file, $chunk) !== $length) {
+                    return 0;
+                }
+                $remainingBytes -= $length;
+                return $length;
+            });
+        }
         // libcurl does not forward Authorization to a different redirect host.
         if (trim($this->token) !== '') curl_setopt($handle, CURLOPT_HTTPHEADER, ['Authorization: Bearer '.trim($this->token)]);
         try {

@@ -54,11 +54,13 @@ declare global {
     download_attempt?: number;
   }
 
+  type AvailableUpdateType = 'bootstrap' | 'delta' | 'shell_delta' | 'full' | 'none';
+
   interface UpdateStatusData {
     current_version: string;
     latest_version: string | null;
     update_available: boolean;
-    type: 'bootstrap' | 'delta' | 'full';
+    type: AvailableUpdateType;
     bootstrap_required?: boolean;
     channel?: 'stable' | 'beta';
     installed_channel?: 'stable' | 'beta' | 'retired';
@@ -96,7 +98,7 @@ declare global {
     details?: string | null;
     updates_disabled?: boolean;
     updates_unreachable?: boolean;
-    update_type?: 'delta' | 'full';
+    update_type?: AvailableUpdateType;
     is_delta?: boolean;
     files_count?: number | null;
     source?: string;

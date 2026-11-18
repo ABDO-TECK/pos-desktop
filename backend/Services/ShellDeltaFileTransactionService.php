@@ -1305,11 +1305,14 @@ final class ShellDeltaFileTransactionService
      *
      * @param array<string, mixed> $descriptor
      */
-    private function enforceCorePolicyConstraints(array $descriptor): void
+    public static function enforceCorePolicyConstraints(array $descriptor): void
     {
         // 1. Accept regular purpose ONLY; bootstrap_completion fails closed
         if (($descriptor['purpose'] ?? null) !== 'regular') {
             throw new RuntimeException("Only 'regular' purpose is supported by this transaction core. 'bootstrap_completion' fails closed.");
+        }
+        if (($descriptor['migrations'] ?? null) !== []) {
+            throw new RuntimeException('Shell file transactions do not run database migrations.');
         }
 
         // 2. Require source and target data compatibility identical (strict four keys value compare)
