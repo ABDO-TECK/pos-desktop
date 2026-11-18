@@ -152,6 +152,24 @@ async function verifyUsableRuntime(app, version, marker) {
   return { frontend, backend_health: backendHealth, processes, runtime_ports: ports };
 }
 
+async function clickVisibleButton(app, label) {
+  const source = JSON.stringify(label);
+  const locator = "[...document.querySelectorAll('button')].find(b => !b.disabled && b.textContent.trim() === "+source+")";
+  await app.until("Boolean("+locator+")", "enabled button "+label);
+  await app.evaluate("("+locator+").scrollIntoView({block:'center',inline:'center'})");
+  const position = await waitFor("visible click target "+label, () => app.evaluate("(() => {"+
+    "const el = "+locator+"; if (!el) return null; const box = el.getBoundingClientRect();"+
+    "const x = box.left + box.width / 2; const y = box.top + box.height / 2;"+
+    "return el.contains(document.elementFromPoint(x,y)) ? {x,y} : null; })()"), 10_000);
+  await app.call('Input.dispatchMouseEvent', { ...position, type: 'mousePressed', button: 'left', clickCount: 1 });
+  await app.call('Input.dispatchMouseEvent', { ...position, type: 'mouseReleased', button: 'left', clickCount: 1 });
+}
+
+async function screenshot(app, name) {
+  await app.screenshot(name);
+  fs.copyFileSync(path.join(profile, 'diagnostics', name+'.png'), path.join(evidence, name+'.png'));
+}
+
 for (const folder of [local, roaming, shared, path.join(profile, 'chromium')]) {
   fs.mkdirSync(folder, { recursive: true });
 }
@@ -198,9 +216,9 @@ try {
   const checkButton = 'التحقق من التحديثات';
   const installButton = 'تثبيت التحديث الآن';
   await app.until("[...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(checkButton)+")", 'enabled update check');
-  await app.click(checkButton);
+  await clickVisibleButton(app, checkButton);
   await app.until("document.body.innerText.includes('v0.0.14') && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version 0.0.14 install card');
-  await app.screenshot(scenario+'-offered');
+  await screenshot(app, scenario+'-offered');
   app.onEvent((method, event) => {
     if (method === 'Network.requestWillBeSent' && /\/updates\/(?:apply|rollback)(?:\?|$)/.test(event.request.url)) {
       updateNetwork.push({ type: 'request', method: event.request.method, path: new URL(event.request.url).pathname, request_id: event.requestId });
@@ -210,8 +228,8 @@ try {
     }
   });
   await app.call('Network.enable');
-  await app.click(installButton);
-  await app.click('تأكيد');
+  await clickVisibleButton(app, installButton);
+  await clickVisibleButton(app, 'تأكيد');
 
   // From confirmation onward the harness only observes until the new process
   // has finished the transaction. It makes no update, health-signal, or rollback call.
@@ -269,7 +287,7 @@ try {
       'No complete HTTPS fixture transfer observed for '+name);
   }
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 && request.path.endsWith('/pos-desktop-updates/releases')));
-  await app.screenshot(scenario+'-reopened');
+  await screenshot(app, scenario+'-reopened');
   observations.after = {
     ...after, inventory: afterFiles, row_id: rows[0].id,
     uninstaller_sha256: beforeUninstaller,

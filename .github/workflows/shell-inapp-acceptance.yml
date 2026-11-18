@@ -67,6 +67,10 @@ jobs:
         shell: pwsh
         run: ./scripts/run-shell-inapp-acceptance.ps1 commit
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Benchmark and reconstruct binary patches for the accepted bytes
         shell: pwsh
         run: ./scripts/measure-shell-binary-delta.ps1

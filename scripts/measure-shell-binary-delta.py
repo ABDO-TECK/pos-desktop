@@ -50,7 +50,9 @@ def summarize_zip(bundle, archive_file, manifest_file, signature_file):
         "zip_overhead_bytes": zip_bytes - payload_bytes,
         "compressed_entries_bytes": payload_bytes,
         "manifest_bytes": manifest_bytes,
+        "manifest_sha256": sha256(manifest_file),
         "signature_bytes": signature_bytes,
+        "signature_sha256": sha256(signature_file),
         "download_bytes": zip_bytes + manifest_bytes + signature_bytes,
     }
 
