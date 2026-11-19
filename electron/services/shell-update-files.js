@@ -55,25 +55,85 @@ function ensureDirectory(dir) {
 }
 
 function stateLocation(installRoot, profileRoot) {
-  const base = path.join(profileRoot, 'pos-shell-update-v2');
-  return path.join(base, hash(installRoot.toLowerCase()));
+  return path.join(profileRoot, 'POS-d2', 'i', hash(installRoot.toLowerCase()));
+}
+
+function stateVault(stateRoot) {
+  const installations = path.dirname(stateRoot);
+  const vault = path.dirname(installations);
+  if (path.basename(vault).toLowerCase() !== 'pos-d2' || path.basename(installations) !== 'i' ||
+      !/^[0-9a-f]{64}$/.test(path.basename(stateRoot))) {
+    throw new Error('Invalid private shell update vault.');
+  }
+  return vault;
 }
 
 function operationPaths(stateRoot, id) {
   if (!VALID_OPERATION.test(id)) throw new Error('Invalid shell operation identity.');
+  const vault = stateVault(stateRoot);
   const operation = path.join(stateRoot, id);
+  const scratch = path.join(vault, 'o', id);
+  const worker = path.join(scratch, 'worker');
+  const transaction = path.join(vault, 't');
   return {
-    operation,
-    worker: path.join(operation, 'worker'),
-    runtime: path.join(operation, 'worker', 'runtime'),
-    php: path.join(operation, 'worker', 'php'),
-    backend: path.join(operation, 'worker', 'backend.phar'),
-    transaction: path.join(operation, 'transaction'),
-    backup: path.join(operation, 'cold-db'),
+    operation, scratch, worker, transaction,
+    scratchOwner: path.join(scratch, 'owner.json'),
+    runtime: path.join(worker, 'runtime'),
+    php: path.join(worker, 'php'),
+    backend: path.join(worker, 'backend.phar'),
+    transactionWorkspace: path.join(transaction, 'workspaces', id),
+    backup: path.join(scratch, 'cold-db'),
     hashes: path.join(operation, 'cold-db.json'),
     gate: path.join(operation, 'release'),
     receipt: path.join(operation, 'receipt.json'),
   };
+}
+
+// The PHP transaction core checks absolute paths in UTF-8 bytes and uses
+// fixed full SHA-256 leaf names. Keep the budget tied to its longest paths.
+function transactionPathExamples(paths) {
+  const digest = '0'.repeat(64);
+  const nonce = '0'.repeat(16);
+  const workspace = paths.transactionWorkspace;
+  return [
+    path.join(workspace, 'sealed', MANIFEST),
+    path.join(workspace, 'sealed', SIGNATURE),
+    path.join(workspace, 'sealed', PACKAGE),
+    path.join(workspace, 'staged', digest + '.staged'),
+    path.join(workspace, 'backups', digest + '.bak'),
+    path.join(workspace, 'temp', 'pub_' + nonce + '.tmp'),
+    path.join(workspace, 'temp', 'rst_' + nonce + '.tmp'),
+    path.join(workspace, '.tmp_' + nonce),
+    path.join(workspace, 'journal.json'),
+    path.join(paths.transaction, 'locks', digest + '.lock'),
+    path.join(paths.transaction, 'active_roots', digest + '.json'),
+  ];
+}
+
+function assertOperationPathBudget(paths) {
+  const files = [
+    ...transactionPathExamples(paths), paths.gate, paths.receipt,
+    path.join(paths.runtime, EXE), path.join(paths.php, 'ext', 'php_pdo_mysql.dll'),
+    paths.backend, path.join(paths.worker, 'OwnedChildProcess.cs'), path.join(paths.backup, 'ibdata1'),
+  ];
+  if (files.some((file) => Buffer.byteLength(file, 'utf8') > 260)) {
+    throw new Error('The Windows profile path is too long for an atomic shell update.');
+  }
+}
+
+function scratchOwned(paths, stateRoot, id) {
+  const owner = readRecord(paths.scratchOwner);
+  return owner?.id === id && owner.installation === path.basename(stateRoot);
+}
+
+function assertScratchOwnership(paths, stateRoot, id) {
+  if (!scratchOwned(paths, stateRoot, id)) throw new Error('Private shell worker ownership could not be verified.');
+}
+
+function allocateScratch(paths, stateRoot, id) {
+  fs.mkdirSync(paths.scratch);
+  canonical(paths.scratch);
+  writeRecord(paths.scratchOwner, { id, installation: path.basename(stateRoot) });
 }
 
 function readRecord(file) {
@@ -140,8 +200,8 @@ async function powershell(source, variable = {}, operation = 'Windows supervisor
 }
 
 async function ensurePrivateRoot(stateRoot) {
-  ensureDirectory(path.dirname(stateRoot));
-  ensureDirectory(stateRoot);
+  const vault = stateVault(stateRoot);
+  ensureDirectory(vault);
   await powershell([
     '[Console]::WriteLine("Reading updater Windows identity.")',
     '$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
@@ -161,7 +221,11 @@ async function ensurePrivateRoot(stateRoot) {
     'foreach ($entry in $applied.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {',
     '  if ($entry.IdentityReference -ne $owner -and $entry.IdentityReference -ne $system) { throw "External updater ACL principal." }',
     '}',
-  ].join('\n'), { POS_SHELL_PRIVATE: stateRoot }, 'Private updater ACL provisioning');
+  ].join('\n'), { POS_SHELL_PRIVATE: vault }, 'Private updater ACL provisioning');
+  ensureDirectory(path.dirname(stateRoot));
+  ensureDirectory(stateRoot);
+  ensureDirectory(path.join(vault, 'o'));
+  ensureDirectory(path.join(vault, 't'));
 }
 
 function regularPackage(dataDir, version) {
@@ -274,31 +338,42 @@ function inspectOwnedTree(root) {
   }
 }
 
+function discardOwnedDirectory(directory) {
+  if (!fs.existsSync(directory)) return;
+  inspectOwnedTree(directory);
+  try { fs.rmSync(directory, { recursive: true }); }
+  catch (error) { if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error; }
+}
+
 function pruneCompletedCopies(stateRoot, retainReleaseFor = null) {
   const active = readActive(stateRoot);
   const entries = fs.readdirSync(canonical(stateRoot), { withFileTypes: true });
   const terminal = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === active?.id || !VALID_OPERATION.test(entry.name)) continue;
-    const paths = operationPaths(stateRoot, entry.name);
+    const id = entry.name;
+    const paths = operationPaths(stateRoot, id);
     const receipt = readRecord(paths.receipt);
-    if (!receipt || receipt.operation_id !== entry.name || !['completed', 'rolled_back', 'failed'].includes(receipt.outcome)) continue;
-    terminal.push({ id: entry.name, paths, updated: fs.statSync(paths.receipt).mtimeMs });
-    for (const directory of [paths.worker, paths.transaction, paths.backup]) {
-      if (!fs.existsSync(directory)) continue;
-      inspectOwnedTree(directory);
-      // The root and every entry have been verified inside this operation's
-      // protected profile directory. A still-running worker is retried later.
-      try { fs.rmSync(directory, { recursive: true }); }
-      catch (error) { if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error; }
+    if (!receipt || receipt.operation_id !== id || !['completed', 'rolled_back', 'failed'].includes(receipt.outcome)) continue;
+    terminal.push({ id, paths, updated: fs.statSync(paths.receipt).mtimeMs });
+    if (scratchOwned(paths, stateRoot, id)) {
+      discardOwnedDirectory(paths.worker);
+      discardOwnedDirectory(paths.backup);
+      if (fs.readdirSync(canonical(paths.scratch)).every((name) => name === 'owner.json')) {
+        fs.unlinkSync(paths.scratchOwner);
+        fs.rmdirSync(paths.scratch);
+      }
+    }
+    const workspaceOwner = readRecord(path.join(paths.transactionWorkspace, '.pos_transaction_owner'));
+    if (workspaceOwner?.operation_id === id && typeof workspaceOwner.root === 'string' &&
+        hash(path.resolve(workspaceOwner.root).toLowerCase()) === path.basename(stateRoot)) {
+      discardOwnedDirectory(paths.transactionWorkspace);
     }
   }
   terminal.sort((left, right) => right.updated - left.updated);
   for (const { id, paths } of terminal.slice(10)) {
-    if (id === retainReleaseFor) continue;
-    if ([paths.worker, paths.transaction, paths.backup].some((dir) => fs.existsSync(dir))) continue;
-    inspectOwnedTree(paths.operation);
-    fs.rmSync(paths.operation, { recursive: true });
+    if (id === retainReleaseFor || [paths.scratch, paths.transactionWorkspace].some((dir) => fs.existsSync(dir))) continue;
+    discardOwnedDirectory(paths.operation);
   }
 }
 
@@ -323,6 +398,7 @@ function sharedUpdateContext(job) {
 module.exports = {
   EXE, WORKER, BACKEND, VERSION, MANIFEST, SIGNATURE, VALID_OPERATION, VALID_VERSION, validSecret,
   secret, hash, canonical, plainFile, ensureDirectory, stateLocation, operationPaths,
+  allocateScratch, assertScratchOwnership, assertOperationPathBudget, transactionPathExamples,
   readRecord, durableFile, writeRecord, readActive, clearActive, systemPath, powershell, ensurePrivateRoot,
   regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
   bytesInTree, requireSpace, pruneCompletedCopies, waitForSourceShutdown, sharedUpdateContext,

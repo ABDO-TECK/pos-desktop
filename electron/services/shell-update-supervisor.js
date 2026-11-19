@@ -7,6 +7,7 @@ const http = require('node:http');
 const { spawn, execFile } = require('node:child_process');
 const {
   EXE, WORKER, VALID_OPERATION, VALID_VERSION, canonical, ensureDirectory, operationPaths, stateLocation,
+  assertScratchOwnership, assertOperationPathBudget,
   readActive, clearActive, writeRecord, durableFile, plainFile, fileHash, powershell, systemPath,
   phpArgs, workerEnv, secret, hash, copyChecked, bytesInTree, requireSpace, jsonLine, send,
   waitForSourceShutdown, sharedUpdateContext,
@@ -35,6 +36,8 @@ function loadIdentity() {
   const localProfile = canonical(process.env.LOCALAPPDATA);
   stateRoot = canonical(stateLocation(installRoot, localProfile));
   paths = operationPaths(stateRoot, process.argv[4]);
+  assertOperationPathBudget(paths);
+  assertScratchOwnership(paths, stateRoot, process.argv[4]);
   if (canonical(__filename).toLowerCase() !== path.join(paths.worker, WORKER).toLowerCase() ||
       canonical(process.execPath).toLowerCase() !== path.join(paths.runtime, EXE).toLowerCase()) {
     throw new Error('The independent supervisor was launched from the wrong location.');
