@@ -18,6 +18,8 @@ const { lab, installRoot, profile, local, roaming, shared, supervisorStateRoot }
 const dataDir = path.join(shared, 'POS System');
 const configDir = path.join(roaming, 'POS System');
 const failureTrace = path.join(roaming, 'candidate-failure.json');
+const initialDebugPort = scenario === 'rollback' ? 19231 : 19233;
+const restartedDebugPort = initialDebugPort + 1;
 const releaseRole = scenario === 'rollback' ? 'failing' : 'target';
 const releaseRoot = path.join(lab, releaseRole, 'release');
 const evidence = path.join(lab, 'evidence');
@@ -74,7 +76,7 @@ function safeSupervisorReceipt(receipt) {
   const fields = ['operation_id', 'outcome', 'phase', 'source_version', 'target_version', 'source_pid',
     'candidate_pid', 'restored_pid', 'candidate_exit_code', 'database_backup_sha256', 'transaction_digest', 'error',
     'candidate_failure', 'restored_failure', 'candidate_broker_phase', 'restored_broker_phase', 'source_reopened_without_mutation'];
-  const health = ['ui', 'php', 'database', 'version', 'native_version'];
+  const health = ['ui', 'php', 'database', 'version', 'native_version', 'window_visible'];
   return { ...safeFields(receipt, fields),
     candidate_health: safeFields(receipt.candidate_health, health),
     restored_health: safeFields(receipt.restored_health, health),
@@ -156,10 +158,10 @@ async function waitFor(description, predicate, timeout = 240_000) {
   throw new Error('Timed out waiting for '+description);
 }
 
-function probeProcesses(apiPort, mysqlPort) {
+function probeProcesses(apiPort, mysqlPort, debugPort) {
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    '$processes = foreach ($port in @(19231,'+Number(apiPort)+','+Number(mysqlPort)+')) {',
+    '$processes = foreach ($port in @('+debugPort+','+Number(apiPort)+','+Number(mysqlPort)+')) {',
     '  $owners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)',
     '  if ($owners.Count -ne 1) { throw "Expected one process listening on port $port." }',
     '  $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($owners[0])"',
@@ -187,6 +189,30 @@ function probeProcesses(apiPort, mysqlPort) {
     delete process.serves_phar;
   }
   return { desktop, php, database };
+}
+
+function inspectReopenedProcess(pid, debugPort) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return { expected_pid: pid, debug_port: debugPort, present: false };
+  const script = [
+    '$proc = Get-Process -Id '+pid+' -ErrorAction SilentlyContinue',
+    '$details = Get-CimInstance Win32_Process -Filter "ProcessId = '+pid+'" -ErrorAction SilentlyContinue',
+    '$listener = Get-NetTCPConnection -LocalPort '+debugPort+' -State Listen -ErrorAction SilentlyContinue',
+    '$record = [ordered]@{',
+    '  present = $null -ne $proc',
+    '  window_handle_present = $null -ne $proc -and $proc.MainWindowHandle -ne 0',
+    '  listening_owners = @($listener | Select-Object -ExpandProperty OwningProcess -Unique)',
+    '  debugging_flag_present = $null -ne $details -and $details.CommandLine -like "*--remote-debugging-port='+debugPort+'*"',
+    '}',
+    '$record | ConvertTo-Json -Compress',
+  ].join('\n');
+  try {
+    const caps = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true, timeout: 12_000,
+    });
+    return { expected_pid: pid, debug_port: debugPort, ...JSON.parse(caps) };
+  } catch {
+    return { expected_pid: pid, debug_port: debugPort, diagnostic_unavailable: true };
+  }
 }
 
 function checkInstalledInventory(expected, deleted = []) {
@@ -217,7 +243,7 @@ function checkInstalledInventory(expected, deleted = []) {
 function observeInstalledInventory(role) {
   const php = path.join(installRoot, 'resources', 'portable', 'php', 'php.exe');
   const script = path.resolve('scripts/observe-shell-install-inventory.php');
-  const result = execFileSync(php, ['-n', script, releaseRole, role, 'observe'], {
+  const result = execFileSync(php, ['-n', script, releaseRole, role, scenario], {
     encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: 128 * 1024,
   });
   return JSON.parse(result);
@@ -262,7 +288,7 @@ async function createCategory(app, name) {
   return getCategory(app, name);
 }
 
-async function verifyUsableRuntime(app, version, marker, engine) {
+async function verifyUsableRuntime(app, version, marker, engine, debugPort) {
   const authenticated = "Boolean(document.querySelector('a[href=\"/settings\"]'))";
   await app.until(authenticated, 'authenticated navigation');
   const frontend = await app.evaluate("(async () => ({ version: await window.electronAPI.getVersion(), "+
@@ -280,7 +306,7 @@ async function verifyUsableRuntime(app, version, marker, engine) {
   const backendHealth = await http.json();
   assert.equal(backendHealth.status, 'ok');
   assert.equal(backendHealth.version, version);
-  const processes = probeProcesses(ports.apiPort, ports.mysqlPort);
+  const processes = probeProcesses(ports.apiPort, ports.mysqlPort, debugPort);
   return { frontend, backend_health: backendHealth, processes, runtime_ports: ports };
 }
 
@@ -325,9 +351,9 @@ try {
   for (const relative of missingAtSource) assert.ok(!fs.existsSync(path.join(installRoot, relative)));
   const uninstaller = path.join(installRoot, 'Uninstall POS Desktop.exe');
   const beforeUninstaller = hash(uninstaller);
-  await app.start();
+  await app.start(initialDebugPort);
   const credentials = await app.freshLogin();
-  const before = await verifyUsableRuntime(app, '0.0.13', 'source', '43.2.0');
+  const before = await verifyUsableRuntime(app, '0.0.13', 'source', '43.2.0', initialDebugPort);
   const marker = 'Shell acceptance '+crypto.randomBytes(10).toString('hex');
   const row = await createCategory(app, marker);
   assert.ok(Number(row?.id) > 0 && row.name === marker, 'Expected a real business row created before update.');
@@ -396,7 +422,8 @@ try {
   assert.equal(health.version, expectedVersion);
   assert.equal(health.php, true);
   assert.equal(health.database, true);
-  assert.equal(health.ui, 'sign-in');
+  assert.ok(['sign-in', 'workspace', 'password-change'].includes(health.ui), 'Expected the production window to render its actual state.');
+  assert.equal(health.window_visible, true, 'The supervisor settled before the real main window became visible.');
   if (scenario === 'rollback') {
     const attempted = readJson(failureTrace);
     observations.candidate_failure = attempted;
@@ -413,12 +440,17 @@ try {
     assert.ok(!fs.existsSync(failureTrace));
   }
 
-  await app.reconnect();
+  const expectedPid = scenario === 'rollback' ? outcome.restored_pid : outcome.candidate_pid;
+  try {
+    await app.reconnect(false, restartedDebugPort);
+  } catch (error) {
+    observations.reopened_discovery = inspectReopenedProcess(expectedPid, restartedDebugPort);
+    throw error;
+  }
   const needsLogin = await app.evaluate("Boolean(document.querySelector('input[type=email]'))");
   if (needsLogin) await app.login(credentials.email, credentials.password);
   const after = await verifyUsableRuntime(app, expectedVersion,
-    scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11');
-  const expectedPid = scenario === 'rollback' ? outcome.restored_pid : outcome.candidate_pid;
+    scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11', restartedDebugPort);
   assert.equal(after.processes.desktop.pid, expectedPid);
   for (const name of ['desktop', 'php', 'database']) {
     assert.notEqual(after.processes[name].pid, before.processes[name].pid, name+' process did not restart.');

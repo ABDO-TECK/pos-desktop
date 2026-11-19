@@ -69,6 +69,7 @@ jobs:
           "PHP_BINARY=$((Get-Command php.exe).Source)" >> $env:GITHUB_ENV
 
       - name: Build unpublished Setup and signed good and failing shell candidates
+        id: package
         shell: pwsh
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -79,6 +80,7 @@ jobs:
         run: ./scripts/run-shell-inapp-acceptance.ps1 rollback
 
       - name: Apply a healthy candidate from Update Center and verify the commit
+        if: "!cancelled() && steps.package.outcome == 'success'"
         shell: pwsh
         run: ./scripts/run-shell-inapp-acceptance.ps1 commit
 

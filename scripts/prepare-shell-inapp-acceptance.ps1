@@ -80,8 +80,19 @@ try {
 # to drive and observe the same renderer after the supervisor launches it.
 $mainPath = 'electron/main.js'
 $main = Get-Content -LiteralPath $mainPath -Raw
-$debugSwitch = "require('electron').app.commandLine.appendSwitch('remote-debugging-port', '19231'); require('electron').app.setPath('userData', require('node:path').join(process.env.LOCALAPPDATA, 'pos-ci-chromium'));"
-Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $main) -Encoding utf8NoBOM
+$fixtureProfile = "require('electron').app.setPath('userData', require('node:path').join(process.env.LOCALAPPDATA, 'pos-ci-chromium'));"
+Set-Content -LiteralPath $mainPath -Value ($fixtureProfile + [Environment]::NewLine + $main) -Encoding utf8NoBOM
+
+# Pass a real loopback Chromium flag to owned relaunches in this CI build.
+# The first launch already receives its own port from the automation driver.
+$brokerSource = 'backend/Native/ShellUpdateProcessBroker.cs'
+$broker = Get-Content -LiteralPath $brokerSource -Raw
+$ownedStart = 'OwnedChildProcess.Start(executable, new string[0], root, environment)'
+if ($broker.IndexOf($ownedStart) -lt 0 -or $broker.IndexOf($ownedStart) -ne $broker.LastIndexOf($ownedStart)) {
+    throw 'Expected the unique native relaunch invocation in the packaged broker.'
+}
+$ciStart = 'OwnedChildProcess.Start(executable, new[] { environment["APPDATA"].EndsWith(@"\commit-profile\roaming", StringComparison.OrdinalIgnoreCase) ? "--remote-debugging-port=19234" : "--remote-debugging-port=19232", "--remote-debugging-address=127.0.0.1" }, root, environment)'
+Set-Content -LiteralPath $brokerSource -Value ($broker.Replace($ownedStart, $ciStart)) -Encoding utf8NoBOM
 Add-Content -LiteralPath 'electron/preload.js' -Value "contextBridge.exposeInMainWorld('posCiElectronEngine', process.versions.electron);" -Encoding utf8NoBOM
 $indexPath = 'frontend/index.html'
 $index = Get-Content -LiteralPath $indexPath -Raw
@@ -202,7 +213,7 @@ try {
     return;
 '@
     $badMain = $main.Insert($startup[0].Index + $startup[0].Length, [Environment]::NewLine + $failure)
-    Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
+    Set-Content -LiteralPath $mainPath -Value ($fixtureProfile + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
     Build-Fixture failing '0.0.14' $targetEngine -ReuseFrontendAndPhar
 
     ./scripts/verify-setup13-shell-data.ps1 -Profile in-app

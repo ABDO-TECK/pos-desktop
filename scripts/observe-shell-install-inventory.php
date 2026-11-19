@@ -13,7 +13,11 @@ if (PHP_OS_FAMILY !== 'Windows' || getenv('GITHUB_ACTIONS') !== 'true'
 require_once __DIR__ . '/../backend/vendor/autoload.php';
 
 $lab = ProductInventoryService::resolveAbsolutePath((string)getenv('RUNNER_TEMP') . '/shell-inapp');
-$root = ProductInventoryService::resolveAbsolutePath($lab . '/installed');
+$scenario = match ($argv[3]) {
+    'rollback', 'commit' => $argv[3],
+    default => throw new InvalidArgumentException('Unknown installed fixture scenario.'),
+};
+$root = ProductInventoryService::resolveAbsolutePath($lab . '/installed-' . $scenario);
 $release = match ($argv[1]) {
     'target', 'failing' => $argv[1],
     default => throw new InvalidArgumentException('Unknown fixture release.'),
@@ -22,9 +26,6 @@ $role = match ($argv[2]) {
     'source', 'target' => $argv[2],
     default => throw new InvalidArgumentException('Unknown signed inventory role.'),
 };
-if ($argv[3] !== 'observe') {
-    throw new InvalidArgumentException('Expected a read-only observation command.');
-}
 
 $manifestFile = $lab . '/' . $release . '/release/shell-manifest.json';
 $manifest = json_decode((string)file_get_contents($manifestFile), true, 64, JSON_THROW_ON_ERROR);
