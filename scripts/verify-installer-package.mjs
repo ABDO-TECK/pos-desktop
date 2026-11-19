@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { listPackage } from '@electron/asar';
+import { extractFile, listPackage, statFile } from '@electron/asar';
 const root=process.cwd(), out=path.join(root,'dist-electron');
 const resources=path.join(out,'win-unpacked/resources');
 if(!fs.existsSync(path.join(resources,'uninstall-data.ps1')))throw Error('Missing installed data-removal helper');
@@ -11,6 +11,15 @@ const forbidden=entries.filter(p=>/^(?:release|certs|docs|scripts|\.github|\.git
 if(forbidden.length)throw Error('Unexpected private/build files in ASAR: '+forbidden.join(', '));
 for(const rel of ['electron/main.js','electron/preload.js','electron/utils/receipt-print-window.js','version.json']){
  if(!entries.includes(rel))throw Error('Missing ASAR source: '+rel);
+}
+for (const [archived, source] of [
+  ['electron/assets/shell-update-public-key.pem', 'backend/certs/update_public_key.pem'],
+  ['electron/assets/OwnedChildProcess.cs', 'backend/Native/OwnedChildProcess.cs'],
+]) {
+  if (!entries.includes(archived) || statFile(archive, archived).unpacked ||
+      !extractFile(archive, archived).equals(fs.readFileSync(path.join(root, source)))) {
+    throw Error('Missing or altered private shell updater asset: ' + archived);
+  }
 }
 for(const rel of ['app.asar.unpacked/version.json','app.asar.unpacked/frontend/dist/index.html','app.asar.unpacked/backend/backend.phar','app.asar.unpacked/backend/certs/cacert.pem','app.asar.unpacked/backend/certs/update_public_key.pem','app.asar.unpacked/database/pos_schema.sql','portable/php/php.exe','portable/mysql/bin/mysqld.exe','portable/java/bin/java.exe','portable/qz-tray/qz-tray.jar','portable/runtime-manifest.json','portable/printing-manifest.json']){
  if(!fs.existsSync(path.join(resources,rel)))throw Error('Missing packaged runtime: '+rel);

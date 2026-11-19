@@ -14,6 +14,7 @@
   },
   "build": {
     "asar": true,
+    "beforePack": "build/prepare-shell-update-assets.cjs",
     "asarUnpack": [
       "frontend/dist/**",
       "backend/backend.phar",
@@ -24,14 +25,6 @@
     ],
     "files": [
       "electron/**",
-      {
-        "from": "backend/certs/update_public_key.pem",
-        "to": "electron/assets/shell-update-public-key.pem"
-      },
-      {
-        "from": "backend/Native/OwnedChildProcess.cs",
-        "to": "electron/assets/OwnedChildProcess.cs"
-      },
       "!electron/assets/ssl/**",
       "!**/*.key",
       "frontend/dist/**",
