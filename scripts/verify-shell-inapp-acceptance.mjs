@@ -403,7 +403,11 @@ try {
     assert.equal(attempted.pid, outcome.candidate_pid);
     assert.ok(attempted.phpPort > 0 && attempted.mysqlPort > 0);
     assert.equal(attempted.electronEngine, '43.8.11', 'The failing process must use the new Electron engine.');
+    assert.equal(attempted.phase, 'core-ready-before-exit');
     assert.equal(outcome.candidate_exit_code, 78);
+    assert.equal(outcome.candidate_failure, 'The restarted POS process exited before health proof: 78');
+    assert.equal(outcome.candidate_health, null);
+    assert.equal(outcome.restored_failure, null);
     assert.ok(outcome.restored_pid !== outcome.source_pid && outcome.restored_pid !== outcome.candidate_pid);
   } else {
     assert.ok(!fs.existsSync(failureTrace));

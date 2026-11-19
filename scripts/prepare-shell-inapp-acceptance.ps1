@@ -194,7 +194,13 @@ try {
     # This trace witnesses execution. The supervisor independently owns recovery.
     $startup = [regex]::Matches($main, '(?m)^    (?:const started = )?await startCoreRuntime\(\{ maxAttempts: [^\r\n]+ \}\);')
     if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
-    $failure = "    fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({ pid: process.pid, phpPort, mysqlPort, electronEngine: process.versions.electron })); process.exit(78);"
+    $failure = @'
+    fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({
+      pid: process.pid, phpPort, mysqlPort, electronEngine: process.versions.electron, phase: 'core-ready-before-exit',
+    }));
+    app.exit(78);
+    return;
+'@
     $badMain = $main.Insert($startup[0].Index + $startup[0].Length, [Environment]::NewLine + $failure)
     Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
     Build-Fixture failing '0.0.14' $targetEngine -ReuseFrontendAndPhar
