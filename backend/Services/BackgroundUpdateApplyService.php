@@ -392,6 +392,16 @@ class BackgroundUpdateApplyService
             }
         }
 
+        if ($effectiveStatus === 'completed' && $isOwnedActiveOperation && is_array($state) && is_array($resultData)) {
+            $recoverySettlement = $this->recoveredShellSettlement($state, $resultData);
+            if ($recoverySettlement !== null) {
+                $effectiveStatus = 'failed';
+                $settlementError = $recoverySettlement;
+                $resultData['requires_desktop_handoff'] = false;
+                unset($resultData['ok'], $resultData['desktop_handoff_completed']);
+            }
+        }
+
         $sanitizedLastError = null;
         if (!empty($job['last_error'])) {
             $sanitizedLastError = self::redactPaths((string) $job['last_error']);
@@ -400,6 +410,8 @@ class BackgroundUpdateApplyService
         } elseif ($settlementError !== null) {
             $sanitizedLastError = match ($settlementError) {
                 'persistence_failure_after_apply' => 'تعذر حفظ نتيجة العملية بعد تطبيق التحديث؛ النظام في حالة غير مؤكدة وتحتاج فحصاً يدوياً.',
+                'shell_rolled_back'               => 'تعذر تشغيل التحديث، وتم التحقق من عودة الإصدار السابق تلقائياً.',
+                'shell_source_reopened'           => 'لم يكتمل إيقاف الخدمات للتحديث، وتمت إعادة تشغيل الإصدار السابق دون استبدال ملفاته.',
                 'desktop_handoff_uncertain'       => 'فشل التحديث أثناء مرحلة تسليم سطح المكتب؛ النظام في حالة غير مؤكدة.',
                 'unbound_operation'               => 'معرّف العملية غير متطابق مع المهمة المجدولة؛ تم إيقاف المتابعة تلقائياً.',
                 'unbound_job_id'                  => 'رقم المهمة غير متطابق مع ملف النتيجة؛ تم إيقاف المتابعة تلقائياً.',
@@ -422,6 +434,33 @@ class BackgroundUpdateApplyService
             'update_state'     => $exposedState,
             'result'           => $resultData,
         ];
+    }
+
+    private function recoveredShellSettlement(array $state, array $result): ?string
+    {
+        $terminal = $state['state'] ?? null;
+        $source = $state['from_version'] ?? null;
+        $target = $result['handoff_version'] ?? null;
+        if (($result['update_type'] ?? null) !== ShellDeltaManifestService::OPERATION ||
+            ($result['requires_desktop_handoff'] ?? null) !== true ||
+            ($state['operation'] ?? null) !== ShellDeltaManifestService::OPERATION ||
+            !in_array($terminal, ['rolled_back', 'failed'], true) ||
+            ($state['phase'] ?? null) !== $terminal ||
+            ($state['requires_recovery'] ?? null) !== false ||
+            ($state['source_runtime_recovered'] ?? null) !== true ||
+            !is_string($state['shell_transaction_id'] ?? null) ||
+            !preg_match('/^tx_[a-f0-9]{32}$/D', $state['shell_transaction_id']) ||
+            !is_string($target) || $target === '' ||
+            ($state['to_version'] ?? null) !== $target || ($state['target_version'] ?? null) !== $target ||
+            !is_string($source) || !ProductInventoryService::isValidSemver($source) ||
+            ($this->updateService->getLocalVersion()['version'] ?? null) !== $source) {
+            return null;
+        }
+
+        if ($terminal === 'rolled_back') {
+            return 'shell_rolled_back';
+        }
+        return ($state['source_reopened_without_mutation'] ?? null) === true ? 'shell_source_reopened' : null;
     }
 
     /**

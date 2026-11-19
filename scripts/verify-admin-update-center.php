@@ -663,6 +663,53 @@ try {
         verify(!$frontendAcceptsHandoff($statusI1, 520), "Case I1: Old handoff predicate rejects because requires_desktop_handoff is false (prevents re-apply)");
         verify($frontendAcceptsReconciledSettlement($statusI1, 520), "Case I1: Frontend reconciliation predicate accepts attested completion");
 
+        $sqlite->exec("INSERT INTO job_queue (id, job_name, payload, status) VALUES (531, 'apply_update', '{\"operation_id\":\"op-531-shell\"}', 'completed')");
+        $applyService->saveJobData(531, [
+            'job_id' => 531,
+            'operation_id' => 'op-531-shell',
+            'status' => 'completed',
+            'result' => [
+                'ok' => true,
+                'data' => [
+                    'requires_desktop_handoff' => true,
+                    'handoff_version' => '0.0.14',
+                    'update_type' => 'shell_delta',
+                ],
+            ],
+        ]);
+        $recoveredShell = [
+            'operation' => 'shell_delta',
+            'operation_id' => 'op-531-shell',
+            'shell_transaction_id' => 'tx_' . str_repeat('1', 32),
+            'from_version' => '0.0.12',
+            'to_version' => '0.0.14',
+            'target_version' => '0.0.14',
+            'phase' => 'rolled_back',
+            'requires_recovery' => false,
+            'source_runtime_recovered' => true,
+        ];
+        $deltaMock->setUpdateState('rolled_back', $recoveredShell);
+        $settled = $applyService->getJobStatus(531);
+        verify($settled['status'] === 'failed', 'Verified shell rollback must settle the staged job as a failed update.');
+        verify($settled['settlement_error'] === 'shell_rolled_back', 'The job must explain verified automatic rollback.');
+        verify($settled['result']['requires_desktop_handoff'] === false, 'Verified shell rollback must never invite a new handoff.');
+        verify(!isset($settled['result']['ok']), 'A shell rollback must never claim update success.');
+
+        $deltaMock->setUpdateState('rolled_back', array_replace($recoveredShell, ['operation_id' => 'foreign-operation']));
+        $unbound = $applyService->getJobStatus(531);
+        verify(($unbound['result']['requires_desktop_handoff'] ?? null) === true, 'An unrelated rollback cannot settle this job.');
+        $deltaMock->setUpdateState('rolled_back', array_replace($recoveredShell, ['from_version' => '0.0.13']));
+        $wrongSource = $applyService->getJobStatus(531);
+        verify(($wrongSource['result']['requires_desktop_handoff'] ?? null) === true, 'The live source version must match the verified rollback.');
+
+        $deltaMock->setUpdateState('failed', array_replace($recoveredShell, [
+            'phase' => 'failed',
+            'source_reopened_without_mutation' => true,
+        ]));
+        $sourceReopened = $applyService->getJobStatus(531);
+        verify($sourceReopened['status'] === 'failed' && $sourceReopened['settlement_error'] === 'shell_source_reopened',
+            'Reopening the unmodified source also settles the pending shell job.');
+
         // ──────────────────────────────────────────────────────────────
         // Negative Probes: Missing/unbound/wrong state op/phase/failed/error/recovery/target/installed version/persisted job id
         // => NO trusted completion / unlock (desktop_handoff_completed is NOT true, requires_desktop_handoff remains true)

@@ -22,7 +22,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: zip, openssl, mbstring, pdo_mysql
+          extensions: zip, openssl, mbstring, pdo_mysql, pdo_sqlite
           coverage: none
       - name: Verify runtime JavaScript and PHP syntax
         shell: pwsh
@@ -53,3 +53,17 @@ jobs:
         shell: pwsh
         run: php scripts/verify-shell-file-transaction.php
 
+      - name: Install the locked renderer verification dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+      - name: Verify restart reconciliation in Update Center
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          php scripts/verify-admin-update-center.php
+          $phpResult = $LASTEXITCODE
+          node scripts/verify-admin-update-ui.mjs
+          if ($phpResult -ne 0 -or $LASTEXITCODE -ne 0) { exit 1 }

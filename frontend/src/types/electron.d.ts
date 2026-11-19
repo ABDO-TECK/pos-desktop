@@ -61,7 +61,7 @@ interface Window {
       firewallRequired?: boolean;
       error?: string;
     }>;
-    applyStagedDelta: (version: string) => Promise<{ ok: boolean; error?: string }>;
+    applyStagedDelta: (version: string) => Promise<{ ok: boolean; error?: string; restarting?: boolean }>;
   };
   API_BASE_URL?: string;
 }
