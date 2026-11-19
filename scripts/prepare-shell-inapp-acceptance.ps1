@@ -149,8 +149,15 @@ const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 for (const [entry, expected] of Object.entries(assets)) {
   assert.equal(sha(asar.extractFile(archive, path.normalize(entry))), sha(fs.readFileSync(expected)), entry);
 }
+const broker = asar.extractFile(archive, path.normalize('electron/assets/shell-update-broker.bin'));
+assert.equal(broker.readUInt16LE(0), 0x5a4d, 'The packaged native broker must be a PE executable.');
+const peHeader = broker.readUInt32LE(0x3c);
+assert.equal(broker.readUInt32LE(peHeader), 0x00004550, 'Invalid native broker PE header.');
+assert.equal(broker.readUInt16LE(peHeader + 4), 0x8664, 'The packaged native broker must be x64.');
+console.log(sha(broker));
 '@
-    node -e $asarCheck (Join-Path $product 'resources/app.asar')
+    $brokerHash = node -e $asarCheck (Join-Path $product 'resources/app.asar')
+    if ($brokerHash -cnotmatch '^[a-f0-9]{64}$') { throw "Could not identify the packaged native broker for $Role." }
     [ordered]@{
         scope = 'Unpublished CI product with ephemeral trust and loopback CDP'
         commit = $env:GITHUB_SHA
@@ -160,6 +167,7 @@ for (const [entry, expected] of Object.entries(assets)) {
         electron_archive_asset_id = $Engine.asset_id
         electron_archive_sha256 = $Engine.sha256
         asar_embedded_native_components_verified = $true
+        native_broker_sha256 = $brokerHash
         exe_sha256 = (Get-FileHash -LiteralPath $exe.FullName).Hash.ToLowerInvariant()
         asar_sha256 = (Get-FileHash -LiteralPath (Join-Path $product 'resources/app.asar')).Hash.ToLowerInvariant()
         phar_sha256 = (Get-FileHash -LiteralPath (Join-Path $product 'resources/app.asar.unpacked/backend/backend.phar')).Hash.ToLowerInvariant()

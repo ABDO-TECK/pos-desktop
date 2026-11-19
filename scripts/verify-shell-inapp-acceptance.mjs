@@ -28,7 +28,8 @@ const inventory = readJson(path.join(releaseRoot, 'shell-manifest.json'));
 const requests = [];
 const updateNetwork = [];
 const networkResults = new Map();
-const observations = {};
+const observations = { supervisor_phases: [] };
+let lastSupervisorSnapshot;
 
 function safeFields(value, fields) {
   if (!value || typeof value !== 'object') return null;
@@ -50,19 +51,46 @@ function optionalJson(file) {
   }
 }
 
-function updaterDiagnostics() {
+function supervisorState() {
   const state = optionalJson(path.join(dataDir, 'update-state.json'));
   const active = optionalJson(path.join(supervisorStateRoot, 'active.json'));
+  return {
+    state: safeFields(state, ['state', 'phase', 'operation', 'from_version', 'to_version', 'reason_code', 'error', 'requires_recovery']),
+    supervisor_active: safeFields(active, ['id', 'phase', 'sourcePid', 'candidatePid', 'restoredPid', 'candidateExit', 'error',
+      'candidateFailure', 'restoredFailure', 'candidateBrokerPhase', 'restoredBrokerPhase']),
+  };
+}
+
+function observeSupervisorPhase() {
+  const snapshot = supervisorState();
+  const serialized = JSON.stringify(snapshot);
+  if (serialized === lastSupervisorSnapshot || observations.supervisor_phases.length >= 80) return;
+  lastSupervisorSnapshot = serialized;
+  observations.supervisor_phases.push({ observed_at: new Date().toISOString(), ...snapshot });
+}
+
+function safeSupervisorReceipt(receipt) {
+  if (!receipt) return null;
+  const fields = ['operation_id', 'outcome', 'phase', 'source_version', 'target_version', 'source_pid',
+    'candidate_pid', 'restored_pid', 'candidate_exit_code', 'database_backup_sha256', 'transaction_digest', 'error',
+    'candidate_failure', 'restored_failure', 'candidate_broker_phase', 'restored_broker_phase', 'source_reopened_without_mutation'];
+  const health = ['ui', 'php', 'database', 'version', 'native_version'];
+  return { ...safeFields(receipt, fields),
+    candidate_health: safeFields(receipt.candidate_health, health),
+    restored_health: safeFields(receipt.restored_health, health),
+  };
+}
+
+function updaterDiagnostics() {
   const stage = path.join(dataDir, 'update_staging', '0.0.14', 'shell-delta');
   const stagedFileSizes = {};
   for (const name of assetNames) {
     if (fs.existsSync(path.join(stage, name))) stagedFileSizes[name] = fs.statSync(path.join(stage, name)).size;
   }
   return {
-    state: safeFields(state, ['state', 'phase', 'operation', 'from_version', 'to_version', 'reason_code', 'error', 'requires_recovery', 'updated_at']),
-    supervisor_active: safeFields(active, ['id', 'phase', 'updated_at', 'candidatePid', 'restoredPid', 'candidateExit', 'error']),
+    ...supervisorState(),
     staged_file_sizes: stagedFileSizes,
-    terminal: readTerminalReceipt(),
+    terminal: safeSupervisorReceipt(readTerminalReceipt()),
   };
 }
 
@@ -169,7 +197,8 @@ function checkInstalledInventory(expected, deleted = []) {
     'resources/app.asar.unpacked/frontend/dist/index.html',
     'resources/app.asar.unpacked/version.json',
   ];
-  const observations = {};
+  const observations = { supervisor_phases: [] };
+let lastSupervisorSnapshot;
   for (const [relative, entry] of Object.entries(expected.files)) {
     const file = path.join(installRoot, relative);
     assert.equal(fs.statSync(file).size, entry.size, 'Wrong installed size for '+relative);
@@ -338,6 +367,7 @@ try {
   // From confirmation onward the harness only observes until the new process
   // has finished the transaction. It makes no update, health-signal, or rollback call.
   const outcome = await waitFor('automatic terminal updater receipt', async () => {
+    observeSupervisorPhase();
     const receipt = readTerminalReceipt();
     if (receipt) return receipt;
     if (observations.renderer_handoff && !observations.renderer_handoff.displayed_error?.includes('انتهت مهلة انتظار')) {
@@ -352,7 +382,7 @@ try {
     }
     return null;
   }, 360_000);
-  observations.supervisor = outcome;
+  observations.supervisor = safeSupervisorReceipt(outcome);
   assert.equal(outcome.outcome, scenario === 'rollback' ? 'rolled_back' : 'completed', 'The supervisor produced the wrong terminal outcome.');
   assert.equal(outcome.source_version, '0.0.13');
   assert.equal(outcome.target_version, '0.0.14');
@@ -436,7 +466,7 @@ try {
   });
   console.log('PASS: installed Update Center '+scenario+' and actual desktop/PHP/MariaDB restart verified.');
 } catch (error) {
-  observations.failure = { message: error.message, diagnostics: updaterDiagnostics() };
+  observations.failure = { ...safeFields(error, ['message']), diagnostics: updaterDiagnostics() };
   if (observations.before) {
     try {
       observations.failure.ui = safeFields(await app.evaluate("(() => {"+
