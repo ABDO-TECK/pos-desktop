@@ -2213,6 +2213,15 @@ final class ShellDeltaFileTransactionService
             throw new RuntimeException("Product root cannot reside inside the private state base.");
         }
 
+        if (PHP_OS_FAMILY === 'Windows') {
+            $productDevice = @stat($canonicalRoot)['dev'] ?? null;
+            $stateDevice = @stat($canonicalStateBase)['dev'] ?? null;
+            if ($productDevice === null || $productDevice !== $stateDevice ||
+                strtolower(substr($canonicalRoot, 0, 2)) !== strtolower(substr($canonicalStateBase, 0, 2))) {
+                throw new RuntimeException('Product root and workspace must share a volume for atomic publication.');
+            }
+        }
+
         return [$canonicalRoot, $canonicalStateBase];
     }
 

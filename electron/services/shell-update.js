@@ -18,8 +18,17 @@ const rootFiles = /^(?:POS Desktop\.exe|icudtl\.dat|v8_context_snapshot\.bin|sna
 const isRuntimeImage = (image) => rootFiles.test(image) || /^resources\/portable\/php\/(?:(?:ext\/)?[A-Za-z0-9_.-]+\.dll|php\.exe)$/.test(image) || image === BACKEND;
 
 function isShellUpdateCapable() {
-  return Boolean(app?.isPackaged) && process.platform === 'win32' && process.arch === 'x64' &&
-    path.basename(process.execPath) === EXE && fs.existsSync(keyFile);
+  if (!app?.isPackaged || process.platform !== 'win32' || process.arch !== 'x64' ||
+      path.basename(process.execPath) !== EXE || !fs.existsSync(keyFile)) return false;
+  try {
+    const { installRoot, stateRoot } = locations();
+    // The transaction publishes from a private workspace using atomic rename.
+    // Windows can copy across drive boundaries, which cannot provide that guarantee.
+    return path.parse(installRoot).root.toLowerCase() === path.parse(stateRoot).root.toLowerCase() &&
+      fs.statSync(installRoot).dev === fs.statSync(canonical(process.env.LOCALAPPDATA)).dev;
+  } catch {
+    return false;
+  }
 }
 
 function locations() {
@@ -141,10 +150,9 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
         BigInt(descriptor.target_inventory.files[name]?.size ?? 0), 0n);
   const margin = 64n * 1024n * 1024n;
   const sameVolume = path.parse(dataDir).root.toLowerCase() === path.parse(stateRoot).root.toLowerCase();
-  requireSpace(stateRoot, runtimeBytes + transactionBytes + databaseBytes * (sameVolume ? 2n : 1n) + margin);
-  if (!sameVolume) requireSpace(dataDir, databaseBytes + margin);
   const largestChange = descriptor.files.reduce((largest, entry) => Math.max(largest, entry.size), 0);
-  requireSpace(installRoot, BigInt(largestChange) + margin);
+  requireSpace(stateRoot, runtimeBytes + transactionBytes + BigInt(largestChange) + databaseBytes * (sameVolume ? 2n : 1n) + margin);
+  if (!sameVolume) requireSpace(dataDir, databaseBytes + margin);
 
   const id = 'tx_' + secret().slice(0, 32);
   const paths = operationPaths(stateRoot, id);
