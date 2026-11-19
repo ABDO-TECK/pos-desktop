@@ -37,6 +37,9 @@ jobs:
             php -l $file
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
+      - name: Verify private supervisor state on Windows
+        shell: pwsh
+        run: node scripts/verify-shell-supervisor-state.cjs
       - name: Clean up a live owned child after its candidate exits
         shell: pwsh
         run: ./scripts/verify-shell-update-process.ps1

@@ -38,6 +38,7 @@ function locations() {
 }
 
 const backendToken = secret();
+let admissionId = null;
 
 function shellBackendEnvironment() {
   const capable = isShellUpdateCapable();
@@ -269,6 +270,7 @@ async function checkStartup(onAbandoned) {
   if (!record) return { mode: raw ? 'blocked' : 'normal', cleanup: () => cleanup(stateRoot) };
   if (raw) {
     const probation = await connectProbation(record, stateRoot, JSON.parse(raw), onAbandoned);
+    admissionId = record.id;
     return { mode: 'probation', probation, cleanup: () => cleanup(stateRoot) };
   }
   if (record.phase !== 'recovery_required') {
@@ -282,7 +284,7 @@ async function checkStartup(onAbandoned) {
 
 function cleanup(stateRoot) {
   if (!fs.existsSync(stateRoot)) return;
-  try { pruneCompletedCopies(stateRoot); }
+  try { pruneCompletedCopies(stateRoot, admissionId); }
   catch (error) { console.warn('[Shell Update] Completed update cleanup deferred:', error.message); }
 }
 
