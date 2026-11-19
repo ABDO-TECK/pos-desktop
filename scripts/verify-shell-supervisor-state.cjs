@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  ensurePrivateRoot, ensureDirectory, operationPaths, pruneCompletedCopies, requireSpace, writeRecord,
+  ensurePrivateRoot, ensureDirectory, operationPaths, pruneCompletedCopies, requireSpace, powershell, writeRecord,
 } = require('../electron/services/shell-update-files');
 
 async function verify() {
@@ -15,6 +15,11 @@ async function verify() {
   try {
     await ensurePrivateRoot(stateRoot);
     requireSpace(stateRoot, 1n);
+    const observedPid = await powershell(
+      '(Get-CimInstance Win32_Process -Filter ("ProcessId = " + $env:POS_TEST_PID)).ProcessId',
+      { POS_TEST_PID: String(process.pid) },
+    );
+    assert.equal(Number(observedPid), process.pid, 'The supervisor must be able to query the installed process list.');
 
     const id = (number) => 'tx_' + number.toString(16).padStart(32, '0');
     const receipt = (number, outcome) => {

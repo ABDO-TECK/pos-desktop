@@ -122,9 +122,13 @@ function systemPath(...elements) {
 
 async function powershell(source, variable = {}) {
   const script = '$ErrorActionPreference = "Stop"\n' + source;
-  const result = await run(systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+  const executable = systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const result = await run(executable, [
     '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-  ], { env: { ...process.env, ...variable }, windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
+  ], {
+    env: { ...workerEnv(), ...variable, PSModulePath: path.join(path.dirname(executable), 'Modules') },
+    windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024,
+  });
   return result.stdout.trim().replace(/^\uFEFF/, '');
 }
 
@@ -141,8 +145,8 @@ async function ensurePrivateRoot(stateRoot) {
     '  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
     '  $acl.AddAccessRule($rule)',
     '}',
-    'Set-Acl -LiteralPath $env:POS_SHELL_PRIVATE -AclObject $acl',
-    '$applied = Get-Acl -LiteralPath $env:POS_SHELL_PRIVATE',
+    '[System.IO.Directory]::SetAccessControl($env:POS_SHELL_PRIVATE, $acl)',
+    '$applied = [System.IO.Directory]::GetAccessControl($env:POS_SHELL_PRIVATE)',
     'if (!$applied.AreAccessRulesProtected -or $applied.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $owner) { throw "Private updater ACL failed." }',
     'foreach ($entry in $applied.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {',
     '  if ($entry.IdentityReference -ne $owner -and $entry.IdentityReference -ne $system) { throw "External updater ACL principal." }',
