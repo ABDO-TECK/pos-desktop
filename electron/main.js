@@ -89,7 +89,22 @@ async function stopJobWorker(options = {}) {
     return;
   }
   const timeoutMs = options.timeoutMs || 3000;
-  await stopPhpServerAwaitable({ timeoutMs, processRef: worker });
+  if (options.drain) {
+    await new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        worker.removeListener('exit', onExit);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onExit = (code, signal) => finish(code === 0 && signal === null
+        ? null : new Error('The job worker could not drain its active task.'));
+      const timer = setTimeout(() => finish(new Error('The job worker did not drain in time.')), timeoutMs);
+      worker.once('exit', onExit);
+    });
+  } else {
+    await stopPhpServerAwaitable({ timeoutMs, processRef: worker });
+  }
   jobWorkerProcess = null;
 }
 
@@ -860,7 +875,7 @@ async function runShellUpdate(version, storageDir, pending) {
     drainBegun = true;
     await waitForHealth(getPhpServerInfo().baseUrl, { maxTime: 5000 });
     await stopHttpsProxy({ disconnect: true });
-    await stopJobWorker();
+    await stopJobWorker({ drain: true, timeoutMs: 20000 });
     if (logCleanupProcess) await stopPhpServerAwaitable({ processRef: logCleanupProcess, timeoutMs: 4000 });
     await stopQZTrayAndWait();
     await stopPhpServerAwaitable({ timeoutMs: 5000 });
@@ -1772,7 +1787,10 @@ app.whenReady().then(async () => {
     runtimeStarting = false;
     if (probation) {
       const ui = await provePackagedUi(appProtocolHandler);
-      probation.report('health', { version: started.health.version, data_compatibility: started.health.data_compatibility, ui, php: true });
+      probation.report('health', {
+        version: started.health.version, nativeVersion: app.getVersion(), data_compatibility: started.health.data_compatibility,
+        ui, php: true, phpPort: started.phpServerInfo.port,
+      });
       await probation.waitForAdmission();
     }
 

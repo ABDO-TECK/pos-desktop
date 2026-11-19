@@ -32,7 +32,7 @@ jobs:
             node --check $file
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
-          $php = @('build-phar.php', 'backend/router.php', 'backend/Services/ShellDeltaFileTransactionService.php', 'backend/Services/ShellUpdateHealthService.php', 'backend/cli/shell-transaction.php')
+          $php = @('build-phar.php', 'backend/router.php', 'backend/Services/ShellDeltaFileTransactionService.php', 'backend/Services/ShellUpdateHealthService.php', 'backend/cli/shell-transaction.php', 'backend/cli/process-jobs.php')
           foreach ($file in $php) {
             php -l $file
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -40,6 +40,9 @@ jobs:
       - name: Clean up a live owned child after its candidate exits
         shell: pwsh
         run: ./scripts/verify-shell-update-process.ps1
+      - name: Verify repeated handoffs reapply the PHP write barrier
+        shell: pwsh
+        run: php scripts/verify-shell-health-write-gate.php
       - name: Run signed file transaction recovery suite
         shell: pwsh
         run: php scripts/verify-shell-file-transaction.php

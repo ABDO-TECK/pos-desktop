@@ -1736,6 +1736,33 @@ try {
     );
     assertEqual($rbStableRepeat['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Repeat Stable rollback must succeed idempotently");
 
+    echo "  [1.3] Health decision and restart after interrupted marker release...\n";
+    $commitRoot = $lab . DIRECTORY_SEPARATOR . 'suite1-commit-product';
+    $commitState = $lab . DIRECTORY_SEPARATOR . 'suite1-commit-state';
+    mkdir($commitState, 0700, true);
+    populateTree($commitRoot, $sourceBetaFiles);
+    $commitId = $txService->prepare($commitRoot, $commitState, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext)['operation_id'];
+    $applied = $txService->apply($commitRoot, $commitState, $commitId, $installedBetaContext);
+    $beforeCommit = snapshotTree($commitRoot);
+    $callCommit = static function (ShellDeltaFileTransactionService $service, string $version) use (
+        $commitRoot, $commitState, $commitId, $installedBetaContext, $applied
+    ): array {
+        return $service->commitAfterHealth($commitRoot, $commitState, $commitId, $installedBetaContext, $version, $applied['target_inventory_sha256']);
+    };
+    assertThrows(static fn () => $callCommit($txService, '0.0.99'), 'does not identify', 'A mismatched health version must not commit.');
+    assertEqual($txService->operationPhase($commitRoot, $commitState, $commitId), ShellDeltaFileTransactionService::PHASE_FILES_APPLIED, 'Mismatched health left files uncommitted.');
+    $interrupted = new ShellDeltaFileTransactionService($manifestService, static function (string $checkpoint): void {
+        if ($checkpoint === 'before_marker_release') {
+            throw new RuntimeException('Test interruption before marker release.');
+        }
+    });
+    assertThrows(static fn () => $callCommit($interrupted, $applied['version']), 'Test interruption', 'Commit interruption must retain the committed decision.');
+    assertEqual($txService->operationPhase($commitRoot, $commitState, $commitId), ShellDeltaFileTransactionService::PHASE_COMMITTED, 'Commit decision is durable before marker release.');
+    assertThrows(static fn () => $txService->recover($commitRoot, $commitState, $commitId, $installedBetaContext), 'cannot be rolled back', 'Recovery may not undo a committed update.');
+    $committed = $callCommit($txService, $applied['version']);
+    assertEqual($callCommit($txService, $applied['version']), $committed, 'Repeated health commit is idempotent.');
+    assertEqual(snapshotTree($commitRoot), $beforeCommit, 'Recovery following commit does not modify installed target bytes.');
+
     echo "  [Test Suite 1 Passed]\n";
 
     // -------------------------------------------------------------------------

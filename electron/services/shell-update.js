@@ -124,8 +124,9 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
   if (!VALID_VERSION.test(installedVersion) || descriptor.format !== 2 || descriptor.operation !== 'shell_delta' ||
       descriptor.purpose !== 'regular' || descriptor.platform !== 'win32' || descriptor.arch !== 'x64' ||
       descriptor.from_version !== installedVersion || descriptor.from_native_version !== nativeVersion ||
+      (pending.from_version && pending.from_version !== installedVersion) ||
       descriptor.from_channel !== channel || descriptor.channel !== channel ||
-      classifyVersionChannel(version) !== channel || descriptor.version !== version || descriptor.native_version !== version) {
+      classifyVersionChannel(version) !== channel || descriptor.version !== version || !require('semver').valid(descriptor.native_version)) {
     throw new Error('The signed shell package does not match this installed source and update channel.');
   }
   if (!require('semver').gt(version, installedVersion)) throw new Error('The shell update is not newer than the installed version.');
@@ -160,7 +161,7 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
     throw error;
   }
   const job = {
-    id, installRoot, dataDir, target: version, sourcePid: process.pid,
+    id, installRoot, dataDir, target: version, nativeTarget: descriptor.native_version, sourcePid: process.pid,
     releaseJob: pending.operation_id ?? null, lease,
     context: { version: installedVersion, native_version: nativeVersion, channel, data_compatibility: dataCompatibility },
   };
@@ -226,7 +227,7 @@ async function connectProbation(record, stateRoot, probation, onAbandoned) {
       socket.once('connect', () => report('starting'));
       jsonLine(socket, (frame) => {
         if (frame.command === 'probe') {
-          resolve(frame.version);
+          resolve(frame.nativeVersion);
         } else if (frame.command === 'admit') {
           admitted = true;
           onAdmitted();

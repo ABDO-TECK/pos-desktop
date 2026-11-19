@@ -23,24 +23,11 @@ $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/';
 $pharRunning = Phar::running(false);
 $baseDir = $pharRunning ? dirname($pharRunning) : __DIR__;
 
-if (PHP_SAPI === 'cli-server' && $pharRunning && getenv('POS_SHELL_PROBATION_TOKEN')) {
-    $pharRoot = 'phar://' . Phar::running(false);
+if (PHP_SAPI === 'cli-server' && $pharRunning &&
+    (getenv('POS_SHELL_PROBATION_TOKEN') || getenv('POS_SHELL_SOURCE_GATE'))) {
+    $pharRoot = 'phar://' . $pharRunning;
     require_once $pharRoot . '/vendor/autoload.php';
-    if (\App\Services\ShellUpdateHealthService::restrictProbationTraffic($uri, $pharRoot)) {
-        return true;
-    }
-}
-
-// The source server drains requests already in progress. During handoff only
-// the loopback liveness request used by its owning main process can pass.
-if (PHP_SAPI === 'cli-server' && $pharRunning && !getenv('POS_SHELL_PROBATION_TOKEN')) {
-    $sourceGate = getenv('POS_SHELL_SOURCE_GATE');
-    if (is_string($sourceGate) && $sourceGate !== '' && is_file($sourceGate) &&
-        ($uri !== '/api/health' || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET')) {
-        http_response_code(503);
-        header('Content-Type: application/json');
-        header('Cache-Control: no-store');
-        echo '{"status":"maintenance","critical_failed":true}';
+    if (\App\Services\ShellUpdateHealthService::restrictHttpTraffic($uri, $pharRoot)) {
         return true;
     }
 }
