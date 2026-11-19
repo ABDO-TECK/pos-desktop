@@ -37,7 +37,8 @@ function safeFields(value, fields) {
   return Object.fromEntries(fields.filter(field => Object.hasOwn(value, field)).map(field => {
     const entry = value[field];
     return [field, typeof entry === 'string'
-      ? entry.replace(/(password|authorization|token|secret)\s*[:=]\s*\S+/gi, '$1=[redacted]').slice(0, 800)
+      ? entry.replace(/(password|authorization|token|secret)\s*[:=]\s*\S+/gi, '$1=[redacted]')
+          .replace(/(?:Command failed:|-\s*EncodedCommand).*$/gim, '[Windows invocation omitted]').slice(0, 800)
       : (typeof entry === 'number' || typeof entry === 'boolean' ? entry : null)];
   }));
 }
@@ -97,6 +98,26 @@ function observeNetwork(app) {
       }).catch(() => {});
     }
   });
+}
+
+async function observeRendererHandoff(app) {
+  const binding = 'posCiObserveHandoff';
+  app.onEvent((event, detail) => {
+    if (event !== 'Runtime.bindingCalled' || detail.name !== binding || detail.payload.length > 2_000) return;
+    const observation = JSON.parse(detail.payload);
+    if (observation.status !== 'failed' || !/^\d+$/.test(observation.job_id)) return;
+    observations.renderer_handoff = safeFields(observation, ['status', 'job_id', 'displayed_error']);
+  });
+  await app.call('Runtime.addBinding', {name: binding});
+  await app.evaluate("(() => {"+
+    "let previous = ''; const watch = new MutationObserver(() => {"+
+    "const job_id = sessionStorage.getItem('pos.active_update_job_id');"+
+    "if (!job_id || sessionStorage.getItem('pos.update_handoff_'+job_id) !== 'failed') return;"+
+    "const displayed_error = [...document.querySelectorAll('[role=\"status\"][aria-live=\"polite\"]')]"+
+    ".map(element => element.innerText.trim()).filter(Boolean).slice(-2).join('\\n').slice(0, 1000);"+
+    "if (!displayed_error || displayed_error === previous) return; previous = displayed_error;"+
+    "window.posCiObserveHandoff(JSON.stringify({job_id,status:'failed',displayed_error}));"+
+    "}); watch.observe(document.body,{childList:true,subtree:true,characterData:true}); })()");
 }
 
 async function waitFor(description, predicate, timeout = 240_000) {
@@ -303,6 +324,7 @@ try {
   await clickVisibleButton(app, checkButton);
   await app.until("document.body.innerText.includes('v0.0.14') && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version 0.0.14 install card');
   await screenshot(app, scenario+'-offered');
+  await observeRendererHandoff(app);
   assert.equal(await app.evaluate("document.body.innerText.includes('تحديث ملفات تطبيق سطح المكتب')"), true,
     'The offered update must be the signed shell file update.');
   await clickVisibleButton(app, installButton);
@@ -313,6 +335,9 @@ try {
   const outcome = await waitFor('automatic terminal updater receipt', async () => {
     const receipt = readTerminalReceipt();
     if (receipt) return receipt;
+    if (observations.renderer_handoff) {
+      throw new Error('Desktop handoff rejected: '+JSON.stringify(observations.renderer_handoff));
+    }
     const rejection = updateNetwork.find(event => event.type === 'response' && event.result && (
       (event.path.endsWith('/updates/apply') && event.status >= 400)
       || (/\/update\/jobs\/\d+$/.test(event.path) && event.result.data?.status === 'failed')
