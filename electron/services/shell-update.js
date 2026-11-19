@@ -197,24 +197,23 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
     clearTimeout(timer);
   }
 
-  return {
-    id,
-    async confirmShutdown() {
+  async function completeHandoff(event) {
+    try {
       await new Promise((resolve, reject) => {
         worker.stdin.once('error', reject);
-        worker.stdin.end('{"event":"stopped"}\n', resolve);
+        worker.stdin.end(JSON.stringify({ event }) + '\n', resolve);
       });
+    } finally {
       worker.stdout.destroy();
       worker.unref();
-    },
-    abort() {
-      worker.stdin.end('{"event":"abort"}\n');
-      worker.stdout.destroy();
-      worker.unref();
-    },
+    }
+  }
+
+  return {
+    confirmShutdown: () => completeHandoff('stopped'),
+    confirmFailedDrain: () => completeHandoff('drain-failed-source-exiting'),
   };
 }
-
 
 async function connectProbation(record, stateRoot, probation, onAbandoned) {
   if (!validSecret.test(probation.token) || !VALID_OPERATION.test(probation.id) || record.id !== probation.id ||

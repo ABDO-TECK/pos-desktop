@@ -2,7 +2,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  ensurePrivateRoot, ensureDirectory, operationPaths, pruneCompletedCopies, requireSpace, powershell, writeRecord,
+  ensurePrivateRoot, ensureDirectory, operationPaths, pruneCompletedCopies, requireSpace, powershell,
+  waitForSourceShutdown, writeRecord,
 } = require('../electron/services/shell-update-files');
 
 async function verify() {
@@ -20,6 +21,11 @@ async function verify() {
       { POS_TEST_PID: String(process.pid) },
     );
     assert.equal(Number(observedPid), process.pid, 'The supervisor must be able to query the installed process list.');
+
+    const acknowledgement = (event) => waitForSourceShutdown((onFrame) => onFrame({ event }));
+    assert.equal(await acknowledgement('stopped'), 'stopped');
+    assert.equal(await acknowledgement('drain-failed-source-exiting'), 'drain-failed-source-exiting');
+    await assert.rejects(acknowledgement('abort'), /did not authorize/);
 
     const id = (number) => 'tx_' + number.toString(16).padStart(32, '0');
     const receipt = (number, outcome) => {

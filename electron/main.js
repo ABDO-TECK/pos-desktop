@@ -896,10 +896,11 @@ async function runShellUpdate(version, storageDir, pending) {
       try { await stopRuntimeServices(); } catch (shutdownError) {
         console.error('[Shell Update] Interrupted source shutdown:', shutdownError.message);
       }
-      supervisor?.abort();
+      try { await supervisor.confirmFailedDrain(); } catch (notificationError) {
+        console.error('[Shell Update] Could not acknowledge source recovery:', notificationError.message);
+      }
       setImmediate(() => app.exit(1));
     } else {
-      supervisor?.abort();
       shellInstallInProgress = false;
     }
     return { ok: false, reason_code: 'shell_handoff_failed', error: error.message };

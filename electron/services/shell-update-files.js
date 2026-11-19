@@ -120,22 +120,30 @@ function systemPath(...elements) {
   return canonical(path.join(windows, 'System32', ...elements));
 }
 
-async function powershell(source, variable = {}) {
-  const script = '$ErrorActionPreference = "Stop"\n' + source;
+async function powershell(source, variable = {}, operation = 'Windows supervisor query') {
+  const script = '$ErrorActionPreference = "Stop"\n$ProgressPreference = "SilentlyContinue"\n' + source;
   const executable = systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const result = await run(executable, [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-  ], {
-    env: { ...workerEnv(), ...variable, PSModulePath: path.join(path.dirname(executable), 'Modules') },
-    windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024,
-  });
-  return result.stdout.trim().replace(/^\uFEFF/, '');
+  const timeout = 45000;
+  try {
+    const result = await run(executable, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+    ], {
+      env: { ...workerEnv(), ...variable, PSModulePath: path.join(path.dirname(executable), 'Modules') },
+      windowsHide: true, timeout, maxBuffer: 4 * 1024 * 1024,
+    });
+    return result.stdout.trim().replace(/^\uFEFF/, '');
+  } catch (error) {
+    const result = error.killed ? 'timed out after ' + (timeout / 1000) + ' seconds' : 'failed';
+    const diagnostic = [error.stdout, error.stderr].filter(Boolean).join('\n').trim().slice(0, 2000);
+    throw new Error(operation + ' ' + result + (diagnostic ? '\n' + diagnostic : ' before returning diagnostics.'));
+  }
 }
 
 async function ensurePrivateRoot(stateRoot) {
   ensureDirectory(path.dirname(stateRoot));
   ensureDirectory(stateRoot);
   await powershell([
+    '[Console]::WriteLine("Reading updater Windows identity.")',
     '$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
     '$system = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-18")',
     '$acl = New-Object System.Security.AccessControl.DirectorySecurity',
@@ -145,13 +153,15 @@ async function ensurePrivateRoot(stateRoot) {
     '  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
     '  $acl.AddAccessRule($rule)',
     '}',
+    '[Console]::WriteLine("Applying private updater directory ACL.")',
     '[System.IO.Directory]::SetAccessControl($env:POS_SHELL_PRIVATE, $acl)',
+    '[Console]::WriteLine("Verifying private updater directory ACL.")',
     '$applied = [System.IO.Directory]::GetAccessControl($env:POS_SHELL_PRIVATE)',
     'if (!$applied.AreAccessRulesProtected -or $applied.GetOwner([System.Security.Principal.SecurityIdentifier]) -ne $owner) { throw "Private updater ACL failed." }',
     'foreach ($entry in $applied.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {',
     '  if ($entry.IdentityReference -ne $owner -and $entry.IdentityReference -ne $system) { throw "External updater ACL principal." }',
     '}',
-  ].join('\n'), { POS_SHELL_PRIVATE: stateRoot });
+  ].join('\n'), { POS_SHELL_PRIVATE: stateRoot }, 'Private updater ACL provisioning');
 }
 
 function regularPackage(dataDir, version) {
@@ -292,6 +302,20 @@ function pruneCompletedCopies(stateRoot, retainReleaseFor = null) {
   }
 }
 
+function waitForSourceShutdown(nextFrame) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Source shutdown proof timed out.')), 75_000);
+    nextFrame((frame) => {
+      clearTimeout(timer);
+      if (frame?.event === 'stopped' || frame?.event === 'drain-failed-source-exiting') {
+        resolve(frame.event);
+      } else {
+        reject(new Error('The source did not authorize an updater-managed restart.'));
+      }
+    });
+  });
+}
+
 function sharedUpdateContext(job) {
   return { operation: 'shell_delta', operation_id: job.releaseJob, target_version: job.target, to_version: job.target };
 }
@@ -301,6 +325,6 @@ module.exports = {
   secret, hash, canonical, plainFile, ensureDirectory, stateLocation, operationPaths,
   readRecord, durableFile, writeRecord, readActive, clearActive, systemPath, powershell, ensurePrivateRoot,
   regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
-  bytesInTree, requireSpace, pruneCompletedCopies, sharedUpdateContext,
+  bytesInTree, requireSpace, pruneCompletedCopies, waitForSourceShutdown, sharedUpdateContext,
 };
 

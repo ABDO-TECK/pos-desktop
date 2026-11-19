@@ -8,7 +8,8 @@ const { spawn, execFile } = require('node:child_process');
 const {
   EXE, WORKER, VALID_OPERATION, VALID_VERSION, canonical, ensureDirectory, operationPaths, stateLocation,
   readActive, clearActive, writeRecord, durableFile, plainFile, fileHash, powershell, systemPath,
-  phpArgs, workerEnv, secret, hash, copyChecked, bytesInTree, requireSpace, jsonLine, send, sharedUpdateContext,
+  phpArgs, workerEnv, secret, hash, copyChecked, bytesInTree, requireSpace, jsonLine, send,
+  waitForSourceShutdown, sharedUpdateContext,
 } = require('./shell-update-files');
 const {
   heartbeatUpdateLock, releaseUpdateLock, writeUpdateState,
@@ -424,17 +425,10 @@ async function rollback(error) {
     save('source_restored', { databaseRestored: true });
   }
   const restored = await startProbation(job.context.version, job.context.native_version, true);
-  await admit(restored, 'rolled_back', { error: reason });
-}
-
-function waitForSource(frameListener) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Source shutdown proof timed out.')), 75_000);
-    frameListener((frame) => {
-      clearTimeout(timer);
-      if (frame?.event === 'stopped') resolve();
-      else reject(new Error('Source services could not acknowledge clean shutdown.'));
-    });
+  const reopenAfterDrainFailure = job.reopenAfterDrainFailure === true;
+  await admit(restored, reopenAfterDrainFailure ? 'failed' : 'rolled_back', {
+    error: reason,
+    ...(reopenAfterDrainFailure ? { source_reopened_without_mutation: true } : {}),
   });
 }
 
@@ -446,19 +440,29 @@ async function begin(first, nextFrame) {
   job = first.job;
   save('preparing');
   leaseTimer = setInterval(() => heartbeatUpdateLock(job.lease, job.phase), 10000);
+  let shutdownEvent;
   try {
     await transaction('prepare', { package: first.package, images: first.images });
     save('prepared');
-    const shutdown = waitForSource(nextFrame);
+    const shutdown = waitForSourceShutdown(nextFrame);
     send(process.stdout, { event: 'prepared' });
-    await shutdown;
-    save('source_stopped');
+    shutdownEvent = await shutdown;
+    if (shutdownEvent === 'stopped') {
+      save('source_stopped');
+    } else {
+      save('source_exiting_without_apply', { reopenAfterDrainFailure: true });
+    }
   } catch (error) {
     const phase = (await transaction('phase')).phase;
     if (phase === 'prepared') await transaction('recover');
     else if (phase !== 'none') throw error;
     finish('failed', { error: error.message });
     send(process.stdout, { event: 'rejected', error: error.message });
+    return;
+  }
+
+  if (shutdownEvent === 'drain-failed-source-exiting') {
+    await rollback(new Error('The source did not drain cleanly. The shell update was canceled.'));
     return;
   }
 
