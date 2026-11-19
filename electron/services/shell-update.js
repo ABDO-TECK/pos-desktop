@@ -9,6 +9,7 @@ const { readUpdateChannel, classifyVersionChannel } = require('../utils/update-c
 const {
   EXE, WORKER, BACKEND, VERSION, VALID_VERSION, VALID_OPERATION, validSecret,
   secret, canonical, plainFile, ensureDirectory, stateLocation, operationPaths, ensurePrivateRoot,
+  allocateScratch, assertScratchOwnership, assertOperationPathBudget,
   readActive, regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
   bytesInTree, requireSpace, pruneCompletedCopies, writeRecord,
 } = require('./shell-update-files');
@@ -22,6 +23,7 @@ function isShellUpdateCapable() {
       path.basename(process.execPath) !== EXE || !fs.existsSync(keyFile)) return false;
   try {
     const { installRoot, stateRoot } = locations();
+    assertOperationPathBudget(operationPaths(stateRoot, 'tx_' + '0'.repeat(32)));
     // The transaction publishes from a private workspace using atomic rename.
     // Windows can copy across drive boundaries, which cannot provide that guarantee.
     return path.parse(installRoot).root.toLowerCase() === path.parse(stateRoot).root.toLowerCase() &&
@@ -50,7 +52,8 @@ function shellBackendEnvironment() {
   };
 }
 
-function workerFor(paths, mode, installRoot, id, stdio) {
+function workerFor(paths, stateRoot, mode, installRoot, id, stdio) {
+  assertScratchOwnership(paths, stateRoot, id);
   const program = plainFile(path.join(paths.runtime, EXE));
   const script = plainFile(path.join(paths.worker, WORKER));
   return spawn(program, [script, mode, installRoot, id], {
@@ -66,7 +69,7 @@ async function copyTrustedRuntime(paths, installRoot, descriptor) {
   if (!expectedAsar || await fileHash(path.join(installRoot, 'resources', 'app.asar'), originalFs) !== expectedAsar.sha256) {
     throw new Error('The running application does not match the signed source.');
   }
-  for (const directory of [paths.operation, paths.worker, paths.runtime, paths.php, path.join(paths.php, 'ext'), paths.transaction]) {
+  for (const directory of [paths.worker, paths.runtime, paths.php, path.join(paths.php, 'ext')]) {
     ensureDirectory(directory);
   }
   const images = {};
@@ -157,13 +160,18 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
 
   const id = 'tx_' + secret().slice(0, 32);
   const paths = operationPaths(stateRoot, id);
+  assertOperationPathBudget(paths);
+  let ownsReceiptDirectory = false;
   let images;
   let dataCompatibility;
   try {
+    fs.mkdirSync(paths.operation);
+    ownsReceiptDirectory = true;
+    allocateScratch(paths, stateRoot, id);
     images = await copyTrustedRuntime(paths, installRoot, descriptor);
     dataCompatibility = await measureDatabase(paths, database);
   } catch (error) {
-    if (fs.existsSync(paths.operation)) {
+    if (ownsReceiptDirectory) {
       writeRecord(paths.receipt, { operation_id: id, outcome: 'failed', phase: 'preparing_worker' });
       cleanup(stateRoot);
     }
@@ -174,7 +182,7 @@ async function prepareSupervisor({ version, storageDir, pending, lease, database
     releaseJob: pending.operation_id ?? null, lease,
     context: { version: installedVersion, native_version: nativeVersion, channel, data_compatibility: dataCompatibility },
   };
-  const worker = workerFor(paths, 'begin', installRoot, id, ['pipe', 'pipe', 'ignore']);
+  const worker = workerFor(paths, stateRoot, 'begin', installRoot, id, ['pipe', 'pipe', 'ignore']);
   let timer;
   try {
     await new Promise((resolve, reject) => {
@@ -274,7 +282,7 @@ async function checkStartup(onAbandoned) {
   }
   if (record.phase !== 'recovery_required') {
     const paths = operationPaths(stateRoot, record.id);
-    const worker = workerFor(paths, 'recover', installRoot, record.id, 'ignore');
+    const worker = workerFor(paths, stateRoot, 'recover', installRoot, record.id, 'ignore');
     worker.on('error', (error) => console.error('[Shell Update] Recovery supervisor unavailable:', error.message));
     worker.unref();
   }
