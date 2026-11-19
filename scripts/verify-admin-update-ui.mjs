@@ -485,6 +485,58 @@ app.whenReady().then(async () => {
     await evaluate('window.unmountUpdateSection(); null;');
     console.log('PASS Assertion 5');
 
+    // A shell handoff's IPC acknowledgement only schedules a restart. The
+    // relaunched renderer must wait for and display the owned backend outcome.
+    const durableJobKey = 'pos.restarting_shell_job_id';
+    for (const terminal of ['completed', 'failed']) {
+      await evaluate([
+        '(function() {',
+        '  window.__resetHarness();',
+        '  localStorage.removeItem("pos.restarting_shell_job_id");',
+        '  sessionStorage.setItem("pos.active_update_job_id", "42");',
+        '  window.__ipcGatePromise = Promise.resolve({ ok: true, restarting: true });',
+        '  window.__api.getUpdateJob = async () => ({ data: { data: {',
+        '    id: 42, status: "completed", result: { ok: true, update_type: "shell_delta", requires_desktop_handoff: true, handoff_version: "1.2.0" }',
+        '  } } });',
+        '  window.mountUpdateSection();',
+        '  return null;',
+        '})()'
+      ].join('\n'));
+      await delay(300);
+      assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'The staged shell handoff must be invoked once.');
+      assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), 0,
+        'Source IPC acknowledgement cannot report an applied update.');
+      assert.equal(await evaluate('sessionStorage.getItem("pos.update_handoff_42")'), 'running',
+        'The source renderer must keep the handoff pending.');
+      assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), '42',
+        'The relaunched renderer must retain the job identity.');
+      const result = terminal === 'completed'
+        ? { ok: true, desktop_handoff_completed: true, requires_desktop_handoff: false }
+        : { requires_desktop_handoff: false };
+      const job = { id: 42, status: terminal, result, last_error: terminal === 'failed' ? 'Verified shell rollback' : null };
+      await evaluate([
+        '(function() {',
+        '  window.unmountUpdateSection();',
+        '  sessionStorage.clear();',
+        '  window.__api.getUpdateJob = async () => ({ data: { data: ' + JSON.stringify(job) + ' } });',
+        '  window.mountUpdateSection();',
+        '  return null;',
+        '})()'
+      ].join('\n'));
+      await delay(300);
+      assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'Restart reconciliation cannot invoke another handoff.');
+      assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), null,
+        'A verified terminal recovery must clear the pending restart job.');
+      assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), terminal === 'completed' ? 1 : 0,
+        'Only a completed health commit may show success.');
+      if (terminal === 'failed') {
+        assert.equal(await evaluate('window.__toasts.some(t => t.type === "error" && t.msg === "Verified shell rollback")'), true,
+          'The source renderer must report its verified rollback.');
+      }
+      await evaluate('window.unmountUpdateSection(); null;');
+    }
+    console.log('PASS shell restart reconciliation');
+
     // ─────────────────────────────────────────────────────────────
     // Assertion 6: remount during IPC/failure -> no duplicate
     // ─────────────────────────────────────────────────────────────
