@@ -33,14 +33,44 @@ final class ShellUpdateHealthService
         ];
     }
 
+    /** Check probation first, then protect a previously admitted server from the next update. */
+    public static function restrictHttpTraffic(string $uri, string $phar): bool
+    {
+        if (self::restrictProbationTraffic($uri, $phar)) {
+            return true;
+        }
+
+        $sourceGate = getenv('POS_SHELL_SOURCE_GATE');
+        if (!is_string($sourceGate) || $sourceGate === '') {
+            return false;
+        }
+        clearstatcache(true, $sourceGate);
+        if (is_file($sourceGate) && ($uri !== '/api/health' || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET')) {
+            self::maintenance();
+            return true;
+        }
+        return false;
+    }
+
+    private static function maintenance(): void
+    {
+        http_response_code(503);
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store');
+        echo '{"status":"maintenance","critical_failed":true}';
+    }
+
     /** Enforce the write barrier before loading the normal HTTP application. */
-    public static function restrictProbationTraffic(string $uri, string $phar): bool
+    private static function restrictProbationTraffic(string $uri, string $phar): bool
     {
         $token = getenv('POS_SHELL_PROBATION_TOKEN');
         if (!is_string($token) || $token === '') {
             return false;
         }
         $gate = getenv('POS_SHELL_PROBATION_GATE');
+        if (is_string($gate)) {
+            clearstatcache(true, $gate);
+        }
         if (is_string($gate) && is_file($gate) && !is_link($gate)) {
             $allowed = @file_get_contents($gate, false, null, 0, 65);
             if (is_string($allowed) && hash_equals($token, $allowed)) {
@@ -48,15 +78,14 @@ final class ShellUpdateHealthService
             }
         }
 
-        header('Content-Type: application/json');
-        header('Cache-Control: no-store');
         if ($uri !== '/api/health' || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET' ||
             !hash_equals($token, $_SERVER['HTTP_X_POS_SHELL_HEALTH'] ?? '')) {
-            http_response_code(503);
-            echo '{"status":"maintenance","critical_failed":true}';
+            self::maintenance();
             return true;
         }
 
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store');
         try {
             $version = json_decode(file_get_contents($phar . '/version.json'), true, 32, JSON_THROW_ON_ERROR)['version'];
             echo json_encode([

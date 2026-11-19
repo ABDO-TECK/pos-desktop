@@ -45,7 +45,7 @@ try {
                 $verified = $manifests->verify($raw, trim($signature), $context);
                 $descriptor = $verified['descriptor'] ?? null;
                 if (!($verified['ok'] ?? false) || $descriptor['version'] !== $request['target'] ||
-                    $descriptor['native_version'] !== $request['target'] ||
+                    $descriptor['native_version'] !== $request['target_native'] ||
                     $descriptor['channel'] !== $context['channel']) {
                     throw new RuntimeException('Signed shell delta does not match the selected source, target and channel.');
                 }

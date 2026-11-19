@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
+const http = require('node:http');
 const { spawn, execFile } = require('node:child_process');
 const {
   EXE, WORKER, VALID_OPERATION, VALID_VERSION, canonical, ensureDirectory, operationPaths, stateLocation,
@@ -99,7 +100,7 @@ async function transaction(command, extra = {}, env = {}) {
       child.stdin.once('error', reject);
       child.stdin.end(JSON.stringify({
         command, root: job.installRoot, state: paths.transaction,
-        operation: job.id, context: job.context, target: job.target, ...extra,
+        operation: job.id, context: job.context, target: job.target, target_native: job.nativeTarget, ...extra,
       }), resolve);
     }),
   ]);
@@ -260,14 +261,50 @@ function bounded(signal, timeout, error) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function checkHealthFrame(frame, version) {
-  const database = frame.data_compatibility;
-  const source = job.context.data_compatibility;
-  return frame.version === version && frame.ui === 'sign-in' && frame.php === true &&
-    database && ['format', 'metadata_migration', 'schema_sha256', 'ledger_sha256'].every((key) => database[key] === source[key]);
+function matchesDatabaseContract(database) {
+  const expected = job.context.data_compatibility;
+  return database && ['format', 'metadata_migration', 'schema_sha256', 'ledger_sha256']
+    .every((key) => database[key] === expected[key]);
 }
 
-async function startProbation(version, restored) {
+function checkHealthFrame(frame, version, nativeVersion) {
+  return frame.version === version && frame.nativeVersion === nativeVersion && frame.ui === 'sign-in' && frame.php === true &&
+    Number.isInteger(frame.phpPort) && frame.phpPort >= 1 && frame.phpPort <= 65535 &&
+    matchesDatabaseContract(frame.data_compatibility);
+}
+
+function provePhp(port, token, version) {
+  return new Promise((resolve, reject) => {
+    const request = http.get({
+      hostname: '127.0.0.1', port, path: '/api/health',
+      headers: { 'X-POS-Shell-Health': token },
+    }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 16384) request.destroy(new Error('PHP health response exceeded the allowed size.'));
+      });
+      response.once('error', reject);
+      response.once('end', () => {
+        try {
+          const data = JSON.parse(body);
+          if (response.statusCode !== 200 || data.version !== version || data.critical_failed !== false ||
+              !matchesDatabaseContract(data.data_compatibility)) {
+            throw new Error('The restarted PHP and MariaDB health probe did not match the signed target.');
+          }
+          resolve({ ui: 'sign-in', php: true, version, database: true });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.setTimeout(5000, () => request.destroy(new Error('The restarted PHP health probe timed out.')));
+    request.once('error', reject);
+  });
+}
+
+async function startProbation(version, nativeVersion, restored) {
   const token = secret();
   const server = net.createServer({ pauseOnConnect: true });
   const pending = [];
@@ -317,14 +354,14 @@ async function startProbation(version, restored) {
         }
         if (frame.event === 'starting' && !session.socket) {
           session.socket = socket;
-          send(socket, { command: 'probe', version, restored });
+          send(socket, { command: 'probe', nativeVersion });
           return;
         }
         if (socket !== session.socket) return;
         if (frame.event === 'failed') {
           reject(new Error('The restarted POS runtime reported startup failure: ' + String(frame.error).slice(0, 400)));
-        } else if (frame.event === 'health' && checkHealthFrame(frame, version)) {
-          resolve({ ui: frame.ui, php: true, version, database: true });
+        } else if (frame.event === 'health' && checkHealthFrame(frame, version, nativeVersion)) {
+          provePhp(frame.phpPort, token, version).then((proof) => resolve({ ...proof, native_version: nativeVersion }), reject);
         } else {
           reject(new Error('The restarted POS runtime returned an invalid health proof.'));
         }
@@ -372,7 +409,7 @@ async function rollback(error) {
     // supervisor was interrupted after the journal changed.
     if (!job.digest) throw new Error('Committed target digest is missing from the supervisor journal.');
     await transaction('commit', { digest: job.digest });
-    const healthyTarget = await startProbation(job.target, false);
+    const healthyTarget = await startProbation(job.target, job.nativeTarget, false);
     await admit(healthyTarget, 'completed');
     return;
   }
@@ -382,13 +419,13 @@ async function rollback(error) {
     await restoreDatabase();
     save('source_restored', { databaseRestored: true });
   }
-  const restored = await startProbation(job.context.version, true);
+  const restored = await startProbation(job.context.version, job.context.native_version, true);
   await admit(restored, 'rolled_back', { error: reason });
 }
 
 function waitForSource(frameListener) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Source shutdown proof timed out.')), 45_000);
+    const timer = setTimeout(() => reject(new Error('Source shutdown proof timed out.')), 75_000);
     frameListener((frame) => {
       clearTimeout(timer);
       if (frame?.event === 'stopped') resolve();
@@ -431,7 +468,7 @@ async function begin(first, nextFrame) {
       digest: applied.target_inventory_sha256,
       databaseMayHaveChanged: true,
     });
-    const healthy = await startProbation(job.target, false);
+    const healthy = await startProbation(job.target, job.nativeTarget, false);
     await transaction('commit', { digest: job.digest });
     await admit(healthy, 'completed');
   } catch (error) {

@@ -22,12 +22,34 @@ use App\Helpers\JobQueue;
 use App\Helpers\Logger;
 
 $daemon = in_array('--daemon', $argv, true);
+$sourceGate = getenv('POS_SHELL_SOURCE_GATE');
+
+function shellUpdateDraining(string|false $sourceGate): bool
+{
+    if ($sourceGate === false || $sourceGate === '') {
+        return false;
+    }
+    clearstatcache(true, $sourceGate);
+    if (!is_file($sourceGate)) {
+        return false;
+    }
+    $record = @json_decode((string) @file_get_contents($sourceGate, false, null, 0, 65536), true);
+    return !is_array($record) || ($record['phase'] ?? '') !== 'preparing';
+}
+
+if (shellUpdateDraining($sourceGate)) {
+    exit(0);
+}
+
 
 JobQueue::ensureMaintenanceJobs();
 
 echo "[JobWorker] Started at " . date('Y-m-d H:i:s') . "\n";
 
 do {
+    if (shellUpdateDraining($sourceGate)) {
+        break;
+    }
     try {
         $processed = JobQueue::processNext();
         if ($processed) {
