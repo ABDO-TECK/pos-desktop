@@ -27,7 +27,7 @@ jobs:
       - name: Verify runtime JavaScript and PHP syntax
         shell: pwsh
         run: |
-          $js = git ls-files 'electron/*.js' 'electron/services/*.js'
+          $js = git ls-files 'electron/*.js' 'electron/services/*.js' 'build/prepare-shell-update-assets.cjs' 'scripts/verify-installer-package.mjs'
           foreach ($file in $js) {
             node --check $file
             if ($LASTEXITCODE) { exit $LASTEXITCODE }

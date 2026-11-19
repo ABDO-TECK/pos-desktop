@@ -73,6 +73,7 @@ out/
 dist-electron/
 portable/
 build/prerequisites/
+electron/assets/OwnedChildProcess.cs
 forge.config.js
 convert_icon.js
 create_ico.js

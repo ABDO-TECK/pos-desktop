@@ -655,6 +655,7 @@ $requiredPharEntries = [
     'router.php',
     'version.json',
     'certs/cacert.pem',
+    'certs/update_public_key.pem',
     'Native/SourceFileLease.cs',
     'Native/OwnedChildProcess.cs',
     'Native/OwnedWorkerPipeEndpoint.cs',
