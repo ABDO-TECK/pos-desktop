@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 
@@ -72,6 +73,7 @@ def sign(scratch, raw_manifest, signature):
 
 
 def measure(source, target, release, scratch, expected_zip_hash=None):
+    measurement_started = time.perf_counter()
     original_manifest = release / "shell-manifest.json"
     original_signature = release / "shell-manifest.sig"
     original_zip = release / "shell-delta.zip"
@@ -122,8 +124,12 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
                 updated = target / name
                 patch = scratch / "patch.zst"
                 reference = f"--patch-from={original}"
+                patch_started = time.perf_counter()
                 run(ZSTD, "-q", "-f", "-10", "--single-thread", "--memory=512MB", reference, updated, "-o", patch)
+                patch_seconds = time.perf_counter() - patch_started
+                decode_started = time.perf_counter()
                 run(ZSTD, "-q", "-f", "-d", "--memory=512MB", reference, patch, "-o", reconstructed)
+                decode_seconds = time.perf_counter() - decode_started
                 verify_bytes(reconstructed, file)
                 patch_bytes = patch.stat().st_size
                 if patch_bytes < entry.compress_size:
@@ -139,6 +145,8 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
                     "entry_byte_savings_before_metadata": entry.compress_size - patch_bytes,
                     "reconstructed_patch_sha256": sha256(reconstructed),
                     "selected_encoding": encoding,
+                    "patch_creation_seconds": round(patch_seconds, 3),
+                    "patch_reconstruction_seconds": round(decode_seconds, 3),
                 }
             method = zipfile.ZIP_STORED if encoding == "zstd-patch-from" else zipfile.ZIP_DEFLATED
             hybrid.write(input_file, name, compress_type=method)
@@ -159,6 +167,7 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
     write_json(meta, descriptor)
     sign(scratch, meta, signature)
 
+    reconstruction_started = time.perf_counter()
     with zipfile.ZipFile(payload) as hybrid:
         for operation in descriptor["files"]:
             name = operation["path"]
@@ -173,6 +182,7 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
                 verify_bytes(reconstructed, operation)
             else:
                 verify_bytes(decoded_patch, operation)
+        hybrid_reconstruction_seconds = time.perf_counter() - reconstruction_started
         hybrid_totals = summarize_zip(hybrid, payload, meta, signature)
 
     whole_bytes = whole_totals["download_bytes"]
@@ -190,6 +200,8 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
         "signed_hybrid_benchmark": hybrid_totals,
         "download_savings_bytes": whole_bytes - hybrid_bytes,
         "download_savings_percent": round(100 * (whole_bytes - hybrid_bytes) / whole_bytes, 2),
+        "hybrid_reconstruction_and_hash_validation_seconds": round(hybrid_reconstruction_seconds, 3),
+        "measurement_seconds": round(time.perf_counter() - measurement_started, 3),
     }
 
 

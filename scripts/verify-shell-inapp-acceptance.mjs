@@ -29,7 +29,75 @@ const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).d
 const inventory = readJson(path.join(releaseRoot, 'shell-manifest.json'));
 const requests = [];
 const updateNetwork = [];
+const networkResults = new Map();
 const observations = {};
+
+function safeFields(value, fields) {
+  if (!value || typeof value !== 'object') return null;
+  return Object.fromEntries(fields.filter(field => Object.hasOwn(value, field)).map(field => {
+    const entry = value[field];
+    return [field, typeof entry === 'string'
+      ? entry.replace(/(password|authorization|token|secret)\s*[:=]\s*\S+/gi, '$1=[redacted]').slice(0, 800)
+      : (typeof entry === 'number' || typeof entry === 'boolean' ? entry : null)];
+  }));
+}
+
+function optionalJson(file) {
+  try {
+    return readJson(file);
+  } catch (error) {
+    if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    return null;
+  }
+}
+
+function updaterDiagnostics() {
+  const state = optionalJson(path.join(dataDir, 'update-state.json'));
+  const installHash = crypto.createHash('sha256').update(fs.realpathSync.native(installRoot).toLowerCase()).digest('hex');
+  const active = optionalJson(path.join(local, 'pos-shell-update-v2', installHash, 'active.json'));
+  const stage = path.join(dataDir, 'update_staging', '0.0.14', 'shell-delta');
+  const stagedFileSizes = {};
+  for (const name of assetNames) {
+    if (fs.existsSync(path.join(stage, name))) stagedFileSizes[name] = fs.statSync(path.join(stage, name)).size;
+  }
+  return {
+    state: safeFields(state, ['state', 'phase', 'operation', 'from_version', 'to_version', 'reason_code', 'error', 'requires_recovery', 'updated_at']),
+    supervisor_active: safeFields(active, ['id', 'phase', 'updated_at', 'candidatePid', 'restoredPid', 'candidateExit', 'error']),
+    staged_file_sizes: stagedFileSizes,
+    terminal: readTerminalReceipt(),
+  };
+}
+
+function observeNetwork(app) {
+  const updateRoute = /\/(?:updates\/(?:apply|rollback|check)|update\/jobs\/\d+)(?:\?|$)/;
+  app.onEvent((method, event) => {
+    const url = event.request?.url ?? event.response?.url;
+    if (method === 'Network.requestWillBeSent' && updateRoute.test(url)) {
+      updateNetwork.push({ type: 'request', method: event.request.method, path: new URL(url).pathname, request_id: event.requestId });
+    }
+    if (method === 'Network.responseReceived' && updateRoute.test(url)) {
+      const response = { type: 'response', status: event.response.status, path: new URL(url).pathname, request_id: event.requestId };
+      updateNetwork.push(response);
+      networkResults.set(event.requestId, response);
+    }
+    if (method === 'Network.loadingFinished' && networkResults.has(event.requestId)) {
+      const response = networkResults.get(event.requestId);
+      networkResults.delete(event.requestId);
+      app.call('Network.getResponseBody', { requestId: event.requestId }).then(({ body, base64Encoded }) => {
+        if (base64Encoded || body.length > 200_000) return;
+        const json = JSON.parse(body);
+        const fields = ['success', 'status', 'state', 'code', 'reason_code', 'error_code', 'errorCode', 'message', 'error',
+          'job_id', 'phase', 'latest_version', 'handoff_version', 'requires_desktop_handoff', 'shell_update_available', 'target_version'];
+        response.result = {
+          envelope: safeFields(json, fields),
+          data: safeFields(json.data, fields),
+          result: safeFields(json.data?.result, fields),
+          errors: safeFields(json.errors, fields),
+        };
+      }).catch(() => {});
+    }
+  });
+}
 
 async function waitFor(description, predicate, timeout = 240_000) {
   const deadline = Date.now()+timeout;
@@ -211,6 +279,8 @@ try {
   const witnesses = protectedFiles.map(file => ({ file, sha256: hash(file) }));
   observations.before = { ...before, inventory: beforeFiles, row_id: row.id, uninstaller_sha256: beforeUninstaller };
 
+  observeNetwork(app);
+  await app.call('Network.enable');
   await app.system();
   const checkButton = 'التحقق من التحديثات';
   const installButton = 'تثبيت التحديث الآن';
@@ -218,15 +288,6 @@ try {
   await clickVisibleButton(app, checkButton);
   await app.until("document.body.innerText.includes('v0.0.14') && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version 0.0.14 install card');
   await screenshot(app, scenario+'-offered');
-  app.onEvent((method, event) => {
-    if (method === 'Network.requestWillBeSent' && /\/updates\/(?:apply|rollback)(?:\?|$)/.test(event.request.url)) {
-      updateNetwork.push({ type: 'request', method: event.request.method, path: new URL(event.request.url).pathname, request_id: event.requestId });
-    }
-    if (method === 'Network.responseReceived' && /\/updates\/(?:apply|rollback)(?:\?|$)/.test(event.response.url)) {
-      updateNetwork.push({ type: 'response', status: event.response.status, path: new URL(event.response.url).pathname, request_id: event.requestId });
-    }
-  });
-  await app.call('Network.enable');
   await clickVisibleButton(app, installButton);
   await clickVisibleButton(app, 'تأكيد');
 
@@ -308,6 +369,17 @@ try {
     zip_sha256: inventory.package.sha256,
   });
   console.log('PASS: installed Update Center '+scenario+' and actual desktop/PHP/MariaDB restart verified.');
+} catch (error) {
+  observations.failure = { message: error.message, diagnostics: updaterDiagnostics() };
+  if (observations.before) {
+    try {
+      observations.failure.ui = safeFields(await app.evaluate("(() => {"+
+        "const button = [...document.querySelectorAll('button')].find(b => b.innerText.includes('التحقق من التحديثات'));"+
+        "return { route: location.pathname, update_center: button?.closest('section')?.innerText }; })()"),
+      ['route', 'update_center']);
+    } catch { /* The old renderer may have exited before the failure. */ }
+  }
+  throw error;
 } finally {
   await app.stop().catch(() => {});
   fixture.close();
