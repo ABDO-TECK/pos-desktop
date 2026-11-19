@@ -46,6 +46,9 @@ jobs:
       - name: Verify repeated handoffs reapply the PHP write barrier
         shell: pwsh
         run: php scripts/verify-shell-health-write-gate.php
+      - name: Verify strict signed product path policy
+        shell: pwsh
+        run: php scripts/verify-shell-path-policy.php
       - name: Run signed file transaction recovery suite
         shell: pwsh
         run: php scripts/verify-shell-file-transaction.php
