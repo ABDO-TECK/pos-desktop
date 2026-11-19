@@ -52,7 +52,10 @@ jobs:
 
       - name: Install the locked renderer verification dependencies
         shell: pwsh
-        run: npm --prefix frontend ci
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
       - name: Verify restart reconciliation in Update Center
         shell: pwsh
         run: |
