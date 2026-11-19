@@ -318,7 +318,7 @@ app.whenReady().then(async () => {
       '  };',
       '  const schedule = window.setTimeout.bind(window);',
       '  window.setTimeout = (callback, delay, ...args) => {',
-      '    if (typeof callback === "function" && String(callback).includes("window.location.reload")) {',
+      '    if (delay === 1500 && typeof callback === "function" && String(callback).includes("window.location.reload")) {',
       '      return schedule(() => { window.__reloadCount++; }, delay);',
       '    }',
       '    return schedule(callback, delay, ...args);',
