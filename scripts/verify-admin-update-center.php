@@ -702,6 +702,14 @@ try {
         $wrongSource = $applyService->getJobStatus(531);
         verify(($wrongSource['result']['requires_desktop_handoff'] ?? null) === true, 'The live source version must match the verified rollback.');
 
+        $deltaMock->setUpdateState('failed', array_replace($recoveredShell, [
+            'phase' => 'failed',
+            'source_reopened_without_mutation' => true,
+        ]));
+        $sourceReopened = $applyService->getJobStatus(531);
+        verify($sourceReopened['status'] === 'failed' && $sourceReopened['settlement_error'] === 'shell_source_reopened',
+            'Reopening the unmodified source also settles the pending shell job.');
+
         // ──────────────────────────────────────────────────────────────
         // Negative Probes: Missing/unbound/wrong state op/phase/failed/error/recovery/target/installed version/persisted job id
         // => NO trusted completion / unlock (desktop_handoff_completed is NOT true, requires_desktop_handoff remains true)

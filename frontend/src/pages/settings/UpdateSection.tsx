@@ -43,6 +43,7 @@ import type { TransitionPhase } from '../../hooks/useChannelTransition'
 const ACTIVE_JOB_STORAGE_KEY = 'pos.active_update_job_id'
 const ADMISSION_UNKNOWN_STORAGE_KEY = 'pos.update_admission_unknown'
 const HANDOFF_STORAGE_KEY_PREFIX = 'pos.update_handoff_'
+const RESTARTING_SHELL_JOB_KEY = 'pos.restarting_shell_job_id'
 
 function isAdmissionUnknown(): boolean {
   try {
@@ -64,6 +65,27 @@ function setAdmissionUnknown(val: boolean) {
   }
 }
 
+function getRestartingShellJobId(): number | null {
+  try {
+    const jobId = Number(localStorage.getItem(RESTARTING_SHELL_JOB_KEY))
+    return Number.isSafeInteger(jobId) && jobId > 0 ? jobId : null
+  } catch {
+    return null
+  }
+}
+
+function setRestartingShellJobId(jobId: number | null) {
+  try {
+    if (jobId === null) {
+      localStorage.removeItem(RESTARTING_SHELL_JOB_KEY)
+    } else {
+      localStorage.setItem(RESTARTING_SHELL_JOB_KEY, String(jobId))
+    }
+  } catch {
+    // The regular in-window job status still works when storage is unavailable.
+  }
+}
+
 function getHandoffMarker(jobId: number): 'idle' | 'running' | 'done' | 'failed' {
   try {
     const raw = sessionStorage.getItem(HANDOFF_STORAGE_KEY_PREFIX + jobId)
@@ -71,7 +93,7 @@ function getHandoffMarker(jobId: number): 'idle' | 'running' | 'done' | 'failed'
   } catch {
     // Ignore storage errors
   }
-  return 'idle'
+  return getRestartingShellJobId() === jobId ? 'running' : 'idle'
 }
 
 function setHandoffMarker(jobId: number, marker: 'idle' | 'running' | 'done' | 'failed') {
@@ -89,7 +111,6 @@ function setHandoffMarker(jobId: number, marker: 'idle' | 'running' | 'done' | '
 function getInitialActiveJobId(): number | null {
   try {
     const raw = sessionStorage.getItem(ACTIVE_JOB_STORAGE_KEY)
-    if (!raw) return null
     const parsed = Number(raw)
     if (Number.isInteger(parsed) && parsed > 0) {
       return parsed
@@ -97,7 +118,7 @@ function getInitialActiveJobId(): number | null {
   } catch {
     // sessionStorage unavailable
   }
-  return null
+  return getRestartingShellJobId()
 }
 
 async function hasDeltaHandoffCapability(): Promise<boolean> {
@@ -148,6 +169,7 @@ export default function UpdateSection() {
     } catch {
       // Ignore storage errors
     }
+    if (id === null) setRestartingShellJobId(null)
   }, [])
 
   const [normalApplyingUpdate, setApplyingUpdate] = useState<boolean>(() => {
@@ -180,6 +202,7 @@ export default function UpdateSection() {
     if (isAdmissionUnknown()) return 'needs_attention'
     const initialJob = getInitialActiveJobId()
     if (initialJob) {
+      if (getRestartingShellJobId() === initialJob) return 'desktop_handoff_pending'
       const marker = getHandoffMarker(initialJob)
       if (marker === 'running' || marker === 'failed') return 'needs_attention'
       if (marker === 'done') return 'completed'
@@ -462,6 +485,9 @@ export default function UpdateSection() {
               setJobState('desktop_handoff_pending')
               setJobProgress(null)
 
+              if (result.update_type === 'shell_delta') {
+                setRestartingShellJobId(activeJobId)
+              }
               const version = result.handoff_version
               const restartNotice = 'pos-update-restarting'
               toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
@@ -472,6 +498,10 @@ export default function UpdateSection() {
                 })
                 if (!handoff.ok) {
                   throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+                }
+                if (handoff.restarting) {
+                  setRestartingShellJobId(activeJobId)
+                  return
                 }
                 setHandoffMarker(activeJobId, 'done')
                 handoffStatusRef.current = 'done'
@@ -630,6 +660,10 @@ export default function UpdateSection() {
               return window.posRuntime.applyStagedDelta(version)
             })
             if (!handoff.ok) throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+            if (handoff.restarting) {
+              setJobState('desktop_handoff_pending')
+              return
+            }
           } finally {
             toast.dismiss(restartNotice)
           }

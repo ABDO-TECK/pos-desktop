@@ -233,7 +233,12 @@ function reportReceipt(outcome, detail = {}) {
 
 function finish(state, detail = {}) {
   save(state, detail);
-  updateState(state, { error: detail.error ?? null, requires_recovery: state === 'recovery_required' });
+  updateState(state, {
+    error: detail.error ?? null,
+    requires_recovery: state === 'recovery_required',
+    source_runtime_recovered: job.restoredHealth?.database === true,
+    source_reopened_without_mutation: detail.source_reopened_without_mutation === true,
+  });
   reportReceipt(state, detail);
   if (state !== 'recovery_required') {
     releaseUpdateLock(job.lease);
