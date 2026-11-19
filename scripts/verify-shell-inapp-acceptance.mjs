@@ -197,20 +197,21 @@ function checkInstalledInventory(expected, deleted = []) {
     'resources/app.asar.unpacked/frontend/dist/index.html',
     'resources/app.asar.unpacked/version.json',
   ];
-  const observations = { supervisor_phases: [] };
-let lastSupervisorSnapshot;
+  const requiredSha256 = {};
   for (const [relative, entry] of Object.entries(expected.files)) {
     const file = path.join(installRoot, relative);
     assert.equal(fs.statSync(file).size, entry.size, 'Wrong installed size for '+relative);
     const sha256 = hash(file);
     assert.equal(sha256, entry.sha256, 'Wrong installed SHA-256 for '+relative);
-    if (requiredFiles.includes(relative)) observations[relative] = sha256;
+    if (requiredFiles.includes(relative)) requiredSha256[relative] = sha256;
   }
-  assert.equal(Object.keys(observations).length, requiredFiles.length, 'Missing required package coverage.');
+  for (const relative of requiredFiles) {
+    assert.ok(Object.hasOwn(requiredSha256, relative), 'Missing required signed file '+relative);
+  }
   for (const relative of deleted) {
     assert.ok(!fs.existsSync(path.join(installRoot, relative)), 'Unexpected retained file '+relative);
   }
-  return { files: Object.keys(expected.files).length, required_sha256: observations };
+  return { files: Object.keys(expected.files).length, required_sha256: requiredSha256 };
 }
 
 function observeInstalledInventory(role) {
