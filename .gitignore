@@ -74,6 +74,7 @@ dist-electron/
 portable/
 build/prerequisites/
 electron/assets/OwnedChildProcess.cs
+electron/assets/shell-update-broker.bin
 forge.config.js
 convert_icon.js
 create_ico.js

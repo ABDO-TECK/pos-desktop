@@ -3,12 +3,13 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
 
 const EXE = 'POS Desktop.exe';
 const WORKER = 'shell-update-supervisor.js';
+const BROKER = 'shell-update-broker.exe';
 const BACKEND = 'resources/app.asar.unpacked/backend/backend.phar';
 const VERSION = 'resources/app.asar.unpacked/version.json';
 const MANIFEST = 'shell-manifest.json';
@@ -114,7 +115,7 @@ function assertOperationPathBudget(paths) {
   const files = [
     ...transactionPathExamples(paths), paths.gate, paths.receipt,
     path.join(paths.runtime, EXE), path.join(paths.php, 'ext', 'php_pdo_mysql.dll'),
-    paths.backend, path.join(paths.worker, 'OwnedChildProcess.cs'), path.join(paths.backup, 'ibdata1'),
+    paths.backend, path.join(paths.worker, BROKER), path.join(paths.backup, 'ibdata1'),
   ];
   if (files.some((file) => Buffer.byteLength(file, 'utf8') > 260)) {
     throw new Error('The Windows profile path is too long for an atomic shell update.');
@@ -292,6 +293,16 @@ function workerEnv() {
   };
 }
 
+function spawnCandidateBroker(workerDir, installRoot, probation) {
+  const executable = plainFile(path.join(workerDir, BROKER));
+  return spawn(executable, [canonical(installRoot)], {
+    cwd: canonical(workerDir),
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'ignore'],
+    env: { ...workerEnv(), POS_SHELL_PROBATION: JSON.stringify(probation) },
+  });
+}
+
 function jsonLine(channel, handler, errorHandler) {
   channel.setEncoding('utf8');
   let buffer = '';
@@ -401,11 +412,11 @@ function sharedUpdateContext(job) {
 }
 
 module.exports = {
-  EXE, WORKER, BACKEND, VERSION, MANIFEST, SIGNATURE, VALID_OPERATION, VALID_VERSION, validSecret,
+  EXE, WORKER, BROKER, BACKEND, VERSION, MANIFEST, SIGNATURE, VALID_OPERATION, VALID_VERSION, validSecret,
   secret, hash, canonical, plainFile, ensureDirectory, stateLocation, operationPaths,
   allocateScratch, assertScratchOwnership, assertOperationPathBudget, transactionPathExamples,
   readRecord, durableFile, writeRecord, readActive, clearActive, systemPath, powershell, ensurePrivateRoot,
-  regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
+  regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, spawnCandidateBroker, jsonLine, send,
   bytesInTree, requireSpace, pruneCompletedCopies, waitForSourceShutdown, sharedUpdateContext,
 };
 
