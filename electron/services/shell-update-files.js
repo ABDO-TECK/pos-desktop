@@ -260,7 +260,7 @@ function inspectOwnedTree(root) {
   }
 }
 
-function pruneCompletedCopies(stateRoot) {
+function pruneCompletedCopies(stateRoot, retainReleaseFor = null) {
   const active = readActive(stateRoot);
   const entries = fs.readdirSync(canonical(stateRoot), { withFileTypes: true });
   const terminal = [];
@@ -269,7 +269,7 @@ function pruneCompletedCopies(stateRoot) {
     const paths = operationPaths(stateRoot, entry.name);
     const receipt = readRecord(paths.receipt);
     if (!receipt || receipt.operation_id !== entry.name || !['completed', 'rolled_back', 'failed'].includes(receipt.outcome)) continue;
-    terminal.push({ paths, updated: fs.statSync(paths.receipt).mtimeMs });
+    terminal.push({ id: entry.name, paths, updated: fs.statSync(paths.receipt).mtimeMs });
     for (const directory of [paths.worker, paths.transaction, paths.backup]) {
       if (!fs.existsSync(directory)) continue;
       inspectOwnedTree(directory);
@@ -280,7 +280,8 @@ function pruneCompletedCopies(stateRoot) {
     }
   }
   terminal.sort((left, right) => right.updated - left.updated);
-  for (const { paths } of terminal.slice(10)) {
+  for (const { id, paths } of terminal.slice(10)) {
+    if (id === retainReleaseFor) continue;
     if ([paths.worker, paths.transaction, paths.backup].some((dir) => fs.existsSync(dir))) continue;
     inspectOwnedTree(paths.operation);
     fs.rmSync(paths.operation, { recursive: true });
