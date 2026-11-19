@@ -501,7 +501,7 @@ app.whenReady().then(async () => {
         '  window.mountUpdateSection();',
         '  return null;',
         '})()'
-      ].join('\n'));
+      ].join('\\n'));
       await delay(300);
       assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'The staged shell handoff must be invoked once.');
       assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), 0,
@@ -522,7 +522,7 @@ app.whenReady().then(async () => {
         '  window.mountUpdateSection();',
         '  return null;',
         '})()'
-      ].join('\n'));
+      ].join('\\n'));
       await delay(300);
       assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'Restart reconciliation cannot invoke another handoff.');
       assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), null,
