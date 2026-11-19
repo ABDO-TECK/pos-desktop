@@ -26,6 +26,12 @@ final class ProductInventoryService
 
     private const NSIS_UNINSTALLER = 'Uninstall POS Desktop.exe';
 
+    /** Exact per-device files written by the existing QZ certificate and SSL setup. */
+    private const QZ_DEVICE_FILES = [
+        'resources/portable/qz-tray/override.crt',
+        'resources/portable/qz-tray/qz-tray.properties',
+    ];
+
     /**
      * Managed Electron root files needed for normal packaged tree.
      */
@@ -106,6 +112,10 @@ final class ProductInventoryService
     {
         $normalized = str_replace('\\', '/', trim($path));
         $lower = strtolower($normalized);
+
+        if (in_array(strtolower(str_replace('\\', '/', $path)), self::QZ_DEVICE_FILES, true)) {
+            return true;
+        }
 
         // Device certificates / printing certs
         if (str_contains($lower, 'digital-certificate') || str_contains($lower, 'devicecert') || str_contains($lower, 'device-cert') || str_contains($lower, 'device_cert')) {
@@ -701,6 +711,13 @@ final class ProductInventoryService
             $rel = ltrim(substr($pathname, strlen($normRoot)), '/');
             if ($rel === '') {
                 return true;
+            }
+            if (in_array(strtolower($rel), self::QZ_DEVICE_FILES, true)) {
+                $file = self::resolveConfinedPath($canonicalRoot, $rel, true);
+                if (!is_file($file) || is_link($file)) {
+                    throw new RuntimeException('QZ device state must be a regular physical file.');
+                }
+                return false;
             }
             // Skip protected user-state dirs and files without traversing, resolving, or reading
             if (ProductInventoryService::isProtectedPath($rel)) {

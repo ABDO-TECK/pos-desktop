@@ -502,7 +502,10 @@ foreach ($arbitraryJavaFiles as $f) {
 
 // Negative 6: QZ certificate, private key, env, log protections, and QZ libs JAR rejection
 $qzProtectedFiles = [
-    'resources/portable/qz-tray/override.crt' => 'path_unauthorized',
+    'resources/portable/qz-tray/override.crt' => 'path_protected',
+    'resources/portable/qz-tray/qz-tray.properties' => 'path_protected',
+    'resources/portable/qz-tray/elsewhere.crt' => 'path_unauthorized',
+    'resources/portable/qz-tray/other.properties' => 'path_unauthorized',
     'resources/portable/qz-tray/device-cert.pem' => 'path_protected',
     'resources/portable/qz-tray/digital-certificate.txt' => 'path_protected',
     'resources/portable/qz-tray/private.key' => 'path_protected',
