@@ -170,9 +170,10 @@ async function screenshot(app, name) {
   fs.copyFileSync(path.join(profile, 'diagnostics', name+'.png'), path.join(evidence, name+'.png'));
 }
 
-for (const folder of [local, roaming, shared, path.join(local, 'pos-ci-chromium')]) {
+for (const folder of [local, configDir, shared, path.join(local, 'pos-ci-chromium')]) {
   fs.mkdirSync(folder, { recursive: true });
 }
+fs.writeFileSync(path.join(configDir, '.env'), '# Synthetic protected configuration witness\n', { flag: 'wx' });
 const fixture = await startReleaseFixture(lab, releaseRoot, requests);
 const app = createDesktopLab(installRoot, path.join(profile, 'diagnostics'), {
   LOCALAPPDATA: local,
