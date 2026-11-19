@@ -5,7 +5,7 @@ const { execFileSync } = require('node:child_process');
 const {
   ensurePrivateRoot, ensureDirectory, stateLocation, operationPaths, allocateScratch, assertScratchOwnership,
   assertOperationPathBudget, transactionPathExamples, pruneCompletedCopies, requireSpace, powershell,
-  waitForSourceShutdown, writeRecord,
+  waitForSourceShutdown, writeRecord, hasDurableAdmission, clearActive,
 } = require('../electron/services/shell-update-files');
 
 async function verify() {
@@ -73,7 +73,14 @@ async function verify() {
 
     ensureDirectory(admitted.worker);
     fs.writeFileSync(path.join(admitted.worker, 'owned-worker-module'), 'test copy');
-    fs.writeFileSync(admitted.gate, 'test-only proof token');
+    const gateToken = 'a'.repeat(64);
+    assert.equal(hasDurableAdmission(stateRoot, admitted.gate, gateToken), false);
+    writeRecord(path.join(stateRoot, 'active.json'), { id: id(0) });
+    fs.writeFileSync(admitted.gate, gateToken);
+    assert.equal(hasDurableAdmission(stateRoot, admitted.gate, gateToken), false, 'A written gate alone may still have an active interlock.');
+    clearActive(stateRoot, id(0));
+    assert.equal(hasDurableAdmission(stateRoot, admitted.gate, 'b'.repeat(64)), false);
+    assert.equal(hasDurableAdmission(stateRoot, admitted.gate, gateToken), true, 'A lost admission frame does not invalidate a durable release.');
     for (let attempt = 1; attempt <= 11; attempt += 1) receipt(attempt, 'failed');
     const unfinished = receipt(12, 'recovery_required');
     allocateScratch(unfinished, stateRoot, id(12));

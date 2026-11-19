@@ -175,6 +175,15 @@ function clearActive(stateRoot, id) {
   fs.unlinkSync(path.join(stateRoot, 'active.json'));
 }
 
+function hasDurableAdmission(stateRoot, gate, token) {
+  if (!validSecret.test(token)) return false;
+  try {
+    return fs.readFileSync(plainFile(gate, 64), 'utf8') === token && readActive(stateRoot) === null;
+  } catch {
+    return false;
+  }
+}
+
 function systemPath(...elements) {
   const windows = process.env.SystemRoot;
   if (!windows || !path.isAbsolute(windows)) throw new Error('Windows system directory is unavailable.');
@@ -415,7 +424,7 @@ module.exports = {
   EXE, WORKER, BROKER, BACKEND, VERSION, MANIFEST, SIGNATURE, VALID_OPERATION, VALID_VERSION, validSecret,
   secret, hash, canonical, plainFile, ensureDirectory, stateLocation, operationPaths,
   allocateScratch, assertScratchOwnership, assertOperationPathBudget, transactionPathExamples,
-  readRecord, durableFile, writeRecord, readActive, clearActive, systemPath, powershell, ensurePrivateRoot,
+  readRecord, durableFile, writeRecord, readActive, clearActive, hasDurableAdmission, systemPath, powershell, ensurePrivateRoot,
   regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, spawnCandidateBroker, jsonLine, send,
   bytesInTree, requireSpace, pruneCompletedCopies, waitForSourceShutdown, sharedUpdateContext,
 };

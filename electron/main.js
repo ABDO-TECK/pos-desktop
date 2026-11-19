@@ -59,12 +59,16 @@ let splash = null;
 let jobWorkerProcess = null;
 let logCleanupProcess = null;
 let shellInstallInProgress = false;
+let shellStartupFenced = false;
 let firstRunAdminCredentials = null;
 let sessionCookies = {};
 const PERSISTED_COOKIE_NAMES = new Set(Object.keys(COOKIE_PATHS));
 
-function assertTrustedAppRenderer(event) {
+function assertTrustedAppRenderer(event, { allowDuringShellStartup = false } = {}) {
   if (shellInstallInProgress) throw new Error('A shell update is shutting down this runtime.');
+  if (shellStartupFenced && !allowDuringShellStartup) {
+    throw new Error('The shell updater has not admitted this runtime.');
+  }
   const senderUrl = event.senderFrame?.url || '';
   if (!senderUrl.startsWith('app://pos-app/')) {
     throw new Error('Untrusted renderer');
@@ -838,9 +842,11 @@ function startQZBackgroundService() {
   })();
 }
 
-async function startPostStartupServices() {
-  setSplashStatus('جاري تهيئة قاعدة البيانات...');
-  await initializeFreshRuntime({ seed: dbCredentials.freshInstall === true });
+async function startPostStartupServices({ initializeDatabase = true } = {}) {
+  if (initializeDatabase) {
+    setSplashStatus('جاري تهيئة قاعدة البيانات...');
+    await initializeFreshRuntime({ seed: dbCredentials.freshInstall === true });
+  }
   await startHttpsProxy(phpPort, 8443);
   startLogCleanup();
   startJobWorker();
@@ -909,47 +915,43 @@ async function runShellUpdate(version, storageDir, pending) {
   }
 }
 
-async function provePackagedUi(protocolHandler) {
-  const probe = new BrowserWindow({
-    show: false,
-    webPreferences: {
-      partition: 'shell-update-health',
-      contextIsolation: true, sandbox: true, backgroundThrottling: false,
-    },
-  });
-  try {
-    probe.webContents.session.protocol.handle('app', protocolHandler);
-    await probe.loadURL('app://pos-app/login');
-    const ready = await probe.webContents.executeJavaScript('(' + String(() => new Promise((resolve) => {
-      const matches = () => location.protocol === 'app:' && location.hostname === 'pos-app' && location.pathname === '/login' &&
-        document.querySelector('#root form input[type="email"]') !== null &&
-        document.querySelector('#root form input[type="password"]') !== null;
-      const check = () => {
-        if (matches()) {
-          observer.disconnect();
-          clearTimeout(timer);
-          resolve(true);
-        }
-      };
-      const observer = new MutationObserver(check);
-      const timer = setTimeout(() => {
-        observer.disconnect();
-        resolve(false);
-      }, 15000);
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-      check();
-    })) + ')()');
-    if (!ready) throw new Error('The packaged sign-in interface did not render.');
-    return 'sign-in';
-  } finally {
-    if (!probe.isDestroyed()) probe.destroy();
+async function provePackagedUi(window) {
+  const ui = await window.webContents.executeJavaScript('(' + String(() => new Promise((resolve) => {
+    const renderedView = () => {
+      if (location.protocol !== 'app:' || location.hostname !== 'pos-app' ||
+          typeof globalThis.posRuntime?.getApiBaseUrl !== 'function') return null;
+      const signIn = document.querySelector('#root form input[type="email"]');
+      if (location.pathname === '/login' && signIn?.form?.querySelector('input[type="password"]')) return 'sign-in';
+      if (document.querySelector('#root input#forced-current-password')) return 'password-change';
+      if (document.querySelector('#root .app-layout main.main-content')) return 'workspace';
+      return null;
+    };
+    const check = () => {
+      const view = renderedView();
+      if (!view) return;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve(view);
+    };
+    const observer = new MutationObserver(check);
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      resolve(null);
+    }, 15000);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    check();
+  })) + ')()');
+  if (!ui || !window.isVisible() || window.isEnabled() || window.webContents.isCrashed()) {
+    throw new Error('The packaged POS interface did not render in its desktop window.');
   }
+  return ui;
 }
 
-function createMainWindow() {
+function createMainWindow({ fenced = false } = {}) {
   const window = new BrowserWindow({
     width: 1280, height: 800,
     minWidth: 1024, minHeight: 600,
+    show: !fenced,
     icon: path.join(__dirname, 'assets', 'icon.png'),
     titleBarStyle: 'hidden',
     titleBarOverlay: {
@@ -971,7 +973,8 @@ function createMainWindow() {
     if (!url.startsWith('app://pos-app/')) event.preventDefault();
   });
   window.setMenu(null);
-  window.maximize();
+  if (fenced) window.setEnabled(false);
+  if (!fenced) window.maximize();
   window.webContents.on('before-input-event', (event, input) => {
     if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) {
       event.preventDefault();
@@ -994,16 +997,31 @@ function createMainWindow() {
   return window;
 }
 
-async function showMainApplication() {
+async function loadMainApplication({ fenced = false } = {}) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
-  mainWindow = createMainWindow();
-  await mainWindow.loadURL('app://pos-app/index.html');
+  const window = createMainWindow({ fenced });
+  mainWindow = window;
+  await window.loadURL('app://pos-app/index.html');
+  return window;
+}
+
+function activateMainApplication(window, { admitted = false } = {}) {
+  if (window.isDestroyed() || window.webContents.isCrashed()) throw new Error('The POS desktop window closed during startup.');
+  if (admitted) {
+    window.setEnabled(true);
+    window.show();
+    window.focus();
+  }
   if (splash && !splash.isDestroyed()) splash.close();
   if (!tray || tray.isDestroyed?.()) {
     tray = null;
     createTray();
   }
-  setupAutoUpdater(mainWindow);
+  setupAutoUpdater(window);
+}
+
+async function showMainApplication() {
+  activateMainApplication(await loadMainApplication());
 }
 
 // منع تشغيل أكثر من نسخة
@@ -1011,7 +1029,7 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) { app.quit(); }
 
 app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (shellStartupFenced || !mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   // Closing the window normally hides it in the tray. A second launch from
   // the desktop shortcut must wake that hidden window before focusing it.
@@ -1049,6 +1067,7 @@ app.whenReady().then(async () => {
     return;
   }
   const probation = startup.probation;
+  shellStartupFenced = Boolean(probation);
 
   // ── Session Cookie Proxy ──
   const { session } = require('electron');
@@ -1175,7 +1194,7 @@ app.whenReady().then(async () => {
 
         if (parsedUrl) {
             if (details.method === 'POST' && /^\/api\/(?:v[0-9]+\/)?updates?\/apply\/?$/.test(parsedUrl.pathname) &&
-                shellUpdate.isShellUpdateCapable() && !shellInstallInProgress) {
+                shellUpdate.isShellUpdateCapable() && !shellInstallInProgress && !shellStartupFenced) {
               requestHeaders['X-POS-Shell-Delta-Handoff'] = shellUpdate.backendToken;
             }
             const cookieHeader = getCookieHeader(sessionCookies, parsedUrl.pathname);
@@ -1271,11 +1290,11 @@ app.whenReady().then(async () => {
   }
 
   ipcMain.handle('get-version', (event) => {
-    assertTrustedAppRenderer(event);
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     return app.getVersion();
   });
   ipcMain.handle('get-api-base-url', async (event) => {
-    assertTrustedAppRenderer(event);
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     try {
       const { getRuntimePortsPath } = require('./utils/paths');
       const fs = require('fs');
@@ -1796,12 +1815,25 @@ app.whenReady().then(async () => {
     if (probationAbandoned) throw new Error('The shell update supervisor was interrupted.');
     runtimeStarting = false;
     if (probation) {
-      const ui = await provePackagedUi(appProtocolHandler);
+      const window = await loadMainApplication({ fenced: true });
+      window.maximize();
+      window.showInactive();
+      const ui = await provePackagedUi(window);
       probation.report('health', {
         version: started.health.version, nativeVersion: app.getVersion(), data_compatibility: started.health.data_compatibility,
-        ui, php: true, phpPort: started.phpServerInfo.port,
+        ui, window_visible: true, php: true, phpPort: started.phpServerInfo.port,
       });
       await probation.waitForAdmission();
+      shellStartupFenced = false;
+      activateMainApplication(window, { admitted: true });
+      // Requests from the first render were fenced. Refresh the same desktop
+      // window now that the approved runtime can serve its normal session.
+      window.webContents.reload();
+      void startPostStartupServices({ initializeDatabase: false }).catch((error) => {
+        console.error('[Shell Update] Post-admission services:', error.message);
+      });
+      if (startup.cleanup) setTimeout(startup.cleanup, 1500).unref();
+      return;
     }
 
     // 3. تشغيل PHP
@@ -1830,7 +1862,7 @@ app.whenReady().then(async () => {
     if (startup.cleanup) setTimeout(startup.cleanup, 1500).unref();
 
   } catch (err) {
-    if (probation) {
+    if (shellStartupFenced) {
       probation.report('failed', { error: err.message });
       try { await stopRuntimeServices(); } finally { app.exit(1); }
       return;

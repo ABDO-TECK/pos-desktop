@@ -279,7 +279,8 @@ function matchesDatabaseContract(database) {
 }
 
 function checkHealthFrame(frame, version, nativeVersion) {
-  return frame.version === version && frame.nativeVersion === nativeVersion && frame.ui === 'sign-in' && frame.php === true &&
+  return frame.version === version && frame.nativeVersion === nativeVersion &&
+    ['sign-in', 'workspace', 'password-change'].includes(frame.ui) && frame.window_visible === true && frame.php === true &&
     Number.isInteger(frame.phpPort) && frame.phpPort >= 1 && frame.phpPort <= 65535 &&
     matchesDatabaseContract(frame.data_compatibility);
 }
@@ -304,7 +305,7 @@ function provePhp(port, token, version) {
               !matchesDatabaseContract(data.data_compatibility)) {
             throw new Error('The restarted PHP and MariaDB health probe did not match the signed target.');
           }
-          resolve({ ui: 'sign-in', php: true, version, database: true });
+          resolve({ php: true, version, database: true });
         } catch (error) {
           reject(error);
         }
@@ -387,7 +388,9 @@ async function startProbation(version, nativeVersion, restored) {
         if (frame.event === 'failed') {
           reject(new Error('The restarted POS runtime reported startup failure: ' + String(frame.error).slice(0, 400)));
         } else if (frame.event === 'health' && checkHealthFrame(frame, version, nativeVersion)) {
-          provePhp(frame.phpPort, token, version).then((proof) => resolve({ ...proof, native_version: nativeVersion }), reject);
+          provePhp(frame.phpPort, token, version).then((proof) => resolve({
+            ...proof, ui: frame.ui, window_visible: true, native_version: nativeVersion,
+          }), reject);
         } else {
           reject(new Error('The restarted POS runtime returned an invalid health proof.'));
         }

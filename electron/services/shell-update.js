@@ -10,7 +10,7 @@ const {
   EXE, WORKER, BROKER, BACKEND, VERSION, VALID_VERSION, VALID_OPERATION, validSecret,
   secret, canonical, plainFile, ensureDirectory, stateLocation, operationPaths, ensurePrivateRoot,
   allocateScratch, assertScratchOwnership, assertOperationPathBudget,
-  readActive, regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
+  readActive, hasDurableAdmission, regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
   bytesInTree, requireSpace, pruneCompletedCopies, writeRecord,
 } = require('./shell-update-files');
 
@@ -235,6 +235,11 @@ async function connectProbation(record, stateRoot, probation, onAbandoned) {
   let timer;
   let onAdmitted;
   const admittedSignal = new Promise((resolve) => { onAdmitted = resolve; });
+  const acceptAdmission = () => {
+    if (admitted || !hasDurableAdmission(stateRoot, paths.gate, probation.token)) return;
+    admitted = true;
+    onAdmitted();
+  };
   socket.on('error', () => {});
   try {
     const expected = await new Promise((resolve, reject) => {
@@ -245,8 +250,7 @@ async function connectProbation(record, stateRoot, probation, onAbandoned) {
         if (frame.command === 'probe') {
           resolve(frame.nativeVersion);
         } else if (frame.command === 'admit') {
-          admitted = true;
-          onAdmitted();
+          acceptAdmission();
         }
       }, reject);
     });
@@ -258,6 +262,9 @@ async function connectProbation(record, stateRoot, probation, onAbandoned) {
     clearTimeout(timer);
   }
   socket.on('close', () => {
+    // The gate and interlock are persisted before the supervisor sends the
+    // admission frame. A lost frame must not stop a durably admitted runtime.
+    acceptAdmission();
     if (!admitted) onAbandoned();
   });
   return {
