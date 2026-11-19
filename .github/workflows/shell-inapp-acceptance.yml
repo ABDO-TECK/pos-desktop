@@ -46,6 +46,10 @@ jobs:
           extensions: curl, pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
           coverage: none
 
+      - name: Verify native staging paths fit on this runner
+        shell: pwsh
+        run: node scripts/verify-shell-inapp-layout.mjs
+
       - name: Verify the published Setup 0.0.13 and extract its cold x64 payload
         shell: pwsh
         run: ./scripts/verify-setup13-shell-baseline.ps1

@@ -5,6 +5,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createDesktopLab, delay } from './desktop-transition-lab.mjs';
 import { assetNames, startReleaseFixture } from './fixtures/shell-inapp-release-origin.mjs';
+import { installedFixturePaths } from './fixtures/shell-inapp-layout.mjs';
+import supervisor from '../electron/services/shell-update-files.js';
 
 assert.equal(process.platform, 'win32');
 assert.equal(process.env.GITHUB_ACTIONS, 'true');
@@ -12,12 +14,7 @@ assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
 const scenario = process.argv[2];
 assert.ok(['rollback', 'commit'].includes(scenario), 'Expected a known acceptance scenario.');
 
-const lab = path.join(process.env.RUNNER_TEMP, 'shell-inapp');
-const installRoot = path.join(lab, 'installed');
-const profile = path.join(lab, scenario+'-profile');
-const local = path.join(profile, 'local');
-const roaming = path.join(profile, 'roaming');
-const shared = path.join(profile, 'shared');
+const { lab, installRoot, profile, local, roaming, shared, supervisorStateRoot } = installedFixturePaths(scenario);
 const dataDir = path.join(shared, 'POS System');
 const configDir = path.join(roaming, 'POS System');
 const failureTrace = path.join(roaming, 'candidate-failure.json');
@@ -55,8 +52,7 @@ function optionalJson(file) {
 
 function updaterDiagnostics() {
   const state = optionalJson(path.join(dataDir, 'update-state.json'));
-  const installHash = crypto.createHash('sha256').update(fs.realpathSync.native(installRoot).toLowerCase()).digest('hex');
-  const active = optionalJson(path.join(local, 'pos-shell-update-v2', installHash, 'active.json'));
+  const active = optionalJson(path.join(supervisorStateRoot, 'active.json'));
   const stage = path.join(dataDir, 'update_staging', '0.0.14', 'shell-delta');
   const stagedFileSizes = {};
   for (const name of assetNames) {
@@ -198,16 +194,11 @@ function observeInstalledInventory(role) {
 }
 
 function readTerminalReceipt() {
-  const state = path.join(local, 'pos-shell-update-v2');
   try {
-    const installations = fs.readdirSync(state);
-    const receipts = installations.flatMap(installation => {
-      const directory = path.join(state, installation);
-      if (!/^[a-f0-9]{64}$/.test(installation) || !fs.statSync(directory).isDirectory()) return [];
-      return fs.readdirSync(directory).filter(name => /^tx_[a-f0-9]{32}$/.test(name))
-        .map(name => path.join(directory, name, 'receipt.json'))
-        .filter(file => fs.existsSync(file));
-    });
+    const receipts = fs.readdirSync(supervisorStateRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && supervisor.VALID_OPERATION.test(entry.name))
+      .map(entry => supervisor.operationPaths(supervisorStateRoot, entry.name).receipt)
+      .filter(file => fs.existsSync(file));
     assert.ok(receipts.length <= 1, 'Expected one operation receipt for the isolated scenario.');
     return receipts.length === 1 ? readJson(receipts[0]) : null;
   } catch (error) {
