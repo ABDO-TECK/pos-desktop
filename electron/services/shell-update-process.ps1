@@ -8,6 +8,7 @@ function Send-Frame($value) {
 
 $owner = $null
 $released = $false
+$launchAttempted = $false
 try {
     Add-Type -Path (Join-Path $PSScriptRoot 'OwnedChildProcess.cs')
     $stdin = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Console]::InputEncoding)
@@ -20,6 +21,7 @@ try {
             $environment.Add($entry.Name, [string]$entry.Value)
         }
     }
+    $launchAttempted = $true
     $owner = [PosDesktop.Updates.Native.OwnedChildProcess]::Start($exe, [string[]]@(), $root, $environment)
     Send-Frame @{event = 'started'; pid = $owner.ProcessId}
     $inputTask = $stdin.ReadLineAsync()
@@ -37,7 +39,20 @@ try {
         Send-Frame @{event = 'released'}
     }
 } catch {
+    $failure = $_.Exception
+    while ($failure) {
+        if ($failure.GetType().FullName -eq 'PosDesktop.Updates.Native.OwnedChildProcessStartException') {
+            $owner = $failure.RetainedOwner
+            break
+        }
+        $failure = $failure.InnerException
+    }
     Send-Frame @{event = 'error'; error = $_.Exception.Message}
+    if ($null -eq $owner) {
+        # Start either completed its own cleanup or was never invoked.
+        # The supervisor additionally performs an installed process scan.
+        Send-Frame @{event = 'stopped'; launch_attempted = $launchAttempted}
+    }
     exit 1
 } finally {
     if (!$released -and $null -ne $owner) {

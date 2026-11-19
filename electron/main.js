@@ -716,15 +716,19 @@ const NON_RETRYABLE_STARTUP_CODES = new Set([
 ]);
 
 async function stopRuntimeServices() {
-  await stopJobWorker();
-  await stopPhpServerAwaitable();
-  stopQZTray();
-  try {
-    await stopHttpsProxy({ disconnect: true });
-  } catch (error) {
-    console.warn('[Runtime] Failed to stop HTTPS proxy during recovery:', error.message);
+  const failures = [];
+  for (const stop of [
+    () => stopHttpsProxy({ disconnect: true }),
+    stopJobWorker,
+    stopPhpServerAwaitable,
+    stopQZTrayAndWait,
+    stopMySQL,
+  ]) {
+    try { await stop(); } catch (error) { failures.push(error); }
   }
-  await stopMySQL();
+  if (failures.length) {
+    throw new AggregateError(failures, failures.map((error) => error.message).join(', '));
+  }
 }
 
 async function startCoreRuntime({ maxAttempts = 2, healthTimeout = 60000, resetBeforeStart = false, probation } = {}) {
@@ -885,7 +889,6 @@ async function runShellUpdate(version, storageDir, pending) {
     setImmediate(() => app.exit(0));
     return { ok: true, phase: 'shell_handoff_restart', restarting: true };
   } catch (error) {
-    supervisor?.abort();
     if (!supervisor) releaseUpdateLock(lease);
     if (drainBegun) {
       // No file mutation was authorized. Finish shutting down this partially
@@ -893,8 +896,10 @@ async function runShellUpdate(version, storageDir, pending) {
       try { await stopRuntimeServices(); } catch (shutdownError) {
         console.error('[Shell Update] Interrupted source shutdown:', shutdownError.message);
       }
+      supervisor?.abort();
       setImmediate(() => app.exit(1));
     } else {
+      supervisor?.abort();
       shellInstallInProgress = false;
     }
     return { ok: false, reason_code: 'shell_handoff_failed', error: error.message };
@@ -1027,7 +1032,11 @@ app.whenReady().then(async () => {
   try {
     startup = await shellUpdate.checkStartup(() => {
       probationAbandoned = true;
-      if (!runtimeStarting) app.exit(1);
+      if (!runtimeStarting) {
+        void stopRuntimeServices().catch((error) => {
+          console.error('[Shell Update] Interrupted candidate shutdown:', error.message);
+        }).finally(() => app.exit(1));
+      }
     });
   } catch (error) {
     console.error('[Shell Update] Startup interlock:', error.message);

@@ -246,8 +246,8 @@ async function stopCandidate(child) {
   child.server.close();
   if (child.control && !child.control.stdin.writableEnded) child.control.stdin.end('stop\n');
   if (child.control && !child.released) {
-    const result = await bounded(child.brokerExit, processDeadline, 'The candidate Job Object broker did not exit.');
-    if (result !== 0 || !child.stopped) {
+    await bounded(child.brokerExit, processDeadline, 'The candidate Job Object broker did not exit.');
+    if (!child.stopped) {
       throw new Error('The candidate Job Object did not prove the runtime stopped.');
     }
   }
@@ -306,17 +306,18 @@ function provePhp(port, token, version) {
 
 async function startProbation(version, nativeVersion, restored) {
   const token = secret();
+  const powershellPath = systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const brokerPath = plainFile(path.join(paths.worker, 'shell-update-process.ps1'));
   const server = net.createServer({ pauseOnConnect: true });
   const pending = [];
   const deferConnection = (socket) => pending.push(socket);
   server.on('connection', deferConnection);
   await listen(server, { host: '127.0.0.1', port: 0, exclusive: true });
   const endpoint = server.address().port;
-  const control = spawn(systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', plainFile(path.join(paths.worker, 'shell-update-process.ps1')),
+  const control = spawn(powershellPath, [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', brokerPath,
   ], { cwd: paths.worker, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: workerEnv() });
-  const session = { control, server, token, socket: null, stopped: false, released: false };
+  const session = { control, server, token, socket: null, stopped: false, released: false, exitObserved: false };
   candidate = session;
   let started;
   let exited;
@@ -330,7 +331,10 @@ async function startProbation(version, nativeVersion, restored) {
   control.stdin.on('error', failed);
   jsonLine(control.stdout, (frame) => {
     if (frame.event === 'started') started(frame.pid);
-    else if (frame.event === 'exited') exited(frame.code);
+    else if (frame.event === 'exited') {
+      session.exitObserved = true;
+      exited(frame.code);
+    }
     else if (frame.event === 'error') failed(new Error(frame.error));
     else if (frame.event === 'stopped') session.stopped = true;
     else if (frame.event === 'released') session.released = true;
@@ -386,7 +390,7 @@ async function startProbation(version, nativeVersion, restored) {
 }
 
 async function admit(session, state, detail = {}) {
-  if (!session?.socket || session.socket.destroyed) throw new Error('Healthy POS lost supervisor control before admission.');
+  if (!session?.socket || session.socket.destroyed || session.exitObserved) throw new Error('Healthy POS lost supervisor control before admission.');
   session.control.stdin.end('release\n');
   const result = await bounded(session.brokerExit, processDeadline, 'The healthy POS Job Object could not be released.');
   if (result !== 0 || !session.released) throw new Error('The healthy POS could not be admitted.');
@@ -469,6 +473,9 @@ async function begin(first, nextFrame) {
       databaseMayHaveChanged: true,
     });
     const healthy = await startProbation(job.target, job.nativeTarget, false);
+    if (healthy.exitObserved || healthy.socket.destroyed) {
+      throw new Error('The candidate exited before its health decision was durable.');
+    }
     await transaction('commit', { digest: job.digest });
     await admit(healthy, 'completed');
   } catch (error) {
