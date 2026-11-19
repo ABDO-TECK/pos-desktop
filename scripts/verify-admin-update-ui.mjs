@@ -279,6 +279,14 @@ app.whenReady().then(async () => {
   });
 
   const evaluate = (code) => win.webContents.executeJavaScript(code);
+  const until = async (expression, description) => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (await evaluate(expression)) return;
+      await delay(50);
+    }
+    throw new Error('Timed out waiting for ' + description);
+  };
 
   try {
     await win.loadFile(${JSON.stringify(path.join(lab, 'index.html'))});
@@ -371,15 +379,19 @@ app.whenReady().then(async () => {
       '  sessionStorage.setItem("pos.active_update_job_id", "42");',
       '  let simulatedTime = 1000;',
       '  Date.now = () => simulatedTime;',
-      '  window.__api.getUpdateJob = async (id) => ({ data: { data: { id: 42, status: "pending" } } });',
+      '  window.__api.getUpdateJob = async (id) => {',
+      '    window.__apiCalls.getUpdateJob = (window.__apiCalls.getUpdateJob || 0) + 1;',
+      '    return { data: { data: { id: 42, status: "pending" } } };',
+      '  };',
       '  window.mountUpdateSection();',
       '  return null;',
       '})()'
     ].join('\\n'));
-    await delay(100);
+    await until('(window.__apiCalls?.getUpdateJob || 0) > 0', 'the first pending job poll');
     // Fast-forward simulated clock past 30s pending deadline
     await evaluate('Date.now = () => 40000; null;');
-    await delay(2500); // Wait for polling loop iteration
+    await until('Boolean(document.querySelector(".btn-warning") && document.body.textContent.includes("استئناف متابعة الحالة"))',
+      'the resume button after the pending job deadline');
     const a2ActiveJob = await evaluate('sessionStorage.getItem("pos.active_update_job_id")');
     assert.equal(a2ActiveJob, '42', 'Pending timeout must retain activeJobId in sessionStorage');
 
@@ -508,7 +520,7 @@ app.whenReady().then(async () => {
         '  return null;',
         '})()'
       ].join('\\n'));
-      await delay(300);
+      await until('window.__applyStagedDeltaCalls >= 1', 'the queued shell handoff acknowledgement');
       assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'The staged shell handoff must be invoked once.');
       assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), 0,
         'Source IPC acknowledgement cannot report an applied update.');
@@ -529,7 +541,8 @@ app.whenReady().then(async () => {
         '  return null;',
         '})()'
       ].join('\\n'));
-      await delay(300);
+      await until('localStorage.getItem(' + JSON.stringify(durableJobKey) + ') === null',
+        'settlement of the delayed shell operation');
       assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'Restart reconciliation cannot invoke another handoff.');
       assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), null,
         'A verified terminal recovery must clear the pending restart job.');
