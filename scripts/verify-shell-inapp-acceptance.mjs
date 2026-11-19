@@ -21,7 +21,8 @@ const shared = path.join(profile, 'shared');
 const dataDir = path.join(shared, 'POS System');
 const configDir = path.join(roaming, 'POS System');
 const failureTrace = path.join(roaming, 'candidate-failure.json');
-const releaseRoot = path.join(lab, scenario === 'rollback' ? 'failing' : 'target', 'release');
+const releaseRole = scenario === 'rollback' ? 'failing' : 'target';
+const releaseRoot = path.join(lab, releaseRole, 'release');
 const evidence = path.join(lab, 'evidence');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const writeJson = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2)+'\n');
@@ -187,6 +188,15 @@ function checkInstalledInventory(expected, deleted = []) {
   return { files: Object.keys(expected.files).length, required_sha256: observations };
 }
 
+function observeInstalledInventory(role) {
+  const php = path.join(installRoot, 'resources', 'portable', 'php', 'php.exe');
+  const script = path.resolve('scripts/observe-shell-install-inventory.php');
+  const result = execFileSync(php, ['-n', script, releaseRole, role, 'observe'], {
+    encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: 128 * 1024,
+  });
+  return JSON.parse(result);
+}
+
 function readTerminalReceipt() {
   const state = path.join(local, 'pos-shell-update-v2');
   try {
@@ -312,6 +322,9 @@ try {
   ];
   const witnesses = protectedFiles.map(file => ({ file, sha256: hash(file) }));
   observations.before = { ...before, inventory: beforeFiles, row_id: row.id, uninstaller_sha256: beforeUninstaller };
+  const liveSourceInventory = observeInstalledInventory('source');
+  observations.before.live_inventory = liveSourceInventory;
+  assert.equal(liveSourceInventory.digest_matches, true, 'Running source has an unexpected managed inventory.');
   const capabilities = await app.evaluate('window.posRuntime.getDeltaCapability()');
   observations.desktop_capabilities = capabilities;
   assert.equal(capabilities.shellDelta, true, 'The packaged source lacks the native shell update capability.');
@@ -390,6 +403,13 @@ try {
   const afterFiles = scenario === 'rollback'
     ? checkInstalledInventory(inventory.source_inventory, missingAtSource)
     : checkInstalledInventory(inventory.target_inventory, inventory.deleted_files);
+  const liveAfterInventory = observeInstalledInventory(scenario === 'rollback' ? 'source' : 'target');
+  observations.after = { ...after, live_inventory: liveAfterInventory };
+  assert.equal(liveAfterInventory.digest_matches, true, 'The reopened application has an unexpected managed inventory.');
+  for (const [name, witness] of Object.entries(liveSourceInventory.qz_device_witnesses)) {
+    assert.equal(witness.classification, 'path_protected', 'An existing QZ state file is not protected: '+name);
+    assert.deepEqual(liveAfterInventory.qz_device_witnesses[name], witness, 'Existing QZ device state changed: '+name);
+  }
   for (const { file, sha256 } of witnesses) assert.equal(hash(file), sha256, 'Protected file changed: '+path.basename(file));
   assert.equal(hash(uninstaller), beforeUninstaller, 'Installer-owned uninstaller bytes changed.');
   const applies = updateNetwork.filter(event => event.path.endsWith('/updates/apply'));
@@ -404,7 +424,7 @@ try {
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 && request.path.endsWith('/pos-desktop-updates/releases')));
   await screenshot(app, scenario+'-reopened');
   observations.after = {
-    ...after, inventory: afterFiles, row_id: preservedRow.id,
+    ...observations.after, inventory: afterFiles, row_id: preservedRow.id,
     uninstaller_sha256: beforeUninstaller,
     protected_sha256: Object.fromEntries(witnesses.map(({file, sha256}) => [path.basename(file), sha256])),
   };
