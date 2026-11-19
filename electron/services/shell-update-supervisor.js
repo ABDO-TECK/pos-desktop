@@ -4,13 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const http = require('node:http');
-const { spawn, execFile } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const {
   EXE, WORKER, VALID_OPERATION, VALID_VERSION, canonical, ensureDirectory, operationPaths, stateLocation,
   assertScratchOwnership, assertOperationPathBudget,
-  readActive, clearActive, writeRecord, durableFile, plainFile, fileHash, powershell, systemPath,
+  readActive, clearActive, writeRecord, durableFile, plainFile, fileHash, powershell,
   phpArgs, workerEnv, secret, hash, copyChecked, bytesInTree, requireSpace, jsonLine, send,
-  waitForSourceShutdown, sharedUpdateContext,
+  spawnCandidateBroker, waitForSourceShutdown, sharedUpdateContext,
 } = require('./shell-update-files');
 const {
   heartbeatUpdateLock, releaseUpdateLock, writeUpdateState,
@@ -230,6 +230,8 @@ function reportReceipt(outcome, detail = {}) {
     database_backup_sha256: job.databaseBackupDigest ?? null,
     transaction_digest: job.digest ?? null,
     candidate_health: job.candidateHealth ?? null, restored_health: job.restoredHealth ?? null,
+    candidate_failure: job.candidateFailure ?? null, restored_failure: job.restoredFailure ?? null,
+    candidate_broker_phase: job.candidateBrokerPhase ?? null, restored_broker_phase: job.restoredBrokerPhase ?? null,
     ...detail,
   });
 }
@@ -315,17 +317,21 @@ function provePhp(port, token, version) {
 
 async function startProbation(version, nativeVersion, restored) {
   const token = secret();
-  const powershellPath = systemPath('WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const brokerPath = plainFile(path.join(paths.worker, 'shell-update-process.ps1'));
   const server = net.createServer({ pauseOnConnect: true });
   const pending = [];
   const deferConnection = (socket) => pending.push(socket);
   server.on('connection', deferConnection);
   await listen(server, { host: '127.0.0.1', port: 0, exclusive: true });
   const endpoint = server.address().port;
-  const control = spawn(powershellPath, [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', brokerPath,
-  ], { cwd: paths.worker, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: workerEnv() });
+  const phaseField = restored ? 'restoredBrokerPhase' : 'candidateBrokerPhase';
+  save(restored ? 'launching_restored' : 'launching_target', { [phaseField]: 'spawning' });
+  let control;
+  try {
+    control = spawnCandidateBroker(paths.worker, job.installRoot, { token, endpoint, id: job.id });
+  } catch (error) {
+    server.close();
+    throw error;
+  }
   const session = { control, server, token, socket: null, stopped: false, released: false, exitObserved: false };
   candidate = session;
   let started;
@@ -339,20 +345,27 @@ async function startProbation(version, nativeVersion, restored) {
   });
   control.stdin.on('error', failed);
   jsonLine(control.stdout, (frame) => {
-    if (frame.event === 'started') started(frame.pid);
+    if (frame.event === 'phase' && ['initializing', 'creating_job'].includes(frame.phase)) {
+      save(job.phase, { [phaseField]: frame.phase });
+    } else if (frame.event === 'started') {
+      save(job.phase, { [phaseField]: 'running' });
+      started(frame.pid);
+    }
     else if (frame.event === 'exited') {
       session.exitObserved = true;
       exited(frame.code);
     }
-    else if (frame.event === 'error') failed(new Error(frame.error));
+    else if (frame.event === 'error') failed(new Error('Native broker ' + frame.phase + ': ' + frame.error));
     else if (frame.event === 'stopped') session.stopped = true;
     else if (frame.event === 'released') session.released = true;
   }, failed);
-  send(control.stdin, {
-    root: job.installRoot,
-    environment: { ...workerEnv(), POS_SHELL_PROBATION: JSON.stringify({ token, endpoint, id: job.id }) },
-  });
-  const pid = await bounded(startedSignal, processDeadline, 'The candidate Job Object failed to launch.');
+  let pid;
+  try {
+    pid = await bounded(startedSignal, processDeadline, 'The candidate Job Object failed to launch.');
+    if (!Number.isInteger(pid) || pid < 1) throw new Error('The native broker returned an invalid candidate PID.');
+  } catch (error) {
+    throw new Error(error.message + ' Last native broker phase: ' + job[phaseField] + '.');
+  }
   save(restored ? 'probing_restored' : 'probing_target', {
     [restored ? 'restoredPid' : 'candidatePid']: pid,
   });
@@ -432,12 +445,17 @@ async function rollback(error) {
     await restoreDatabase();
     save('source_restored', { databaseRestored: true });
   }
-  const restored = await startProbation(job.context.version, job.context.native_version, true);
-  const reopenAfterDrainFailure = job.reopenAfterDrainFailure === true;
-  await admit(restored, reopenAfterDrainFailure ? 'failed' : 'rolled_back', {
-    error: reason,
-    ...(reopenAfterDrainFailure ? { source_reopened_without_mutation: true } : {}),
-  });
+  try {
+    const restored = await startProbation(job.context.version, job.context.native_version, true);
+    const reopenAfterDrainFailure = job.reopenAfterDrainFailure === true;
+    await admit(restored, reopenAfterDrainFailure ? 'failed' : 'rolled_back', {
+      error: reason,
+      ...(reopenAfterDrainFailure ? { source_reopened_without_mutation: true } : {}),
+    });
+  } catch (restoreError) {
+    save(job.phase, { restoredFailure: restoreError.message });
+    throw restoreError;
+  }
 }
 
 async function begin(first, nextFrame) {
@@ -491,6 +509,7 @@ async function begin(first, nextFrame) {
     await transaction('commit', { digest: job.digest });
     await admit(healthy, 'completed');
   } catch (error) {
+    save(job.phase, { candidateFailure: error.message });
     await rollback(error);
   }
 }

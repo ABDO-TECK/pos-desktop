@@ -42,7 +42,7 @@ jobs:
         run: node scripts/verify-shell-supervisor-state.cjs
       - name: Clean up a live owned child after its candidate exits
         shell: pwsh
-        run: ./scripts/verify-shell-update-process.ps1
+        run: node scripts/verify-shell-update-process.cjs
       - name: Verify repeated handoffs reapply the PHP write barrier
         shell: pwsh
         run: php scripts/verify-shell-health-write-gate.php

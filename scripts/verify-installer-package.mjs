@@ -21,6 +21,14 @@ for (const [archived, source] of [
     throw Error('Missing or altered private shell updater asset: ' + archived);
   }
 }
+const broker = 'electron/assets/shell-update-broker.bin';
+if (!entries.includes(broker) || statFile(archive, broker).unpacked) throw Error('Missing packaged native shell supervisor broker.');
+const brokerImage = extractFile(archive, broker);
+const pe = brokerImage.length >= 64 ? brokerImage.readUInt32LE(0x3c) : 0;
+if (brokerImage.length < 64 || brokerImage.readUInt16LE(0) !== 0x5a4d ||
+    pe > brokerImage.length - 6 || brokerImage.readUInt32LE(pe) !== 0x00004550 || brokerImage.readUInt16LE(pe + 4) !== 0x8664) {
+  throw Error('Packaged native shell supervisor broker is not a Windows x64 executable.');
+}
 for(const rel of ['app.asar.unpacked/version.json','app.asar.unpacked/frontend/dist/index.html','app.asar.unpacked/backend/backend.phar','app.asar.unpacked/backend/certs/cacert.pem','app.asar.unpacked/backend/certs/update_public_key.pem','app.asar.unpacked/database/pos_schema.sql','portable/php/php.exe','portable/mysql/bin/mysqld.exe','portable/java/bin/java.exe','portable/qz-tray/qz-tray.jar','portable/runtime-manifest.json','portable/printing-manifest.json']){
  if(!fs.existsSync(path.join(resources,rel)))throw Error('Missing packaged runtime: '+rel);
 }

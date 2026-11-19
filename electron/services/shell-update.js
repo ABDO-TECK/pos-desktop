@@ -7,7 +7,7 @@ const { spawn, execFile } = require('node:child_process');
 const { app } = require('electron');
 const { readUpdateChannel, classifyVersionChannel } = require('../utils/update-channel-policy');
 const {
-  EXE, WORKER, BACKEND, VERSION, VALID_VERSION, VALID_OPERATION, validSecret,
+  EXE, WORKER, BROKER, BACKEND, VERSION, VALID_VERSION, VALID_OPERATION, validSecret,
   secret, canonical, plainFile, ensureDirectory, stateLocation, operationPaths, ensurePrivateRoot,
   allocateScratch, assertScratchOwnership, assertOperationPathBudget,
   readActive, regularPackage, readSignedDescriptor, fileHash, copyChecked, phpArgs, workerEnv, jsonLine, send,
@@ -20,7 +20,8 @@ const isRuntimeImage = (image) => rootFiles.test(image) || /^resources\/portable
 
 function isShellUpdateCapable() {
   if (!app?.isPackaged || process.platform !== 'win32' || process.arch !== 'x64' ||
-      path.basename(process.execPath) !== EXE || !fs.existsSync(keyFile)) return false;
+      path.basename(process.execPath) !== EXE || !fs.existsSync(keyFile) ||
+      !fs.existsSync(path.join(__dirname, '..', 'assets', 'shell-update-broker.bin'))) return false;
   try {
     const { installRoot, stateRoot } = locations();
     assertOperationPathBudget(operationPaths(stateRoot, 'tx_' + '0'.repeat(32)));
@@ -94,8 +95,7 @@ async function copyTrustedRuntime(paths, installRoot, descriptor) {
     [WORKER]: path.join(__dirname, WORKER),
     'shell-update-files.js': path.join(__dirname, 'shell-update-files.js'),
     'update-coordination.js': path.join(__dirname, '..', 'utils', 'update-coordination.js'),
-    'OwnedChildProcess.cs': path.join(__dirname, '..', 'assets', 'OwnedChildProcess.cs'),
-    'shell-update-process.ps1': path.join(__dirname, 'shell-update-process.ps1'),
+    [BROKER]: path.join(__dirname, '..', 'assets', 'shell-update-broker.bin'),
   })) {
     fs.writeFileSync(path.join(paths.worker, target), fs.readFileSync(original), { flag: 'wx' });
   }
