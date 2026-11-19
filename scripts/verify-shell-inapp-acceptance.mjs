@@ -87,8 +87,9 @@ function observeNetwork(app) {
       app.call('Network.getResponseBody', { requestId: event.requestId }).then(({ body, base64Encoded }) => {
         if (base64Encoded || body.length > 200_000) return;
         const json = JSON.parse(body);
-        const fields = ['success', 'status', 'state', 'code', 'reason_code', 'error_code', 'errorCode', 'message', 'error',
-          'job_id', 'phase', 'latest_version', 'handoff_version', 'requires_desktop_handoff', 'shell_update_available', 'target_version'];
+        const fields = ['success', 'ok', 'status', 'state', 'code', 'reason_code', 'error_code', 'errorCode', 'message', 'error',
+          'id', 'job_id', 'last_error', 'phase', 'settlement_error', 'latest_version', 'handoff_version', 'requires_desktop_handoff',
+          'desktop_handoff_completed', 'update_type', 'shell_update_available', 'target_version'];
         response.result = {
           envelope: safeFields(json, fields),
           data: safeFields(json.data, fields),
@@ -335,7 +336,7 @@ try {
   const outcome = await waitFor('automatic terminal updater receipt', async () => {
     const receipt = readTerminalReceipt();
     if (receipt) return receipt;
-    if (observations.renderer_handoff) {
+    if (observations.renderer_handoff && !observations.renderer_handoff.displayed_error?.includes('انتهت مهلة انتظار')) {
       throw new Error('Desktop handoff rejected: '+JSON.stringify(observations.renderer_handoff));
     }
     const rejection = updateNetwork.find(event => event.type === 'response' && event.result && (
@@ -429,8 +430,10 @@ try {
     try {
       observations.failure.ui = safeFields(await app.evaluate("(() => {"+
         "const button = [...document.querySelectorAll('button')].find(b => b.innerText.includes('التحقق من التحديثات'));"+
-        "return { route: location.pathname, update_center: button?.closest('section')?.innerText }; })()"),
-      ['route', 'update_center']);
+        "const job_id = sessionStorage.getItem('pos.active_update_job_id');"+
+        "const handoff_marker = job_id ? sessionStorage.getItem('pos.update_handoff_'+job_id) : null;"+
+        "return { route: location.pathname, update_center: button?.closest('section')?.innerText, job_id, handoff_marker }; })()"),
+      ['route', 'update_center', 'job_id', 'handoff_marker']);
     } catch { /* The old renderer may have exited before the failure. */ }
   }
   throw error;
