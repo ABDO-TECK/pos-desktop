@@ -184,19 +184,29 @@ function readTerminalReceipt() {
   }
 }
 
-async function category(app, method, name) {
+async function getCategory(app, name) {
   const response = await app.evaluate("(async () => {"+
     "const base = window.API_BASE_URL.replace(/\\/+$/, '') + '/api/v1';"+
-    "const request = (route, options = {}) => fetch(base + route, { credentials: 'include', cache: 'no-store', ...options });"+
-    (method === 'POST'
-      ? "const protection = await (await request('/csrf-cookie')).json();"+
-        "const res = await request('/categories', {method: 'POST', headers:{'Content-Type':'application/json','X-XSRF-TOKEN':protection.data.csrf_token},"+
-        "body: JSON.stringify({name:"+JSON.stringify(name)+"})});"
-      : "const res = await request('/categories?limit=100');")+
+    "const res = await fetch(base + '/categories?limit=100', {credentials:'include', cache:'no-store'});"+
     "const json = await res.json();"+
-    "return {status:res.status, data:"+ (method === 'POST' ? "json.data" : "json.data?.filter(row => row.name === "+JSON.stringify(name)+")") +"};})()");
-  assert.equal(response.status, method === 'POST' ? 201 : 200, 'Category API failed through the packaged renderer.');
-  return response.data;
+    "return {status:res.status, rows:json.data?.filter(row => row.name === "+JSON.stringify(name)+")};})()");
+  assert.equal(response.status, 200, 'Category API failed through the packaged renderer.');
+  assert.equal(response.rows.length, 1, 'Expected one matching business row in the live database.');
+  return response.rows[0];
+}
+
+async function createCategory(app, name) {
+  const link = "document.querySelector('a[href=\"/products\"]')";
+  await app.until("Boolean("+link+")", "products navigation");
+  await app.evaluate(link+".click()");
+  await app.until("location.pathname === '/products'", "products route");
+  await clickVisibleButton(app, 'الفئات', { prefix: true });
+  await clickVisibleButton(app, 'إضافة فئة');
+  await app.fill('.modal-overlay input', name);
+  await clickVisibleButton(app, 'حفظ');
+  await app.until("[...document.querySelectorAll('table tbody td')].some(cell=>cell.textContent.trim()==="+JSON.stringify(name)+")",
+    "persisted category row");
+  return getCategory(app, name);
 }
 
 async function verifyUsableRuntime(app, version, marker, engine) {
@@ -221,9 +231,10 @@ async function verifyUsableRuntime(app, version, marker, engine) {
   return { frontend, backend_health: backendHealth, processes, runtime_ports: ports };
 }
 
-async function clickVisibleButton(app, label) {
+async function clickVisibleButton(app, label, { prefix = false } = {}) {
   const source = JSON.stringify(label);
-  const locator = "[...document.querySelectorAll('button')].find(b => !b.disabled && b.textContent.trim() === "+source+")";
+  const comparison = prefix ? "b.textContent.trim().startsWith("+source+")" : "b.textContent.trim() === "+source;
+  const locator = "[...document.querySelectorAll('button')].find(b => !b.disabled && "+comparison+")";
   await app.until("Boolean("+locator+")", "enabled button "+label);
   await app.evaluate("("+locator+").scrollIntoView({block:'center',inline:'center'})");
   const position = await waitFor("visible click target "+label, () => app.evaluate("(() => {"+
@@ -265,7 +276,7 @@ try {
   const credentials = await app.freshLogin();
   const before = await verifyUsableRuntime(app, '0.0.13', 'source', '43.2.0');
   const marker = 'Shell acceptance '+crypto.randomBytes(10).toString('hex');
-  const row = await category(app, 'POST', marker);
+  const row = await createCategory(app, marker);
   assert.ok(Number(row?.id) > 0 && row.name === marker, 'Expected a real business row created before update.');
 
   const witnessFolder = path.join(dataDir, 'uploads', 'shell-acceptance');
@@ -299,7 +310,18 @@ try {
 
   // From confirmation onward the harness only observes until the new process
   // has finished the transaction. It makes no update, health-signal, or rollback call.
-  const outcome = await waitFor('automatic terminal updater receipt', readTerminalReceipt, 360_000);
+  const outcome = await waitFor('automatic terminal updater receipt', async () => {
+    const receipt = readTerminalReceipt();
+    if (receipt) return receipt;
+    const rejection = updateNetwork.find(event => event.type === 'response' && event.result && (
+      (event.path.endsWith('/updates/apply') && event.status >= 400)
+      || (/\/update\/jobs\/\d+$/.test(event.path) && event.result.data?.status === 'failed')
+    ));
+    if (rejection) {
+      throw new Error('Update Center rejected the update: '+JSON.stringify(rejection.result));
+    }
+    return null;
+  }, 360_000);
   observations.supervisor = outcome;
   assert.equal(outcome.outcome, scenario === 'rollback' ? 'rolled_back' : 'completed', 'The supervisor produced the wrong terminal outcome.');
   assert.equal(outcome.source_version, '0.0.13');
@@ -337,9 +359,8 @@ try {
     assert.notEqual(after.processes[name].pid, before.processes[name].pid, name+' process did not restart.');
     assert.ok(Date.parse(after.processes[name].started_at) > Date.parse(before.processes[name].started_at), name+' start time did not advance.');
   }
-  const rows = await category(app, 'GET', marker);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].id, row.id, 'The original MariaDB business row did not survive.');
+  const preservedRow = await getCategory(app, marker);
+  assert.equal(preservedRow.id, row.id, 'The original MariaDB business row did not survive.');
   const afterFiles = scenario === 'rollback'
     ? checkInstalledInventory(inventory.source_inventory, missingAtSource)
     : checkInstalledInventory(inventory.target_inventory, inventory.deleted_files);
@@ -357,7 +378,7 @@ try {
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 && request.path.endsWith('/pos-desktop-updates/releases')));
   await screenshot(app, scenario+'-reopened');
   observations.after = {
-    ...after, inventory: afterFiles, row_id: rows[0].id,
+    ...after, inventory: afterFiles, row_id: preservedRow.id,
     uninstaller_sha256: beforeUninstaller,
     protected_sha256: Object.fromEntries(witnesses.map(({file, sha256}) => [path.basename(file), sha256])),
   };
