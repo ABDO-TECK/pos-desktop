@@ -26,17 +26,21 @@ if ('electron/services/shell-update.js' -cin $files) {
     in_app_format2_client_present = $false
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $lab 'evidence/published-client-scope.json') -Encoding utf8NoBOM
 
-$runtimeVersion = '43.8.11'
-$runtimeName = "electron-v$runtimeVersion-win32-x64.zip"
-$runtimeSha = '25de7bab4a1b940776b2cc06cb9d2698fec903554188be5977394a0373b75904'
-$runtimeArchive = Join-Path $lab $runtimeName
-Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v$runtimeVersion/$runtimeName" -OutFile $runtimeArchive -TimeoutSec 600
-if ((Get-FileHash -LiteralPath $runtimeArchive).Hash.ToLowerInvariant() -cne $runtimeSha) {
-    throw 'Electron archive does not match the pinned x64 runtime.'
+function Prepare-Electron {
+    param([string] $Version, [long] $Size, [string] $Sha256, [long] $AssetId)
+    $archiveName = "electron-v$Version-win32-x64.zip"
+    $archive = Join-Path $lab $archiveName
+    Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v$Version/$archiveName" -OutFile $archive -TimeoutSec 600 -MaximumRetryCount 2 -RetryIntervalSec 3
+    if ((Get-Item -LiteralPath $archive).Length -ne $Size -or (Get-FileHash -LiteralPath $archive).Hash.ToLowerInvariant() -cne $Sha256) {
+        throw "Electron $Version archive does not match the pinned x64 runtime."
+    }
+    $distribution = Join-Path $lab "electron-$Version"
+    Expand-Archive -LiteralPath $archive -DestinationPath $distribution
+    Remove-Item -LiteralPath (Join-Path $distribution 'resources/default_app.asar'), (Join-Path $distribution 'version')
+    return [pscustomobject]@{ version = $Version; sha256 = $Sha256; asset_id = $AssetId; distribution = $distribution }
 }
-$runtime = Join-Path $lab 'electron'
-Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $runtime
-Remove-Item -LiteralPath (Join-Path $runtime 'resources/default_app.asar'), (Join-Path $runtime 'version')
+$sourceEngine = Prepare-Electron '43.2.0' 144326439 'eba5f5088af40ecb364fe258809c79a5234c6ece5a75c64722772eba01b02786' 484988681
+$targetEngine = Prepare-Electron '43.8.11' 151377887 '25de7bab4a1b940776b2cc06cb9d2698fec903554188be5977394a0373b75904' 760039177
 
 if (Test-Path -LiteralPath 'portable') { throw 'Expected a fresh checkout with no portable runtime.' }
 Copy-Item -LiteralPath (Join-Path $official 'source/resources/portable') -Destination 'portable' -Recurse
@@ -78,6 +82,7 @@ $mainPath = 'electron/main.js'
 $main = Get-Content -LiteralPath $mainPath -Raw
 $debugSwitch = "require('electron').app.commandLine.appendSwitch('remote-debugging-port', '19231'); require('electron').app.setPath('userData', require('node:path').join(process.env.LOCALAPPDATA, 'pos-ci-chromium'));"
 Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $main) -Encoding utf8NoBOM
+Add-Content -LiteralPath 'electron/preload.js' -Value "contextBridge.exposeInMainWorld('posCiElectronEngine', process.versions.electron);" -Encoding utf8NoBOM
 $indexPath = 'frontend/index.html'
 $index = Get-Content -LiteralPath $indexPath -Raw
 $anchor = '<meta charset="UTF-8" />'
@@ -102,7 +107,7 @@ function Set-FixtureVersion {
 }
 
 function Build-Fixture {
-    param([string] $Role, [string] $Version, [switch] $Installer, [switch] $ReuseFrontendAndPhar)
+    param([string] $Role, [string] $Version, $Engine, [switch] $Installer, [switch] $ReuseFrontendAndPhar)
     if (-not $ReuseFrontendAndPhar) {
         Set-FixtureVersion $Version $Role
         npm run frontend:build
@@ -112,7 +117,7 @@ function Build-Fixture {
 
     $out = Join-Path $lab $Role
     $builderArgs = @('--win', '--x64', '--publish', 'never',
-        "-c.electronVersion=$runtimeVersion", "-c.electronDist=$runtime", "-c.directories.output=$out")
+        "-c.electronVersion=$($Engine.version)", "-c.electronDist=$($Engine.distribution)", "-c.directories.output=$out")
     if (-not $Installer) { $builderArgs += '--dir' }
     & ./node_modules/.bin/electron-builder.cmd @builderArgs
 
@@ -129,13 +134,32 @@ function Build-Fixture {
     if ($exe.VersionInfo.ProductVersion -cnotmatch ('^{0}(?:\.0)?$' -f [regex]::Escape($Version))) {
         throw "Unexpected PE product version for $Role."
     }
+    $asarCheck = @'
+const asar = require('@electron/asar');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const assert = require('node:assert/strict');
+const archive = process.argv[1];
+const assets = {
+  'electron/assets/shell-update-public-key.pem': 'backend/certs/update_public_key.pem',
+  'electron/assets/OwnedChildProcess.cs': 'backend/Native/OwnedChildProcess.cs',
+};
+const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+for (const [entry, expected] of Object.entries(assets)) {
+  assert.equal(sha(asar.extractFile(archive, path.normalize(entry))), sha(fs.readFileSync(expected)), entry);
+}
+'@
+    node -e $asarCheck (Join-Path $product 'resources/app.asar')
     [ordered]@{
         scope = 'Unpublished CI product with ephemeral trust and loopback CDP'
         commit = $env:GITHUB_SHA
         role = $Role
         version = $Version
-        electron_runtime = $runtimeVersion
-        electron_archive_sha256 = $runtimeSha
+        electron_runtime = $Engine.version
+        electron_archive_asset_id = $Engine.asset_id
+        electron_archive_sha256 = $Engine.sha256
+        asar_embedded_native_components_verified = $true
         exe_sha256 = (Get-FileHash -LiteralPath $exe.FullName).Hash.ToLowerInvariant()
         asar_sha256 = (Get-FileHash -LiteralPath (Join-Path $product 'resources/app.asar')).Hash.ToLowerInvariant()
         phar_sha256 = (Get-FileHash -LiteralPath (Join-Path $product 'resources/app.asar.unpacked/backend/backend.phar')).Hash.ToLowerInvariant()
@@ -155,17 +179,17 @@ function Sign-Fixture {
 }
 
 try {
-    Build-Fixture source '0.0.13' -Installer
-    Build-Fixture target '0.0.14'
+    Build-Fixture source '0.0.13' $sourceEngine -Installer
+    Build-Fixture target '0.0.14' $targetEngine
 
     # Start the real MariaDB/PHP pair and fail before the desktop reaches sign-in.
     # This trace witnesses execution. The supervisor independently owns recovery.
     $startup = [regex]::Matches($main, '(?m)^    (?:const started = )?await startCoreRuntime\(\{ maxAttempts: [^\r\n]+ \}\);')
     if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
-    $failure = "    fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({ pid: process.pid, phpPort, mysqlPort })); process.exit(78);"
+    $failure = "    fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({ pid: process.pid, phpPort, mysqlPort, electronEngine: process.versions.electron })); process.exit(78);"
     $badMain = $main.Insert($startup[0].Index + $startup[0].Length, [Environment]::NewLine + $failure)
     Set-Content -LiteralPath $mainPath -Value ($debugSwitch + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
-    Build-Fixture failing '0.0.14' -ReuseFrontendAndPhar
+    Build-Fixture failing '0.0.14' $targetEngine -ReuseFrontendAndPhar
 
     ./scripts/verify-setup13-shell-data.ps1 -Profile in-app
     foreach ($role in @('target', 'failing')) {

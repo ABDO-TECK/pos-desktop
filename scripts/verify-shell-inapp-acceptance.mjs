@@ -199,13 +199,14 @@ async function category(app, method, name) {
   return response.data;
 }
 
-async function verifyUsableRuntime(app, version, marker) {
+async function verifyUsableRuntime(app, version, marker, engine) {
   const authenticated = "Boolean(document.querySelector('a[href=\"/settings\"]'))";
   await app.until(authenticated, 'authenticated navigation');
   const frontend = await app.evaluate("(async () => ({ version: await window.electronAPI.getVersion(), "+
-    "marker: document.querySelector('meta[name=\"pos-ci-shell-build\"]')?.content, origin: location.origin }))()");
+    "engine: window.posCiElectronEngine, marker: document.querySelector('meta[name=\"pos-ci-shell-build\"]')?.content, origin: location.origin }))()");
   assert.equal(frontend.marker, marker);
   assert.equal(frontend.version, version);
+  assert.equal(frontend.engine, engine, 'The running packaged Electron engine differs from the expected version.');
   assert.equal(frontend.origin, 'app://pos-app');
   const ports = readJson(path.join(configDir, 'runtime_ports.json'));
   const api = new URL(ports.apiBaseUrl);
@@ -262,7 +263,7 @@ try {
   const beforeUninstaller = hash(uninstaller);
   await app.start();
   const credentials = await app.freshLogin();
-  const before = await verifyUsableRuntime(app, '0.0.13', 'source');
+  const before = await verifyUsableRuntime(app, '0.0.13', 'source', '43.2.0');
   const marker = 'Shell acceptance '+crypto.randomBytes(10).toString('hex');
   const row = await category(app, 'POST', marker);
   assert.ok(Number(row?.id) > 0 && row.name === marker, 'Expected a real business row created before update.');
@@ -278,6 +279,9 @@ try {
   ];
   const witnesses = protectedFiles.map(file => ({ file, sha256: hash(file) }));
   observations.before = { ...before, inventory: beforeFiles, row_id: row.id, uninstaller_sha256: beforeUninstaller };
+  const capabilities = await app.evaluate('window.posRuntime.getDeltaCapability()');
+  observations.desktop_capabilities = capabilities;
+  assert.equal(capabilities.shellDelta, true, 'The packaged source lacks the native shell update capability.');
 
   observeNetwork(app);
   await app.call('Network.enable');
@@ -288,6 +292,8 @@ try {
   await clickVisibleButton(app, checkButton);
   await app.until("document.body.innerText.includes('v0.0.14') && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version 0.0.14 install card');
   await screenshot(app, scenario+'-offered');
+  assert.equal(await app.evaluate("document.body.innerText.includes('تحديث ملفات تطبيق سطح المكتب')"), true,
+    'The offered update must be the signed shell file update.');
   await clickVisibleButton(app, installButton);
   await clickVisibleButton(app, 'تأكيد');
 
@@ -313,6 +319,7 @@ try {
     observations.candidate_failure = attempted;
     assert.equal(attempted.pid, outcome.candidate_pid);
     assert.ok(attempted.phpPort > 0 && attempted.mysqlPort > 0);
+    assert.equal(attempted.electronEngine, '43.8.11', 'The failing process must use the new Electron engine.');
     assert.equal(outcome.candidate_exit_code, 78);
     assert.ok(outcome.restored_pid !== outcome.source_pid && outcome.restored_pid !== outcome.candidate_pid);
   } else {
@@ -322,7 +329,8 @@ try {
   await app.reconnect();
   const needsLogin = await app.evaluate("Boolean(document.querySelector('input[type=email]'))");
   if (needsLogin) await app.login(credentials.email, credentials.password);
-  const after = await verifyUsableRuntime(app, expectedVersion, scenario === 'rollback' ? 'source' : 'target');
+  const after = await verifyUsableRuntime(app, expectedVersion,
+    scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11');
   const expectedPid = scenario === 'rollback' ? outcome.restored_pid : outcome.candidate_pid;
   assert.equal(after.processes.desktop.pid, expectedPid);
   for (const name of ['desktop', 'php', 'database']) {
