@@ -1293,6 +1293,10 @@ app.whenReady().then(async () => {
     assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     return app.getVersion();
   });
+  ipcMain.handle('runtime:is-shell-startup-fenced', (event) => {
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
+    return shellStartupFenced;
+  });
   ipcMain.handle('get-api-base-url', async (event) => {
     assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     try {

@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 contextBridge.exposeInMainWorld('posRuntime', {
   getApiBaseUrl: () => ipcRenderer.invoke('get-api-base-url'),
+  isShellStartupFenced: () => ipcRenderer.invoke('runtime:is-shell-startup-fenced'),
   getDeltaCapability: () => ipcRenderer.invoke('delta:get-capability'),
   enableLanAccess: () => ipcRenderer.invoke('network:enable-lan'),
   disableLanAccess: () => ipcRenderer.invoke('network:disable-lan'),

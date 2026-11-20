@@ -121,7 +121,7 @@ function SessionHydrator() {
   return null
 }
 
-function AppShell() {
+function AppShell({ runtimeFenced }: { runtimeFenced: boolean }) {
   const themeMode = useThemeStore((s) => s.mode)
   const toastStyle = {
     fontFamily: 'Tajawal, sans-serif',
@@ -134,15 +134,17 @@ function AppShell() {
 
   return (
     <BrowserRouter>
-      <NetworkAccessManager />
+      {!runtimeFenced && <NetworkAccessManager />}
       <ForcePasswordChangeModal />
       <ConfirmModal />
       <Toaster position="top-center" toastOptions={{ style: toastStyle }} />
-      <ConflictResolutionDialog />
       <SessionInteractionReset />
-      <SessionHydrator />
-      <SettingsLoader />
-      <SSELoader />
+      {!runtimeFenced && <>
+        <ConflictResolutionDialog />
+        <SessionHydrator />
+        <SettingsLoader />
+        <SSELoader />
+      </>}
       <Suspense fallback={<PageLoader />}>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -230,10 +232,10 @@ function AppShell() {
   )
 }
 
-export default function App() {
+export default function App({ runtimeFenced = false }: { runtimeFenced?: boolean }) {
   return (
     <ErrorBoundary>
-      <AppShell />
+      <AppShell runtimeFenced={runtimeFenced} />
     </ErrorBoundary>
   )
 }
