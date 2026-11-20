@@ -97,7 +97,7 @@ jobs:
               'frontend/package-lock.json', '.github/workflows/windows-setup.yml',
               '.github/workflows/promote-setup.yml', 'scripts/verify-original-setup-upgrade.ps1',
               'scripts/verify-setup-recovery.mjs', 'scripts/verify-update-notifications.mjs',
-              'scripts/verify-admin-update-center.mjs'
+              'scripts/verify-admin-update-center.mjs', 'scripts/verify-installer-package.mjs'
             )
             $changed = @(git diff --name-only $reviewedSource HEAD | Where-Object { $_ -cnotin $releaseFiles })
             if ($changed.Count) { throw "Unexpected changes to reviewed source: $($changed -join ', ')" }

@@ -16,14 +16,16 @@ for (const [archived, source] of [
   ['electron/assets/shell-update-public-key.pem', 'backend/certs/update_public_key.pem'],
   ['electron/assets/OwnedChildProcess.cs', 'backend/Native/OwnedChildProcess.cs'],
 ]) {
-  if (!entries.includes(archived) || statFile(archive, archived).unpacked ||
-      !extractFile(archive, archived).equals(fs.readFileSync(path.join(root, source)))) {
+  const archivePath = path.normalize(archived);
+  if (!entries.includes(archived) || statFile(archive, archivePath).unpacked ||
+      !extractFile(archive, archivePath).equals(fs.readFileSync(path.join(root, source)))) {
     throw Error('Missing or altered private shell updater asset: ' + archived);
   }
 }
 const broker = 'electron/assets/shell-update-broker.bin';
-if (!entries.includes(broker) || statFile(archive, broker).unpacked) throw Error('Missing packaged native shell supervisor broker.');
-const brokerImage = extractFile(archive, broker);
+const brokerArchivePath = path.normalize(broker);
+if (!entries.includes(broker) || statFile(archive, brokerArchivePath).unpacked) throw Error('Missing packaged native shell supervisor broker.');
+const brokerImage = extractFile(archive, brokerArchivePath);
 const pe = brokerImage.length >= 64 ? brokerImage.readUInt32LE(0x3c) : 0;
 if (brokerImage.length < 64 || brokerImage.readUInt16LE(0) !== 0x5a4d ||
     pe > brokerImage.length - 6 || brokerImage.readUInt32LE(pe) !== 0x00004550 || brokerImage.readUInt16LE(pe + 4) !== 0x8664) {

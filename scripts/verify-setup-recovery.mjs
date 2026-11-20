@@ -62,7 +62,7 @@ if (targetVersion === '0.0.14') {
   const keyFiles = [
     fs.readFileSync(path.join(repoRoot, 'backend/certs/update_public_key.pem')),
     fs.readFileSync(path.join(unpacked, 'backend/certs/update_public_key.pem')),
-    extractFile(asarPath, 'electron/assets/shell-update-public-key.pem')
+    extractFile(asarPath, path.normalize('electron/assets/shell-update-public-key.pem'))
   ];
   for (const key of keyFiles) {
     assert.equal(crypto.createHash('sha256').update(key).digest('hex'), keyHash,
