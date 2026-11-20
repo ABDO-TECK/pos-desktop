@@ -132,7 +132,11 @@ jobs:
               .name == "windows-setup" and .expired == false and .digest == $digest and
               .workflow_run.id == $run and .workflow_run.head_sha == $source
             '
-          gh api "$api/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/windows-setup.zip"
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/windows-setup.zip" \
+            "$GITHUB_API_URL/$api/actions/artifacts/$ARTIFACT_ID/zip"
           printf '%s  %s\n' "$ARTIFACT_SHA256" "$RUNNER_TEMP/windows-setup.zip" | sha256sum --check --strict
           unzip -q "$RUNNER_TEMP/windows-setup.zip" -d "$RUNNER_TEMP/setup-assets"
 
