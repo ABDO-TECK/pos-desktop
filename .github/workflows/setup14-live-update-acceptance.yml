@@ -1,0 +1,36 @@
+name: Setup 0.0.14 live Update Center acceptance
+
+on:
+  push:
+    branches:
+      - codex/setup14-live-feed-acceptance
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-update-check:
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the live update feed from the published Setup
+        shell: pwsh
+        run: ./scripts/verify-setup14-live-update.ps1
+
+      - name: Upload public Setup and Update Center evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup14-live-update-evidence
+          path: ${{ runner.temp }}/p14-live/evidence/
+          if-no-files-found: warn
+          retention-days: 14
