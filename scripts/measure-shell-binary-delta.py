@@ -87,8 +87,8 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
     changed = {record["path"]: record for record in manifest["files"]}
     retained = target_files.keys() - changed.keys()
     deleted = set(manifest["deleted_files"])
-    if not set(BENCHMARK_FILES).issubset(changed):
-        raise ValueError("The signed comparison is missing one or more requested changed files.")
+    if not set(BENCHMARK_FILES).issubset(changed.keys() & source_files.keys()):
+        raise ValueError("The signed comparison is missing a requested source/target file pair.")
     if deleted != source_files.keys() - target_files.keys():
         raise ValueError("Signed deleted files do not match the difference in inventories.")
     for name, entry in source_files.items():
@@ -117,9 +117,10 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
             with whole.open(entry) as src, extracted.open("wb") as dest:
                 shutil.copyfileobj(src, dest)
             verify_bytes(extracted, file)
-            encoding = "whole-file"
+            whole_operation = {**file, "encoding": "whole-file"}
+            operation = whole_operation
             input_file = extracted
-            if name in BENCHMARK_FILES:
+            if name in source_files:
                 original = source / name
                 updated = target / name
                 patch = scratch / "patch.zst"
@@ -132,8 +133,14 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
                 decode_seconds = time.perf_counter() - decode_started
                 verify_bytes(reconstructed, file)
                 patch_bytes = patch.stat().st_size
-                if patch_bytes < entry.compress_size:
-                    encoding = "zstd-patch-from"
+                patch_operation = {**file, "encoding": "zstd-patch-from", "source_sha256": source_files[name]["sha256"]}
+                whole_metadata = len(json.dumps({"files": [whole_operation]}, ensure_ascii=False, indent=2).encode("utf-8"))
+                patch_metadata = len(json.dumps({"files": [patch_operation]}, ensure_ascii=False, indent=2).encode("utf-8"))
+                # Both ZIP choices use the same entry path. Count the extra
+                # detached metadata needed to bind a patch to its base bytes.
+                patch_overhead = patch_metadata - whole_metadata
+                if patch_bytes + patch_overhead < entry.compress_size:
+                    operation = patch_operation
                     input_file = patch
                 metrics[name] = {
                     "source_sha256": source_files[name]["sha256"],
@@ -143,16 +150,14 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
                     "whole_file_compressed_entry_bytes": entry.compress_size,
                     "binary_patch_bytes": patch_bytes,
                     "entry_byte_savings_before_metadata": entry.compress_size - patch_bytes,
+                    "additional_patch_metadata_bytes": patch_overhead,
                     "reconstructed_patch_sha256": sha256(reconstructed),
-                    "selected_encoding": encoding,
+                    "selected_encoding": operation["encoding"],
                     "patch_creation_seconds": round(patch_seconds, 3),
                     "patch_reconstruction_seconds": round(decode_seconds, 3),
                 }
-            method = zipfile.ZIP_STORED if encoding == "zstd-patch-from" else zipfile.ZIP_DEFLATED
+            method = zipfile.ZIP_STORED if operation["encoding"] == "zstd-patch-from" else zipfile.ZIP_DEFLATED
             hybrid.write(input_file, name, compress_type=method)
-            operation = {**file, "encoding": encoding}
-            if encoding == "zstd-patch-from":
-                operation["source_sha256"] = source_files[name]["sha256"]
             operations.append(operation)
     descriptor = {
         "benchmark_format": 1,
@@ -166,6 +171,8 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
     }
     write_json(meta, descriptor)
     sign(scratch, meta, signature)
+    descriptor = json.loads(meta.read_bytes())
+    verify_bytes(payload, descriptor["package"])
 
     reconstruction_started = time.perf_counter()
     with zipfile.ZipFile(payload) as hybrid:
@@ -193,6 +200,10 @@ def measure(source, target, release, scratch, expected_zip_hash=None):
         "source_inventory_sha256": manifest["source_inventory_sha256"],
         "target_inventory_sha256": manifest["target_inventory_sha256"],
         "changed_files_reconstructed": len(changed),
+        "existing_changed_files_benchmarked": len(metrics),
+        "new_files_transferred_whole": len(changed.keys() - source_files.keys()),
+        "selected_patches": sum(operation["encoding"] == "zstd-patch-from" for operation in operations),
+        "highlighted_files": list(BENCHMARK_FILES),
         "retained_files_verified": len(retained),
         "deleted_files_verified": len(deleted),
         "files": metrics,
