@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'Legacy direct publish is disabled (Setup 13 requires promote-setup13.yml)'
+        description: 'Direct publication is disabled. Leave false to stage a verified Setup.'
         type: boolean
         default: false
 
@@ -24,8 +24,8 @@ jobs:
       channel: ${{ steps.release.outputs.channel }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - id: release
@@ -44,19 +44,20 @@ jobs:
         if: ${{ inputs.publish }}
         shell: pwsh
         run: |
-          Write-Error "Direct publication from windows-setup.yml is disabled. All Setup 0.0.13 releases must be promoted through promote-setup13.yml after release acceptance."
+          Write-Error "Direct publication from windows-setup.yml is disabled. Use the Setup promotion workflow after release acceptance."
           exit 1
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: |
             package-lock.json
             frontend/package-lock.json
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
@@ -75,11 +76,40 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Validate release readiness and source
         shell: pwsh
+        env:
+          SETUP_TAG: ${{ needs.metadata.outputs.tag }}
+          SETUP_CHANNEL: ${{ needs.metadata.outputs.channel }}
         run: |
-          node scripts/verify-setup13-release-readiness.mjs
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node scripts/verify-setup13-promotion-policy.mjs
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:SETUP_TAG -eq 'v0.0.13') {
+            node scripts/verify-setup13-release-readiness.mjs
+            node scripts/verify-setup13-promotion-policy.mjs
+          } elseif ($env:SETUP_TAG -eq 'v0.0.14' -and $env:SETUP_CHANNEL -eq 'stable') {
+            $reviewedSource = '6e49915aad7efb71145d3226595f777ed43f9116'
+            $publishedBaseline = 'ee5bf691c4acf6ffcd7730db1d7d0ed24f274787'
+            if ((git rev-parse 'v0.0.13^{}') -cne $publishedBaseline) {
+              throw 'The Setup 0.0.13 tag no longer matches its published source.'
+            }
+            git merge-base --is-ancestor $publishedBaseline $reviewedSource
+            git merge-base --is-ancestor $reviewedSource HEAD
+            $releaseFiles = @(
+              'version.json', 'package.json', 'package-lock.json', 'frontend/package.json',
+              'frontend/package-lock.json', '.github/workflows/windows-setup.yml',
+              '.github/workflows/promote-setup.yml', 'scripts/verify-original-setup-upgrade.ps1',
+              'scripts/verify-setup-recovery.mjs'
+            )
+            $changed = @(git diff --name-only $reviewedSource HEAD | Where-Object { $_ -cnotin $releaseFiles })
+            if ($changed.Count) { throw "Unexpected changes to reviewed source: $($changed -join ', ')" }
+            foreach ($file in $releaseFiles[1..4]) {
+              $baseline = (git show "${reviewedSource}:$file") -join "`n"
+              $candidate = (Get-Content -LiteralPath $file) -join "`n"
+              if ($candidate -cne ($baseline -replace '"version": "0\.0\.13"', '"version": "0.0.14"')) {
+                throw "$file differs from the reviewed manifest beyond the Setup version."
+              }
+            }
+          } else {
+            throw "Unsupported Setup release identity: $env:SETUP_TAG ($env:SETUP_CHANNEL)."
+          }
           node scripts/validate-release-source.mjs --mode working-tree --root .
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -95,7 +125,7 @@ jobs:
           php scripts/verify-phar-runtime.php
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Cache pinned vendor archives
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             build-tools/desktop-runtime-downloads
@@ -148,12 +178,14 @@ jobs:
         run: npm run electron:build -- --x64
       - name: Inspect package and installer metadata
         shell: pwsh
+        env:
+          SETUP_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           node scripts/verify-desktop-runtime.mjs --root dist-electron/win-unpacked/resources/portable --strict
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/verify-installer-package.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node scripts/verify-setup-recovery.mjs
+          node scripts/verify-setup-recovery.mjs $env:SETUP_TAG
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $tag = "v$((Get-Content package.json -Raw | ConvertFrom-Json).version)"
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
@@ -194,7 +226,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Save installer acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-acceptance
           path: ${{ runner.temp }}/pos-installer-evidence
@@ -207,7 +239,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Save 0.0.1 upgrade acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upgrade-acceptance-0.0.1
           path: ${{ runner.temp }}/pos-upgrade-evidence-0.0.1
@@ -220,13 +252,26 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Save 0.0.11 upgrade acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upgrade-acceptance-0.0.11
           path: ${{ runner.temp }}/pos-upgrade-evidence-0.0.11
           if-no-files-found: ignore
           retention-days: 14
-      - name: Verify future delta upgrade smoke on packaged Setup 12
+      - name: Verify upgrade from published Setup 0.0.13 to Setup 0.0.14
+        if: needs.metadata.outputs.tag == 'v0.0.14'
+        shell: pwsh
+        run: ./scripts/verify-original-setup-upgrade.ps1 -BaselineVersion 0.0.13 -EvidenceName pos-upgrade-evidence-0.0.13
+      - name: Save 0.0.13 upgrade acceptance evidence
+        if: ${{ always() && needs.metadata.outputs.tag == 'v0.0.14' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-acceptance-0.0.13
+          path: ${{ runner.temp }}/pos-upgrade-evidence-0.0.13
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Verify future delta upgrade smoke on packaged Setup 0.0.13
+        if: needs.metadata.outputs.tag == 'v0.0.13'
         shell: pwsh
         env:
           UPDATE_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
@@ -234,8 +279,8 @@ jobs:
           node scripts/verify-setup12-delta-upgrade.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Save delta smoke acceptance evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: ${{ always() && needs.metadata.outputs.tag == 'v0.0.13' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: delta-smoke-acceptance
           path: ${{ runner.temp }}/setup12-delta-upgrade-lab/evidence
@@ -247,7 +292,7 @@ jobs:
           ./scripts/smoke-packaged-app.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Upload verified installer assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-setup
           path: |

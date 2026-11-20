@@ -17,7 +17,8 @@ const portable = path.join(resources, 'portable');
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
 const ver = JSON.parse(fs.readFileSync(path.join(repoRoot, 'version.json'), 'utf8'));
 
-const targetVersion = '0.0.13';
+const targetVersion = (process.argv[2] ?? 'v0.0.13').replace(/^v/, '');
+assert.match(targetVersion, /^\d+\.\d+\.\d+$/, 'Expected a stable Setup release tag');
 assert.equal(pkg.version, targetVersion, `package.json version must be ${targetVersion}`);
 assert.equal(ver.version, targetVersion, `version.json version must be ${targetVersion}`);
 assert.equal(ver.application_version, targetVersion, `version.json application_version must be ${targetVersion}`);
@@ -50,6 +51,24 @@ const recoveryFiles = [
   'electron/services/delta-update-handoff.js',
   'electron/services/php-server.js'
 ];
+if (targetVersion === '0.0.14') {
+  recoveryFiles.push(
+    'electron/services/auto-updater.js',
+    'electron/services/shell-update.js',
+    'electron/services/shell-update-files.js',
+    'electron/services/shell-update-supervisor.js'
+  );
+  const keyHash = '6b735f5d7a69c1e33a7e839488765cd765e83d8114e86f0486655d1b4ae610bd';
+  const keyFiles = [
+    fs.readFileSync(path.join(repoRoot, 'backend/certs/update_public_key.pem')),
+    fs.readFileSync(path.join(unpacked, 'backend/certs/update_public_key.pem')),
+    extractFile(asarPath, 'electron/assets/shell-update-public-key.pem')
+  ];
+  for (const key of keyFiles) {
+    assert.equal(crypto.createHash('sha256').update(key).digest('hex'), keyHash,
+      'Setup 0.0.14 must retain the published production RSA update key');
+  }
+}
 
 for (const rel of recoveryFiles) {
   const repoFile = path.join(repoRoot, rel);
@@ -102,6 +121,19 @@ $files = [
     'Services/ChannelTransitionService.php' => 'backend/Services/ChannelTransitionService.php',
 ];
 
+if ($argv[3] === '0.0.14') {
+    $files += [
+        'version.json' => 'version.json',
+        'certs/update_public_key.pem' => 'backend/certs/update_public_key.pem',
+        'Services/GitHubReleaseProvider.php' => 'backend/Services/GitHubReleaseProvider.php',
+        'Services/ManifestSignatureService.php' => 'backend/Services/ManifestSignatureService.php',
+        'Services/ShellDeltaDeliveryService.php' => 'backend/Services/ShellDeltaDeliveryService.php',
+        'Services/ShellDeltaFileTransactionService.php' => 'backend/Services/ShellDeltaFileTransactionService.php',
+        'cli/shell-transaction.php' => 'backend/cli/shell-transaction.php',
+        'Native/NativeBrokerManifestVerifier.cs' => 'backend/Native/NativeBrokerManifestVerifier.cs'
+    ];
+}
+
 $normalizedPhar = str_replace('\\\\', '/', realpath($pharPath));
 
 foreach ($files as $pharRel => $repoRel) {
@@ -131,7 +163,7 @@ echo json_encode([
 exit(0);
 `;
 
-const phpResult = spawnSync(phpExe, ['-r', verifyPhpScript, shippedPhar, repoRoot], {
+const phpResult = spawnSync(phpExe, ['-r', verifyPhpScript, shippedPhar, repoRoot, targetVersion], {
   encoding: 'utf8',
   windowsHide: true
 });

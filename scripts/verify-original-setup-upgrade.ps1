@@ -1,14 +1,15 @@
 <#
 .SYNOPSIS
     Verify true end-to-end upgrade preservation from a baseline POS-Desktop-Setup EXE
-    (0.0.1 or 0.0.11) to the newly built Setup 0.0.12 on an ephemeral GitHub Actions runner.
+    to the newly built Setup on an ephemeral GitHub Actions runner.
 .DESCRIPTION
     1. Enforces GITHUB_ACTIONS and RUNNER_TEMP guards; verifies no pre-existing POS data.
     2. Validates runner temp install/evidence paths are safe and free of reparse points.
        EvidenceName must be a leaf directory name bound to RUNNER_TEMP with no path traversal.
-    3. Downloads baseline installer (0.0.1 or 0.0.11) and asserts pinned SHA256:
+    3. Downloads the baseline installer and asserts its pinned SHA256:
        - 0.0.1:  2b77447f1fc835560df2a5dbd7a7a24f8e137b193d242f38831e46d6de535d1a
        - 0.0.11: 4abfbd98898bf314d1531834166ec8f682710b90386920e7d71924e7fc92357d
+       - 0.0.13: 442f110ee7f188f2cb9d1a9b0b1859074e7b953bfb2230cb86449a64ee09c62e
     4. Silently installs baseline to an owned runner temp directory.
     5. Launches baseline UI to initialize admin credentials and printing trust, and while alive
        executes scripts/fixtures/channel-transition-capability.php 'prepare-compatibility' and 'seed'
@@ -24,8 +25,8 @@
        - Required runtime userData/qz-certs/private-key.pem and digital-certificate.pem pair,
          plus LAN HTTPS server key/cert pair when enabled (disallowing zero-private-key passes)
        - Custom business sentinel
-    7. Upgrades in-place using new Setup 0.0.12.
-    8. Launches upgraded UI (asserts version 0.0.12, existing admin identity retained, no credentials modal),
+    7. Upgrades in-place using the newly built Setup.
+    8. Launches upgraded UI (asserts target version, existing admin identity retained, no credentials modal),
        and while alive executes scripts/fixtures/channel-transition-capability.php 'inspect-compatibility'
        and 'inspect' to read live SQL business rows, settings, admin digest, ledger, and schema.
     9. Asserts complete preservation:
@@ -43,7 +44,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('0.0.1', '0.0.11')]
+    [ValidateSet('0.0.1', '0.0.11', '0.0.13')]
     [string]$BaselineVersion = '0.0.1',
     [string]$EvidenceName = 'pos-upgrade-evidence'
 )
@@ -108,6 +109,9 @@ if ($BaselineVersion -eq '0.0.1') {
 } elseif ($BaselineVersion -eq '0.0.11') {
     $expectedSha256 = '4abfbd98898bf314d1531834166ec8f682710b90386920e7d71924e7fc92357d'
     $downloadUrl = 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.11/POS-Desktop-Setup-0.0.11.exe'
+} elseif ($BaselineVersion -eq '0.0.13') {
+    $expectedSha256 = '442f110ee7f188f2cb9d1a9b0b1859074e7b953bfb2230cb86449a64ee09c62e'
+    $downloadUrl = 'https://github.com/ABDO-TECK/pos-desktop/releases/download/v0.0.13/POS-Desktop-Setup-0.0.13.exe'
 } else {
     throw "Unsupported baseline version: $BaselineVersion"
 }
@@ -340,7 +344,7 @@ try {
     $sentinelGuid = [guid]::NewGuid().ToString('N')
     Set-Content -LiteralPath $sentinelFile -Value $sentinelGuid
 
-    # 4. In-place upgrade with Setup 0.0.12
+    # 4. In-place upgrade with the newly built Setup
     Upgrade-Pos
 
     # 5. Launch upgraded UI and while runtime is alive, execute fixture 'inspect-compatibility,inspect'
