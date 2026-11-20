@@ -471,8 +471,16 @@ try {
   for (const { file, sha256 } of witnesses) assert.equal(hash(file), sha256, 'Protected file changed: '+path.basename(file));
   assert.equal(hash(uninstaller), beforeUninstaller, 'Installer-owned uninstaller bytes changed.');
   const applies = updateNetwork.filter(event => event.path.endsWith('/updates/apply'));
-  assert.equal(applies.filter(event => event.type === 'request' && event.method === 'POST').length, 1);
-  assert.equal(applies.filter(event => event.type === 'response' && event.status >= 200 && event.status < 300).length, 1);
+  const submissions = applies.filter(event => event.type === 'request' && event.method === 'POST');
+  assert.equal(submissions.length, 1, 'Expected exactly one Update Center submission.');
+  const [submission] = submissions;
+  const responses = applies.filter(event => event.type === 'response' && event.request_id === submission.request_id);
+  assert.equal(responses.length, 1, 'Expected one response to the sole update POST.');
+  const [admission] = responses;
+  assert.ok(admission.status >= 200 && admission.status < 300, 'The submitted update POST was not admitted.');
+  const jobId = admission.result?.data?.job_id;
+  assert.ok(Number.isSafeInteger(jobId) && jobId > 0, 'The submitted update POST did not return a valid background job.');
+  observations.apply_job_id = jobId;
   assert.ok(!updateNetwork.some(event => event.path.endsWith('/updates/rollback')), 'A rollback API call was observed.');
   for (const name of assetNames) {
     const bytes = fs.statSync(path.join(releaseRoot, name)).size;
