@@ -220,9 +220,10 @@ if (fs.existsSync('release-notes.md')) {
 if (version === '0.0.14') {
   releaseNotes += '\nIf you use Setup 0.0.13, close POS Desktop and run this Setup over your existing installation. ' +
     'The in-place upgrade keeps your business data, settings, and device keys.\n\n' +
-    'In the Admin Update Center, select **التحقق من التحديثات** (Check for updates). ' +
-    'The desktop updater checks stable Setup and native shell updates in ' +
-    '[ABDO-TECK/pos-desktop releases](https://github.com/ABDO-TECK/pos-desktop/releases).\n';
+    'In the Admin Update Center, select **التحقق من التحديثات** (Check for updates) to check for signed ' +
+    'application and native shell updates. [ABDO-TECK/pos-desktop-updates releases](https://github.com/ABDO-TECK/pos-desktop-updates/releases)\n\n' +
+    'Download full Windows Setup installers from the desktop repository. ' +
+    '[ABDO-TECK/pos-desktop releases](https://github.com/ABDO-TECK/pos-desktop/releases)\n';
 }
 
 // GitHub REST API Helper
