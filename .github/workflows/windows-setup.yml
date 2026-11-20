@@ -134,10 +134,8 @@ jobs:
       - name: Prepare portable PHP, MariaDB, Java and QZ Tray
         shell: pwsh
         run: |
-          npm run prepare:desktop-runtime
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npm run prepare:print-runtime
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/prepare-desktop-runtime.ps1
+          ./scripts/prepare-print-runtime.ps1
           npm run verify:desktop-runtime
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify stable and beta delta flows in isolated deployments
