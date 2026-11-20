@@ -2,18 +2,18 @@
 /**
  * scripts/publish-setup-release.mjs
  *
- * Hardened GitHub Actions publisher for Setup 0.0.13.
+ * GitHub Actions publisher for verified stable Setup artifacts.
  *
  * Enforces:
  *   1. Restricted strictly to ephemeral GitHub Actions under ABDO-TECK/pos-desktop.
- *   2. Synchronized metadata guard (version 0.0.13, channel stable, release_type setup).
- *   3. Expected source commit SHA binding: GITHUB_SHA required; SOURCE_SHA if present must equal GITHUB_SHA.
+ *   2. Synchronized version metadata, stable channel, and Setup release type.
+ *   3. Expected source commit SHA binding to the release workflow or verified build checkout.
  *   4. Reparse/symlink rejection on assetsDir, runnerTemp, and download views.
  *   5. Pre-check: remote tag MUST pre-exist on GitHub and peel to exact expected commit (fail 404 and drift).
  *   6. Pre-check: ANY pre-existing release (draft or published) REFUSES to proceed (fail-closed, 0 DELETE paths).
  *   7. Exact 5-asset set verification in release-assets:
- *      - POS-Desktop-Setup-0.0.13.exe
- *      - POS-Desktop-Setup-0.0.13.exe.blockmap
+ *      - POS-Desktop-Setup-<version>.exe
+ *      - POS-Desktop-Setup-<version>.exe.blockmap
  *      - latest.yml
  *      - deployment-inventory.json
  *      - SHA256SUMS.txt
@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -82,20 +83,20 @@ const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 assert.ok(token && token.trim().length > 0, 'GH_TOKEN or GITHUB_TOKEN environment variable is required');
 
 // 2. Metadata Guards
+const tag = process.env.RELEASE_TAG || 'v0.0.13';
+assert.ok(['v0.0.13', 'v0.0.14'].includes(tag), `Unsupported Setup release tag: ${tag}`);
+const version = tag.slice(1);
 const versionMeta = JSON.parse(fs.readFileSync('version.json', 'utf8'));
-assert.equal(versionMeta.version, '0.0.13', 'version.json version must be 0.0.13');
-assert.equal(versionMeta.application_version, '0.0.13', 'version.json application_version must be 0.0.13');
-assert.equal(versionMeta.installer_version, '0.0.13', 'version.json installer_version must be 0.0.13');
+assert.equal(versionMeta.version, version, 'version.json version must match the release tag');
+assert.equal(versionMeta.application_version, version, 'version.json application_version must match the release tag');
+assert.equal(versionMeta.installer_version, version, 'version.json installer_version must match the release tag');
 assert.equal(versionMeta.channel, 'stable', 'version.json channel must be stable');
 assert.equal(versionMeta.release_type, 'setup', 'version.json release_type must be setup');
 
 if (fs.existsSync('package.json')) {
   const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-  assert.equal(rootPkg.version, '0.0.13', 'package.json version must be 0.0.13');
+  assert.equal(rootPkg.version, version, 'package.json version must match the release tag');
 }
-
-const tag = process.env.RELEASE_TAG || 'v0.0.13';
-assert.equal(tag, 'v0.0.13', `RELEASE_TAG must be v0.0.13 (got: ${tag})`);
 
 const githubSha = process.env.GITHUB_SHA;
 assert.ok(
@@ -104,29 +105,37 @@ assert.ok(
 );
 
 const sourceSha = process.env.SOURCE_SHA;
-if (sourceSha) {
+if (version === '0.0.14') {
+  assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+  assert.equal(process.env.GITHUB_WORKFLOW_REF,
+    `${repository}/.github/workflows/promote-setup.yml@refs/heads/codex/setup14-promote`);
+  assert.match(sourceSha ?? '', /^[a-f0-9]{40}$/, 'Expected the verified Setup build SHA');
+  assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), sourceSha);
+  assert.equal(versionMeta.update_channel, 'stable');
+} else if (sourceSha) {
   assert.equal(
     sourceSha.toLowerCase(),
     githubSha.toLowerCase(),
     `SOURCE_SHA (${sourceSha}) must equal GITHUB_SHA (${githubSha})`
   );
 }
-const expectedSha = githubSha;
+const expectedSha = version === '0.0.14' ? sourceSha : githubSha;
 
 const isPrerelease = process.env.PRERELEASE === 'true';
-assert.equal(isPrerelease, false, 'Setup 0.0.13 is a stable release; PRERELEASE must be false');
+assert.equal(isPrerelease, false, 'Setup must be a stable release');
 
 const assetsDir = path.resolve(process.argv[2] || 'release-assets');
 assert.ok(fs.existsSync(assetsDir), `Assets directory missing: ${assetsDir}`);
 assertNoReparse(assetsDir);
 
 // 3. Exact 5-Asset Set & Case-Collision Checks
-console.log('--- Hardened Setup Release Publisher for 0.0.13 (Stable) ---');
+console.log(`--- Setup Release Publisher for ${version} (Stable) ---`);
 console.log(`[1/7] Verifying exact 5-asset artifact set in ${assetsDir}...`);
 
+const installerName = `POS-Desktop-Setup-${version}.exe`;
 const EXPECTED_PAYLOAD_ASSETS = [
-  'POS-Desktop-Setup-0.0.13.exe',
-  'POS-Desktop-Setup-0.0.13.exe.blockmap',
+  installerName,
+  `${installerName}.blockmap`,
   'latest.yml',
   'deployment-inventory.json'
 ];
@@ -181,6 +190,21 @@ for (const line of checksumLines) {
 }
 assert.deepEqual([...coveredFiles].sort(), EXPECTED_PAYLOAD_ASSETS.slice().sort(), `${CHECKSUMS_FILE} coverage mismatch`);
 console.log('      PASS: Exact 5-asset set and SHA256SUMS.txt verified.');
+
+if (version === '0.0.14') {
+  assert.match(process.env.SETUP_SHA256 ?? '', /^[a-f0-9]{64}$/, 'Expected the staged Setup SHA-256');
+  assert.equal(localHashes.get(installerName), process.env.SETUP_SHA256, 'Staged installer SHA-256 mismatch');
+  const inventory = JSON.parse(fs.readFileSync(path.join(assetsDir, 'deployment-inventory.json'), 'utf8'));
+  assert.equal(inventory.version, version, 'Deployment inventory version mismatch');
+  const latestYaml = fs.readFileSync(path.join(assetsDir, 'latest.yml'), 'utf8');
+  const latestField = (name) => new RegExp(`^${name}:\\s*(\\S+)\\s*$`, 'm').exec(latestYaml)?.[1];
+  const installerBytes = fs.readFileSync(path.join(assetsDir, installerName));
+  assert.equal(latestField('version'), version);
+  assert.equal(latestField('path'), installerName);
+  assert.equal(latestField('sha512'), crypto.createHash('sha512').update(installerBytes).digest('base64'));
+  console.log(`Verified ${installerName} (${installerBytes.length} bytes, SHA-256 ${localHashes.get(installerName)})`);
+  if (process.env.SETUP_VERIFY_ONLY === 'true') process.exit(0);
+}
 
 // Step 5: Read release notes
 console.log('[3/7] Loading release notes...');
@@ -263,7 +287,7 @@ const createRes = await apiRequest(`/repos/${repository}/releases`, {
   body: JSON.stringify({
     tag_name: tag,
     target_commitish: expectedSha,
-    name: `POS Desktop ${tag}`,
+    name: version === '0.0.14' ? `POS Desktop Setup ${tag}` : `POS Desktop ${tag}`,
     body: releaseNotes,
     draft: true,
     prerelease: false
@@ -394,7 +418,7 @@ assert.equal(patchRes.data.prerelease, false, 'Published release prerelease must
 
 // Step 13: Final Public Download Verification into unique owned mkdtemp view in RUNNER_TEMP
 console.log('      Verifying public download URLs for all 5 assets into fresh RUNNER_TEMP view...');
-const publicViewDir = fs.mkdtempSync(path.join(runnerTemp, 'setup13-public-view-'));
+const publicViewDir = fs.mkdtempSync(path.join(runnerTemp, 'setup-public-view-'));
 assertNoReparse(publicViewDir);
 
 const publicCheckRes = await apiRequest(`/repos/${repository}/releases/tags/${tag}`);
@@ -436,6 +460,6 @@ for (const publicAsset of publicAssets) {
 fs.rmSync(publicViewDir, { recursive: true, force: true });
 
 console.log('\n===============================================================');
-console.log(` SETUP 0.0.13 PUBLISHED AND CRYPTOGRAPHICALLY VERIFIED!`);
+console.log(` SETUP ${version} PUBLISHED AND CRYPTOGRAPHICALLY VERIFIED!`);
 console.log(` Release URL: ${publicCheckRes.data.html_url}`);
 console.log('===============================================================');

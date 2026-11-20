@@ -5,11 +5,30 @@ on:
       run_id:
         description: Successful Windows Setup validation run to publish
         required: true
+      source_sha:
+        description: Exact reviewed Setup 0.0.14 build commit
+        type: string
+      artifact_id:
+        description: Immutable windows-setup artifact ID from that run
+        type: string
+      artifact_sha256:
+        description: SHA-256 of the immutable artifact archive
+        type: string
+      setup_sha256:
+        description: Verified Setup executable SHA-256 (required for publication)
+        type: string
+      publish:
+        description: Publish verified Setup 0.0.14 as stable and latest
+        type: boolean
+        default: false
 permissions:
-  contents: write
-  actions: read
+  contents: read
 jobs:
   publish:
+    if: github.ref != 'refs/heads/codex/setup14-promote'
+    permissions:
+      contents: write
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - name: Bind artifact to the release source tag
@@ -58,3 +77,109 @@ jobs:
           else
             gh release create v0.0.1 ./* --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title 'POS Desktop Setup v0.0.1' --notes-file ../release-notes.md
           fi
+
+  setup14:
+    if: github.ref == 'refs/heads/codex/setup14-promote'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: publish-setup-0.0.14
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: v0.0.14
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      BUILD_RUN_ID: ${{ inputs.run_id }}
+      ARTIFACT_ID: ${{ inputs.artifact_id }}
+      ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+      SETUP_SHA256: ${{ inputs.setup_sha256 }}
+      PUBLISH: ${{ inputs.publish }}
+    steps:
+      - name: Verify staged artifact identity and required acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = ABDO-TECK/pos-desktop
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ && "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          if [[ "$PUBLISH" == true ]]; then [[ "$SETUP_SHA256" =~ ^[a-f0-9]{64}$ ]]; fi
+
+          api="repos/$GITHUB_REPOSITORY"
+          gh api "$api/actions/runs/$BUILD_RUN_ID" | jq -e --arg source "$SOURCE_SHA" '
+            .head_sha == $source and .head_branch == "codex/setup14-release" and
+            .head_repository.full_name == "ABDO-TECK/pos-desktop" and
+            .workflow_id == 389863444 and .path == ".github/workflows/windows-setup.yml" and
+            .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"
+          '
+          gh api "$api/actions/runs/$BUILD_RUN_ID/jobs" | jq -e '
+            [.jobs[] | select(.name == "build" and .conclusion == "success") |
+              .steps[] | select(.conclusion == "success") | .name] as $steps |
+            [
+              "Inspect package and installer metadata",
+              "Verify actual Setup install, upgrade, uninstall and fresh reinstall",
+              "Verify true upgrade from original 0.0.1 baseline to new Setup",
+              "Verify true upgrade from original 0.0.11 baseline to new Setup",
+              "Verify upgrade from published Setup 0.0.13 to Setup 0.0.14",
+              "Start packaged app on the clean runner",
+              "Upload verified installer assets"
+            ] - $steps == []
+          '
+          gh api "$api/actions/artifacts/$ARTIFACT_ID" | jq -e \
+            --arg source "$SOURCE_SHA" --arg digest "sha256:$ARTIFACT_SHA256" --argjson run "$BUILD_RUN_ID" '
+              .name == "windows-setup" and .expired == false and .digest == $digest and
+              .workflow_run.id == $run and .workflow_run.head_sha == $source
+            '
+          gh api "$api/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/windows-setup.zip"
+          printf '%s  %s\n' "$ARTIFACT_SHA256" "$RUNNER_TEMP/windows-setup.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/windows-setup.zip" -d "$RUNNER_TEMP/setup-assets"
+
+      - name: Check out the verified build source and the release publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: build-source
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: publishing
+          persist-credentials: false
+          sparse-checkout: scripts/publish-setup-release.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Verify installer bytes, metadata and complete release asset set
+        working-directory: build-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SETUP_VERIFY_ONLY: 'true'
+        run: |
+          set -euo pipefail
+          export SETUP_SHA256="${SETUP_SHA256:-$(sha256sum "$RUNNER_TEMP/setup-assets/POS-Desktop-Setup-0.0.14.exe" | cut -d ' ' -f 1)}"
+          node ../publishing/scripts/publish-setup-release.mjs "$RUNNER_TEMP/setup-assets"
+          printf '### Verified stable Setup 0.0.14\n\n- Build run %s\n- Source `%s`\n- Artifact %s\n- Setup SHA-256 `%s`\n' \
+            "$BUILD_RUN_ID" "$SOURCE_SHA" "$ARTIFACT_ID" "$SETUP_SHA256" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the verified archive as stable and latest
+        if: inputs.publish
+        working-directory: build-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY"
+          release_count=$(gh api --paginate "$api/releases" --jq '.[] | select(.tag_name == "v0.0.14") | .id' | wc -l)
+          [[ "$release_count" == 0 ]]
+          tag_ref="$api/git/ref/tags/$RELEASE_TAG"
+          if ! tag=$(gh api "$tag_ref"); then
+            tag=$(gh api --method POST "$api/git/refs" -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_SHA")
+          fi
+          jq -e --arg source "$SOURCE_SHA" '.object.type == "commit" and .object.sha == $source' <<< "$tag"
+          node ../publishing/scripts/publish-setup-release.mjs "$RUNNER_TEMP/setup-assets"
+          gh api "$api/releases/latest" | jq -e '.tag_name == "v0.0.14" and .draft == false and .prerelease == false'
