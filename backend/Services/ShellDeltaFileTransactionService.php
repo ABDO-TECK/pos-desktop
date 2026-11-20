@@ -20,12 +20,8 @@ use ZipArchive;
  * CRITICAL ARCHITECTURAL CONSTRAINTS AND SAFETY BOUNDARIES:
  * - UNSAFE TO INTEGRATE WITHOUT CALLER-ENFORCED WINDOWS PROCESS QUIESCENCE,
  *   LAUNCH INTERLOCK, DATABASE COLD BACKUP, AND POST-RECOVERY HEALTH VERIFICATION.
- * - This core is strictly an internal library service. It is NOT wired to the product
- *   and MUST NOT advertise installed-update capability.
- * - Does NOT implement process quiescence, launch interlock, DB cold backups, or
- *   health finalization. Caller is strictly required to enforce those prerequisites.
- * - No commit or health finalization API exists in this core; healthy native commit
- *   is deferred to a future step.
+ * - The supervisor owns process quiescence, launch interlock, DB cold backups and
+ *   the product health probe. The core commits only the verified target inventory.
  * - No database or engine upgrade functionality: any modification or deletion of
  *   files under resources/portable/mysql/** or any schema SQL scripts is strictly rejected.
  * - Purpose is restricted to 'regular'; 'bootstrap_completion' fails closed because
@@ -46,6 +42,7 @@ final class ShellDeltaFileTransactionService
     public const PHASE_FILES_APPLIED = 'files_applied_awaiting_health';
     public const PHASE_ROLLING_BACK = 'rolling_back';
     public const PHASE_ROLLED_BACK = 'rolled_back';
+    public const PHASE_COMMITTED = 'committed';
 
     public const OWNER_MARKER_FILENAME = '.pos_transaction_owner';
     public const JOURNAL_FILENAME = 'journal.json';
@@ -87,8 +84,11 @@ final class ShellDeltaFileTransactionService
         string $rawManifest,
         string $signature,
         string $zipPath,
-        array $installedContext
+        array $installedContext,
+        ?string $operationId = null
     ): array {
+        $operationId ??= 'tx_' . bin2hex(random_bytes(16));
+        $this->assertOperationId($operationId);
         [$canonicalRoot, $canonicalStateBase] = $this->validateCanonicalDirectories($root, $privateStateBase);
         $this->validateInstalledContext($installedContext);
 
@@ -117,7 +117,6 @@ final class ShellDeltaFileTransactionService
             }
 
             // Allocate new nonce workspace
-            $operationId = 'tx_' . bin2hex(random_bytes(16));
             $workspace = $this->allocateWorkspace($canonicalStateBase, $operationId, $canonicalRoot);
 
             // Copy bounded manifest, signature, and ZIP into workspace/sealed
@@ -368,6 +367,104 @@ final class ShellDeltaFileTransactionService
     }
 
     /**
+     * Publish an irreversible health decision only after the supervisor has
+     * authenticated its restarted child and measured product readiness.
+     *
+     * The journal is committed before its active marker is released. A retry
+     * can finish releasing that marker without ever rolling back this decision.
+     */
+    public function commitAfterHealth(
+        string $root,
+        string $privateStateBase,
+        string $operationId,
+        array $installedContext,
+        string $observedVersion,
+        string $targetDigest
+    ): array {
+        $this->assertOperationId($operationId);
+        [$canonicalRoot, $stateBase] = $this->validateCanonicalDirectories($root, $privateStateBase);
+        $this->validateInstalledContext($installedContext);
+        $rootDigest = $this->getRootDigest($canonicalRoot);
+        $lock = $this->acquireRootLock($stateBase, $rootDigest);
+        try {
+            $workspace = $stateBase . DIRECTORY_SEPARATOR . 'workspaces' . DIRECTORY_SEPARATOR . $operationId;
+            $this->assertWorkspaceOwnership($workspace, $operationId, $canonicalRoot, $stateBase);
+            $journal = $this->readAndValidateJournal($workspace, $operationId, $canonicalRoot);
+            unset($installedContext['root']);
+            [$raw, , $descriptor] = $this->reverifySealedManifest($workspace, $installedContext);
+            $this->enforceCorePolicyConstraints($descriptor);
+            if (hash('sha256', $raw) !== $journal['descriptor_digest'] ||
+                !in_array($journal['phase'], [self::PHASE_FILES_APPLIED, self::PHASE_COMMITTED], true) ||
+                $observedVersion !== $descriptor['version'] ||
+                $targetDigest !== $descriptor['target_inventory_sha256'] ||
+                $observedVersion !== ($journal['applied_version'] ?? null) ||
+                $targetDigest !== ($journal['applied_target_digest'] ?? null)) {
+                throw new RuntimeException('Health decision does not identify an applied signed target.');
+            }
+            $markerPath = $this->getActiveMarkerPath($stateBase, $rootDigest);
+            $marker = null;
+            if (file_exists($markerPath) || is_link($markerPath) || $journal['phase'] !== self::PHASE_COMMITTED) {
+                $marker = $this->readAndValidateActiveMarker($markerPath, $operationId, $canonicalRoot, $workspace);
+            }
+            $inventory = $this->manifests->buildInventory($canonicalRoot, $descriptor['native_version']);
+            if ($inventory['version'] !== $observedVersion ||
+                ShellDeltaManifestService::canonicalInventoryDigest($inventory) !== $targetDigest) {
+                throw new RuntimeException('Installed target inventory changed during probation.');
+            }
+            if ($journal['phase'] !== self::PHASE_COMMITTED) {
+                $journal['phase'] = self::PHASE_COMMITTED;
+                $this->writeJournal($workspace, $journal);
+            }
+            if ($marker !== null) {
+                $this->releaseActiveMarker($markerPath, $operationId, $canonicalRoot, $workspace, $marker);
+            }
+            return ['operation_id' => $operationId, 'phase' => self::PHASE_COMMITTED,
+                'version' => $observedVersion, 'target_inventory_sha256' => $targetDigest];
+        } finally {
+            $this->releaseRootLock($lock);
+        }
+    }
+
+    /** Inspect the supervisor's own operation after an interrupted child process. */
+    public function operationPhase(string $root, string $privateStateBase, string $operationId): string
+    {
+        $this->assertOperationId($operationId);
+        [$canonicalRoot, $stateBase] = $this->validateCanonicalDirectories($root, $privateStateBase);
+        $rootDigest = $this->getRootDigest($canonicalRoot);
+        $lock = $this->acquireRootLock($stateBase, $rootDigest);
+        try {
+            $workspace = $stateBase . DIRECTORY_SEPARATOR . 'workspaces' . DIRECTORY_SEPARATOR . $operationId;
+            $markerPath = $this->getActiveMarkerPath($stateBase, $rootDigest);
+            $hasMarker = file_exists($markerPath) || is_link($markerPath);
+            if ($hasMarker) {
+                $this->readAndValidateActiveMarker($markerPath, $operationId, $canonicalRoot, $workspace);
+            }
+            if (!$hasMarker && !is_file($workspace . DIRECTORY_SEPARATOR . self::JOURNAL_FILENAME)) {
+                return 'none';
+            }
+            $this->assertWorkspaceOwnership($workspace, $operationId, $canonicalRoot, $stateBase);
+            $phase = $this->readAndValidateJournal($workspace, $operationId, $canonicalRoot)['phase'];
+            // Prepare publishes its marker last. Without it, no apply was authorized.
+            if (!$hasMarker && $phase === self::PHASE_PREPARED) {
+                return 'none';
+            }
+            if (!$hasMarker && !in_array($phase, [self::PHASE_COMMITTED, self::PHASE_ROLLED_BACK], true)) {
+                throw new RuntimeException('An unfinished file transaction has lost its active marker.');
+            }
+            return $phase;
+        } finally {
+            $this->releaseRootLock($lock);
+        }
+    }
+
+    private function assertOperationId(string $operationId): void
+    {
+        if (preg_match('/^tx_[a-f0-9]{32}$/D', $operationId) !== 1) {
+            throw new RuntimeException('Invalid shell update operation ID.');
+        }
+    }
+
+    /**
      * Roll back an operation: restore modified/deleted source files from sealed
      * backups and remove added target files. version.json is restored LAST.
      * Idempotent across repeated executions and process crashes.
@@ -463,6 +560,10 @@ final class ShellDeltaFileTransactionService
             }
 
             $this->enforceCorePolicyConstraints($descriptor);
+
+            if ($journal['phase'] === self::PHASE_COMMITTED) {
+                throw new RuntimeException('A committed shell update cannot be rolled back by crash recovery.');
+            }
 
             // Check if root already physically satisfies full source inventory
             $alreadyExactSource = $this->isRootExactSource($canonicalRoot, $descriptor);
@@ -1305,11 +1406,14 @@ final class ShellDeltaFileTransactionService
      *
      * @param array<string, mixed> $descriptor
      */
-    private function enforceCorePolicyConstraints(array $descriptor): void
+    public static function enforceCorePolicyConstraints(array $descriptor): void
     {
         // 1. Accept regular purpose ONLY; bootstrap_completion fails closed
         if (($descriptor['purpose'] ?? null) !== 'regular') {
             throw new RuntimeException("Only 'regular' purpose is supported by this transaction core. 'bootstrap_completion' fails closed.");
+        }
+        if (($descriptor['migrations'] ?? null) !== []) {
+            throw new RuntimeException('Shell file transactions do not run database migrations.');
         }
 
         // 2. Require source and target data compatibility identical (strict four keys value compare)
@@ -1642,6 +1746,7 @@ final class ShellDeltaFileTransactionService
             self::PHASE_FILES_APPLIED,
             self::PHASE_ROLLING_BACK,
             self::PHASE_ROLLED_BACK,
+            self::PHASE_COMMITTED,
         ], true)) {
             throw new RuntimeException("Invalid journal phase: {$journal['phase']}");
         }
@@ -2109,6 +2214,15 @@ final class ShellDeltaFileTransactionService
         }
         if (str_starts_with($normRoot, $normState . '\\')) {
             throw new RuntimeException("Product root cannot reside inside the private state base.");
+        }
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            $productDevice = @stat($canonicalRoot)['dev'] ?? null;
+            $stateDevice = @stat($canonicalStateBase)['dev'] ?? null;
+            if ($productDevice === null || $productDevice !== $stateDevice ||
+                strtolower(substr($canonicalRoot, 0, 2)) !== strtolower(substr($canonicalStateBase, 0, 2))) {
+                throw new RuntimeException('Product root and workspace must share a volume for atomic publication.');
+            }
         }
 
         return [$canonicalRoot, $canonicalStateBase];

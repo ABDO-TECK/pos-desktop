@@ -23,6 +23,15 @@ $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/';
 $pharRunning = Phar::running(false);
 $baseDir = $pharRunning ? dirname($pharRunning) : __DIR__;
 
+if (PHP_SAPI === 'cli-server' && $pharRunning &&
+    (getenv('POS_SHELL_PROBATION_TOKEN') || getenv('POS_SHELL_SOURCE_GATE'))) {
+    $pharRoot = 'phar://' . $pharRunning;
+    require_once $pharRoot . '/vendor/autoload.php';
+    if (\App\Services\ShellUpdateHealthService::restrictHttpTraffic($uri, $pharRoot)) {
+        return true;
+    }
+}
+
 /**
  * Resolve a requested static path and prove that it remains inside its root.
  *

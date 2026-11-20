@@ -10,7 +10,7 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
   const temporary=fs.realpathSync(process.env.RUNNER_TEMP).toLowerCase()+path.sep;
   assert.ok(fs.realpathSync(application).toLowerCase().startsWith(temporary),'Application must be isolated');
   fs.mkdirSync(evidence,{recursive:true});
-  let child,socket,sequence=0;
+  let child,socket,sequence=0,consoleListenerAdded=false;
   const pending=new Map();
   const listeners=new Set();
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -36,16 +36,37 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
     }while(Date.now()<deadline);
     throw Error('Timed out: '+label);
   }
-  async function start(){
+  async function start(port = 19231){
     const env={...process.env,...extraEnv};for(const key of ['GH_TOKEN','GITHUB_TOKEN','UPDATE_PRIVATE_KEY'])delete env[key];
     const output=fs.openSync(path.join(evidence,'desktop.log'),'a');
-    child=spawn(path.join(application,'POS Desktop.exe'),['--remote-debugging-port=19231'],{cwd:application,env,windowsHide:true,stdio:['ignore',output,output]});fs.closeSync(output);
-    const deadline=Date.now()+240000;let target;
-    do{if(child.exitCode!==null)throw Error('Desktop exited during startup');try{target=(await(await fetch('http://127.0.0.1:19231/json/list')).json()).find(t=>t.type==='page'&&t.url.startsWith('app://pos-app/'));}catch{}if(target)break;await delay(500);}while(Date.now()<deadline);
-    assert.ok(target,'Isolated desktop page missing');socket=new WebSocket(target.webSocketDebuggerUrl);
+    child=spawn(path.join(application,'POS Desktop.exe'),['--remote-debugging-port='+port],{cwd:application,env,windowsHide:true,stdio:['ignore',output,output]});fs.closeSync(output);
+    await reconnect(true, port);
+  }
+  async function reconnect(expectInitialChild = false, port = 19231){
+    if (socket?.readyState===WebSocket.OPEN) socket.close();
+    const deadline = Date.now() + (expectInitialChild ? 240_000 : 60_000);
+    let target;
+    let lastDiscovery;
+    do {
+      if (expectInitialChild && child.exitCode !== null) throw Error('Desktop exited during startup');
+      try {
+        const response = await fetch('http://127.0.0.1:'+port+'/json/list', { signal: AbortSignal.timeout(2000) });
+        const targets = await response.json();
+        target = targets.find(page => page.type === 'page' && page.url.startsWith('app://pos-app/'));
+        lastDiscovery = targets.map(page => ({
+          type: page.type,
+          location: /^app:\/\/pos-app\//.test(page.url) ? new URL(page.url).pathname : page.url?.split(':')[0],
+        }));
+      } catch (err) {
+        lastDiscovery = { transport: err.cause?.code || err.name };
+      }
+      if (!target) await delay(500);
+    } while (!target && Date.now() < deadline);
+    assert.ok(target, 'Isolated desktop page missing at CDP port '+port+': '+JSON.stringify(lastDiscovery));
+    socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
     socket.onmessage=event=>{const reply=JSON.parse(event.data);const resolve=pending.get(reply.id);if(resolve){pending.delete(reply.id);resolve(reply);}if(reply.method)for(const listener of listeners)listener(reply.method,reply.params);};
-    listeners.add((method,params)=>{
+    if (!consoleListenerAdded) listeners.add((method,params)=>{
       if(method==='Runtime.consoleAPICalled'){
         const text=(params.args||[]).map(a=>a.value??a.description??JSON.stringify(a)).join(' ');
         console.log(`[Renderer Console ${params.type}] ${text}`);
@@ -54,6 +75,7 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
         console.error(`[Renderer Exception] ${desc}`);
       }
     });
+    consoleListenerAdded=true;
     await call('Runtime.enable');
     await call('Console.enable').catch(()=>{});
     await until('Boolean(window.electronAPI && document.querySelector("form, a[href=\'/settings\']"))','initial page',240000);
@@ -78,5 +100,5 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
   }
   async function system(){await until('Boolean(document.querySelector("a[href=\'/settings\']"))','settings link');await evaluate('document.querySelector("a[href=\'/settings\']").click()');await until('location.pathname==="/settings"','settings route');await click('النظام والصيانة');}
   async function screenshot(name){await evaluate('document.querySelector("[data-testid=channel-transition]")?.scrollIntoView({block:"center"})');const capture=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,name+'.png'),Buffer.from(capture.data,'base64'));}
-  return {start,stop,evaluate,until,click,fill,login,freshLogin,system,screenshot,hash,call,onEvent:listener=>{listeners.add(listener);return ()=>listeners.delete(listener);}};
+  return {start,reconnect,stop,evaluate,until,click,fill,login,freshLogin,system,screenshot,hash,call,onEvent:listener=>{listeners.add(listener);return ()=>listeners.delete(listener);}};
 }

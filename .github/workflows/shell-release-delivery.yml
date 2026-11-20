@@ -1,0 +1,55 @@
+name: Shell release delivery checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'codex/*shell*'
+      - feat-shell-delta-updates
+    paths:
+      - '.github/workflows/shell-release-delivery.yml'
+      - 'scripts/verify-shell-release-delivery.php'
+      - 'backend/Services/*Update*.php'
+      - 'backend/Services/*ReleaseProvider.php'
+      - 'backend/Services/ShellDeltaDeliveryService.php'
+      - 'backend/Controllers/UpdateController.php'
+      - 'frontend/src/**'
+
+permissions:
+  contents: read
+
+jobs:
+  release-delivery:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: zip, openssl, pdo_sqlite, sqlite3, pdo_mysql, mysqli, curl, mbstring, gd, dom, xml, xmlwriter
+          coverage: none
+      - name: Verify shell cataloguing and legacy asset isolation
+        run: php scripts/verify-shell-release-delivery.php
+      - name: Verify legacy release channels and background update contracts
+        run: |
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-release-channels.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-update-background.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          php scripts/verify-admin-update-center.php
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify the admin update UI
+        run: |
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend run typecheck

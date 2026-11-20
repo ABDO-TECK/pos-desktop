@@ -1457,6 +1457,8 @@ try {
 
     // Protected customer state sentinels (NEVER actual customer SQL, synthetic only)
     $customerSentinels = [
+        'resources/portable/qz-tray/override.crt' => "DEVICE_CERTIFICATE_" . bin2hex(random_bytes(12)),
+        'resources/portable/qz-tray/qz-tray.properties' => "DEVICE_PRINT_SETTINGS_" . bin2hex(random_bytes(12)),
         'userdata/synthetic_customer_backup.sql' => "SYNTHETIC_SQL_DATA_MOCK_" . bin2hex(random_bytes(32)),
         'storage/logs/customer_audit.log' => "AUDIT_LOG_ENTRY_" . bin2hex(random_bytes(32)),
         '.env' => "APP_SECRET=synthetic_secret_" . bin2hex(random_bytes(16)),
@@ -1736,6 +1738,34 @@ try {
     );
     assertEqual($rbStableRepeat['phase'], ShellDeltaFileTransactionService::PHASE_ROLLED_BACK, "Repeat Stable rollback must succeed idempotently");
 
+    echo "  [1.3] Health decision and restart after interrupted marker release...\n";
+    $commitRoot = $lab . DIRECTORY_SEPARATOR . 'suite1-commit-product';
+    $commitState = $lab . DIRECTORY_SEPARATOR . 'suite1-commit-state';
+    mkdir($commitState, 0700, true);
+    populateTree($commitRoot, $sourceBetaFiles);
+    populateTree($commitRoot, $customerSentinels);
+    $commitId = $txService->prepare($commitRoot, $commitState, $betaManifestRaw, $betaSig, $betaZipPath, $installedBetaContext)['operation_id'];
+    $applied = $txService->apply($commitRoot, $commitState, $commitId, $installedBetaContext);
+    $beforeCommit = snapshotTree($commitRoot);
+    $callCommit = static function (ShellDeltaFileTransactionService $service, string $version) use (
+        $commitRoot, $commitState, $commitId, $installedBetaContext, $applied
+    ): array {
+        return $service->commitAfterHealth($commitRoot, $commitState, $commitId, $installedBetaContext, $version, $applied['target_inventory_sha256']);
+    };
+    assertThrows(static fn () => $callCommit($txService, '0.0.99'), 'does not identify', 'A mismatched health version must not commit.');
+    assertEqual($txService->operationPhase($commitRoot, $commitState, $commitId), ShellDeltaFileTransactionService::PHASE_FILES_APPLIED, 'Mismatched health left files uncommitted.');
+    $interrupted = new ShellDeltaFileTransactionService($manifestService, static function (string $checkpoint): void {
+        if ($checkpoint === 'before_marker_release') {
+            throw new RuntimeException('Test interruption before marker release.');
+        }
+    });
+    assertThrows(static fn () => $callCommit($interrupted, $applied['version']), 'Test interruption', 'Commit interruption must retain the committed decision.');
+    assertEqual($txService->operationPhase($commitRoot, $commitState, $commitId), ShellDeltaFileTransactionService::PHASE_COMMITTED, 'Commit decision is durable before marker release.');
+    assertThrows(static fn () => $txService->recover($commitRoot, $commitState, $commitId, $installedBetaContext), 'cannot be rolled back', 'Recovery may not undo a committed update.');
+    $committed = $callCommit($txService, $applied['version']);
+    assertEqual($callCommit($txService, $applied['version']), $committed, 'Repeated health commit is idempotent.');
+    assertEqual(snapshotTree($commitRoot), $beforeCommit, 'Recovery following commit does not modify installed target bytes.');
+
     echo "  [Test Suite 1 Passed]\n";
 
     // -------------------------------------------------------------------------
@@ -1792,6 +1822,24 @@ try {
     assertEqual($snapAfterUnmanaged, $snapBeforeUnmanaged, "Prepare abort must leave product root completely unchanged");
     assertTrue(is_file($unmanagedFile), "Unmanaged file must be preserved intact");
     assertEqual(file_get_contents($unmanagedFile), $unmanagedContent, "Unmanaged file content must be unchanged");
+
+    // The only added exclusions are exact device files, never directory or reparse entries.
+    $qzShapeRoot = $lab . DIRECTORY_SEPARATOR . 'suite2-qz-shape';
+    populateTree($qzShapeRoot, $sourceBetaFiles);
+    $overridePath = $qzShapeRoot . '/resources/portable/qz-tray/override.crt';
+    mkdir($overridePath, 0700, true);
+    assertThrows(static fn () => $manifestService->buildInventory($qzShapeRoot, '0.0.13'),
+        'regular physical file', 'A directory cannot masquerade as the device QZ certificate');
+    rmdir($overridePath);
+    $qzOutside = $lab . DIRECTORY_SEPARATOR . 'suite2-qz-outside';
+    mkdir($qzOutside, 0700, true);
+    createTrackedJunction($overridePath, $qzOutside);
+    try {
+        assertThrows(static fn () => $manifestService->buildInventory($qzShapeRoot, '0.0.13'),
+            '', 'A junction cannot masquerade as the device QZ certificate');
+    } finally {
+        removeTrackedJunction($overridePath, $lab);
+    }
 
     // 2.5 ZIP Tamper Detection
     echo "  [2.5] ZIP tampering aborts before mutation...\n";

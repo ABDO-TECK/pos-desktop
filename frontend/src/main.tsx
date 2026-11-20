@@ -97,6 +97,7 @@ document.addEventListener('wheel', (event) => {
 }, { passive: false })
 
 async function initApp() {
+  const runtimeFenced = (await window.posRuntime?.isShellStartupFenced?.().catch(() => true)) ?? false
   if (typeof window.posRuntime?.getApiBaseUrl === 'function') {
     try {
       const url = await window.posRuntime.getApiBaseUrl()
@@ -111,8 +112,8 @@ async function initApp() {
 
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <OfflineSyncManager />
-      <App />
+      {!runtimeFenced && <OfflineSyncManager />}
+      <App runtimeFenced={runtimeFenced} />
     </React.StrictMode>
   )
 }

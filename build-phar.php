@@ -498,6 +498,10 @@ $stub = <<<PHP
 Phar::mapPhar('backend.phar');
 
 if (php_sapi_name() === 'cli') {
+    if (\$argc > 1 && \$argv[1] === 'shell-transaction') {
+        require 'phar://backend.phar/cli/shell-transaction.php';
+        exit(0);
+    }
     // Isolated shell worker command passthrough (reserved prefix)
     if (\$argc > 1 && \$argv[1] === 'shell-worker-plan') {
         require 'phar://backend.phar/cli/shell-worker-plan.php';
@@ -645,10 +649,13 @@ $requiredPharEntries = [
     'cli/initialize-admin.php',
     'cli/shell-worker-inspect.php',
     'cli/shell-worker-plan.php',
+    'cli/shell-transaction.php',
+    'Services/ShellUpdateHealthService.php',
     'shell-worker-inspection.json',
     'router.php',
     'version.json',
     'certs/cacert.pem',
+    'certs/update_public_key.pem',
     'Native/SourceFileLease.cs',
     'Native/OwnedChildProcess.cs',
     'Native/OwnedWorkerPipeEndpoint.cs',

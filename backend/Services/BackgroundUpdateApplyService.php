@@ -37,7 +37,7 @@ class BackgroundUpdateApplyService
      * - No post-dispatch row payload mutation
      * - Never leaks internal scheduling exceptions to HTTP
      */
-    public function scheduleApply(bool $force = false, bool $deltaCapable = true, ?int $userId = null): array
+    public function scheduleApply(bool $force = false, bool $deltaCapable = true, ?int $userId = null, ?string $shellVersion = null): array
     {
         if (!EnvLoader::getBool('ENABLE_AUTO_UPDATE', true)) {
             return [
@@ -71,6 +71,10 @@ class BackgroundUpdateApplyService
             $existing = $stmt->fetch(\PDO::FETCH_ASSOC);
 
             if ($existing) {
+                $existingPayload = json_decode((string) $existing['payload'], true);
+                if (($existingPayload['shell_version'] ?? null) !== $shellVersion) {
+                    return ['ok' => false, 'code' => 409, 'status' => 'busy', 'error' => 'هناك مهمة تحديث أخرى قيد التنفيذ.'];
+                }
                 return [
                     'ok'      => true,
                     'job_id'  => (int) $existing['id'],
@@ -87,6 +91,9 @@ class BackgroundUpdateApplyService
                 'user_id'       => $userId,
                 'created_at'    => date('Y-m-d\TH:i:sP'),
             ];
+            if ($shellVersion !== null) {
+                $payload['shell_version'] = $shellVersion;
+            }
 
             $jobId = JobQueue::dispatchUnique('apply_update', $payload, 10, 1);
 
@@ -138,6 +145,9 @@ class BackgroundUpdateApplyService
             }
 
             // Existing job returned by dispatchUnique: retain ORIGINAL immutable payload and file
+            if (($rowPayload['shell_version'] ?? null) !== $shellVersion) {
+                return ['ok' => false, 'code' => 409, 'status' => 'busy', 'error' => 'هناك مهمة تحديث أخرى قيد التنفيذ.'];
+            }
             return [
                 'ok'      => true,
                 'job_id'  => $jobId,
@@ -168,6 +178,7 @@ class BackgroundUpdateApplyService
         $operationId = (string) ($payload['operation_id'] ?? '');
         $force = (bool) ($payload['force'] ?? false);
         $deltaCapable = (bool) ($payload['delta_capable'] ?? true);
+        $shellVersion = $payload['shell_version'] ?? null;
 
         if ($actualJobId !== null && $actualJobId > 0) {
             $this->saveJobData($actualJobId, [
@@ -179,7 +190,13 @@ class BackgroundUpdateApplyService
         }
 
         try {
-            $result = $this->updateService->applyUpdate($force, $deltaCapable, $operationId !== '' ? $operationId : null);
+            if ($shellVersion !== null && !ShellDeltaDeliveryService::isVersionSelector($shellVersion)) {
+                throw new JobFailure('Invalid queued shell update version.', 400);
+            }
+            $ownerOperation = $operationId !== '' ? $operationId : null;
+            $result = $shellVersion === null
+                ? $this->updateService->applyUpdate($force, $deltaCapable, $ownerOperation)
+                : $this->updateService->applySelectedShellUpdate($shellVersion, $deltaCapable, $ownerOperation);
             $sanitizedResult = $this->sanitizeResult($result);
 
             $saved = true;
@@ -299,6 +316,8 @@ class BackgroundUpdateApplyService
                         : '';
 
                     if ($persistedRequiresHandoff && $targetHandoffVersion !== '') {
+                        $handoffOperation = ($payloadData['update_type'] ?? null) === ShellDeltaManifestService::OPERATION
+                            ? ShellDeltaManifestService::OPERATION : 'electron_delta_install';
                         $stateErrorAbsent = !isset($state['error']) || $state['error'] === null || $state['error'] === '';
                         $noRecoveryMarkers = empty($state['primary_error'])
                             && empty($state['secondary_errors'])
@@ -324,7 +343,7 @@ class BackgroundUpdateApplyService
                             $isOwnedActiveOperation
                             && is_array($state)
                             && ($state['state'] ?? null) === 'completed'
-                            && ($state['operation'] ?? null) === 'electron_delta_install'
+                            && ($state['operation'] ?? null) === $handoffOperation
                             && ($state['phase'] ?? null) === 'completed'
                             && $stateErrorAbsent
                             && $noRecoveryMarkers
@@ -373,6 +392,16 @@ class BackgroundUpdateApplyService
             }
         }
 
+        if ($effectiveStatus === 'completed' && $isOwnedActiveOperation && is_array($state) && is_array($resultData)) {
+            $recoverySettlement = $this->recoveredShellSettlement($state, $resultData);
+            if ($recoverySettlement !== null) {
+                $effectiveStatus = 'failed';
+                $settlementError = $recoverySettlement;
+                $resultData['requires_desktop_handoff'] = false;
+                unset($resultData['ok'], $resultData['desktop_handoff_completed']);
+            }
+        }
+
         $sanitizedLastError = null;
         if (!empty($job['last_error'])) {
             $sanitizedLastError = self::redactPaths((string) $job['last_error']);
@@ -381,6 +410,8 @@ class BackgroundUpdateApplyService
         } elseif ($settlementError !== null) {
             $sanitizedLastError = match ($settlementError) {
                 'persistence_failure_after_apply' => 'تعذر حفظ نتيجة العملية بعد تطبيق التحديث؛ النظام في حالة غير مؤكدة وتحتاج فحصاً يدوياً.',
+                'shell_rolled_back'               => 'تعذر تشغيل التحديث، وتم التحقق من عودة الإصدار السابق تلقائياً.',
+                'shell_source_reopened'           => 'لم يكتمل إيقاف الخدمات للتحديث، وتمت إعادة تشغيل الإصدار السابق دون استبدال ملفاته.',
                 'desktop_handoff_uncertain'       => 'فشل التحديث أثناء مرحلة تسليم سطح المكتب؛ النظام في حالة غير مؤكدة.',
                 'unbound_operation'               => 'معرّف العملية غير متطابق مع المهمة المجدولة؛ تم إيقاف المتابعة تلقائياً.',
                 'unbound_job_id'                  => 'رقم المهمة غير متطابق مع ملف النتيجة؛ تم إيقاف المتابعة تلقائياً.',
@@ -403,6 +434,33 @@ class BackgroundUpdateApplyService
             'update_state'     => $exposedState,
             'result'           => $resultData,
         ];
+    }
+
+    private function recoveredShellSettlement(array $state, array $result): ?string
+    {
+        $terminal = $state['state'] ?? null;
+        $source = $state['from_version'] ?? null;
+        $target = $result['handoff_version'] ?? null;
+        if (($result['update_type'] ?? null) !== ShellDeltaManifestService::OPERATION ||
+            ($result['requires_desktop_handoff'] ?? null) !== true ||
+            ($state['operation'] ?? null) !== ShellDeltaManifestService::OPERATION ||
+            !in_array($terminal, ['rolled_back', 'failed'], true) ||
+            ($state['phase'] ?? null) !== $terminal ||
+            ($state['requires_recovery'] ?? null) !== false ||
+            ($state['source_runtime_recovered'] ?? null) !== true ||
+            !is_string($state['shell_transaction_id'] ?? null) ||
+            !preg_match('/^tx_[a-f0-9]{32}$/D', $state['shell_transaction_id']) ||
+            !is_string($target) || $target === '' ||
+            ($state['to_version'] ?? null) !== $target || ($state['target_version'] ?? null) !== $target ||
+            !is_string($source) || !ProductInventoryService::isValidSemver($source) ||
+            ($this->updateService->getLocalVersion()['version'] ?? null) !== $source) {
+            return null;
+        }
+
+        if ($terminal === 'rolled_back') {
+            return 'shell_rolled_back';
+        }
+        return ($state['source_reopened_without_mutation'] ?? null) === true ? 'shell_source_reopened' : null;
     }
 
     /**

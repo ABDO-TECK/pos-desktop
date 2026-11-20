@@ -269,7 +269,7 @@ class GitHubReleaseProvider
 
             if (!empty($rel['draft'])) continue;
             $mapped = $this->mapReleaseData($rel, $currentVersion);
-            if (!empty($mapped['unsupported_baseline'])) continue;
+            if (!empty($mapped['unsupported_baseline']) && empty($mapped['shell_advertised'])) continue;
             $mapped['channel'] = $relChannel;
             $compatibleReleases[] = $mapped;
         }
@@ -388,16 +388,30 @@ class GitHubReleaseProvider
         $deltaUrl = null;
         $fullPackageUrl = null;
         $assetsMap = [];
+        $shellAssets = [];
+        $shellAdvertised = false;
+        $shellAssetsValid = true;
+        $shellNames = [ShellDeltaManifestService::MANIFEST_ASSET, ShellDeltaManifestService::SIGNATURE_ASSET, ShellDeltaManifestService::PACKAGE_ASSET];
+        $shellPrefix = "https://github.com/{$this->owner}/{$this->repo}/releases/download/{$tagName}/";
 
         foreach ($data['assets'] ?? [] as $asset) {
             $name = (string) ($asset['name'] ?? '');
             $downloadUrl = (string) ($asset['browser_download_url'] ?? '');
+            $lowerName = strtolower($name);
+            if (in_array($lowerName, $shellNames, true)) {
+                $shellAdvertised = true;
+                if ($name !== $lowerName || $downloadUrl !== $shellPrefix . $name || isset($shellAssets[$name])) {
+                    $shellAssetsValid = false;
+                } else {
+                    $shellAssets[$name] = $downloadUrl;
+                }
+                continue;
+            }
             if ($name === '' || $downloadUrl === '') {
                 continue;
             }
 
             $assetsMap[$name] = $downloadUrl;
-            $lowerName = strtolower($name);
 
             if ($lowerName === 'manifest.json') {
                 $manifestUrl = $downloadUrl;
@@ -416,6 +430,8 @@ class GitHubReleaseProvider
 
         // Each baseline has its own signed manifest and ZIP. Never apply a
         // package built for another installed version or mix asset signatures.
+        $signatureUrl = $assetsMap['manifest.sig'] ?? $signatureUrl;
+        $fullPackageUrl = $assetsMap['full-package.zip'] ?? $fullPackageUrl;
         $versionedManifests = array_filter(array_keys($assetsMap), static fn (string $name): bool => preg_match('/^manifest-.*\.json$/', $name) === 1);
         $unsupportedBaseline = false;
         if ($versionedManifests) {
@@ -437,6 +453,8 @@ class GitHubReleaseProvider
             'signature_url' => $signatureUrl,
             'delta_url' => $deltaUrl,
             'full_package_url' => $fullPackageUrl,
+            'shell_advertised' => $shellAdvertised,
+            'shell_assets' => $shellAssetsValid && count($shellAssets) === count($shellNames) ? $shellAssets : [],
             'assets' => $assetsMap,
             'channel' => 'stable',
             'error' => null,
@@ -498,6 +516,25 @@ class GitHubReleaseProvider
 
         return (new UpdateAssetDownloader($this->caCertPath, $this->token ?? ''))
             ->download($url, $destPath, $this->downloadProgress);
+    }
+
+    /** The caller has already created and verified a private temporary staging directory. */
+    public function downloadBoundedAssetFile(string $url, string $destPath, int $maxBytes, \Closure $progress): array
+    {
+        if (!$this->isAllowedUrl($url) || $maxBytes < 1 || !is_dir(dirname($destPath))) {
+            return ['ok' => false, 'error' => 'Invalid bounded asset download.'];
+        }
+        return (new UpdateAssetDownloader($this->caCertPath, $this->token ?? '', maxBytes: $maxBytes))
+            ->download($url, $destPath, $progress);
+    }
+
+    public function fetchBoundedAssetContent(string $url, int $maxBytes): ?string
+    {
+        if (!$this->isAllowedUrl($url) || $maxBytes < 1) {
+            return null;
+        }
+        return (new UpdateAssetDownloader($this->caCertPath, $this->token ?? '', $this->timeout, maxBytes: $maxBytes))
+            ->read($url);
     }
 
     /**

@@ -16,8 +16,8 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
-const { startPHP, stopPHP, runDatabaseMigrations } = require('./services/php-server');
-const { startMySQL, stopMySQL, resetDatabase } = require('./services/mysql-server');
+const { startPHP, stopPHP, stopPhpServerAwaitable, waitForHealth, getPhpServerInfo, runDatabaseMigrations } = require('./services/php-server');
+const { startMySQL, stopMySQL, stopMySQLCleanly, resetDatabase } = require('./services/mysql-server');
 const { setupAutoUpdater } = require('./services/auto-updater');
 const { assessReleaseCompatibility } = require('./utils/release-version-policy');
 const {
@@ -25,7 +25,8 @@ const {
   startHttpsProxy,
   stopHttpsProxy,
 } = require('./services/https-proxy');
-const { startQZTray, stopQZTray } = require('./services/qz-tray');
+const { startQZTray, stopQZTray, stopQZTrayAndWait } = require('./services/qz-tray');
+const shellUpdate = require('./services/shell-update');
 const { ensureQZCerts, getQZCertificate, signQZMessage } = require('./services/qz-certs');
 const { configureFirewall, removeFirewall } = require('./services/firewall');
 const { getPhpRuntimeArgs, resolveSystemTimeZone } = require('./utils/php-runtime');
@@ -38,6 +39,7 @@ const {
 } = require('./utils/cookie-proxy-policy');
 const {
   acquireUpdateLock,
+  heartbeatUpdateLock,
   isActiveUpdateState,
   readUpdateState,
   releaseUpdateLock,
@@ -55,11 +57,18 @@ let dbCredentials = null;
 let lastStartupError = null;
 let splash = null;
 let jobWorkerProcess = null;
+let logCleanupProcess = null;
+let shellInstallInProgress = false;
+let shellStartupFenced = false;
 let firstRunAdminCredentials = null;
 let sessionCookies = {};
 const PERSISTED_COOKIE_NAMES = new Set(Object.keys(COOKIE_PATHS));
 
-function assertTrustedAppRenderer(event) {
+function assertTrustedAppRenderer(event, { allowDuringShellStartup = false } = {}) {
+  if (shellInstallInProgress) throw new Error('A shell update is shutting down this runtime.');
+  if (shellStartupFenced && !allowDuringShellStartup) {
+    throw new Error('The shell updater has not admitted this runtime.');
+  }
   const senderUrl = event.senderFrame?.url || '';
   if (!senderUrl.startsWith('app://pos-app/')) {
     throw new Error('Untrusted renderer');
@@ -84,7 +93,22 @@ async function stopJobWorker(options = {}) {
     return;
   }
   const timeoutMs = options.timeoutMs || 3000;
-  await stopPhpServerAwaitable({ timeoutMs, processRef: worker });
+  if (options.drain) {
+    await new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        worker.removeListener('exit', onExit);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onExit = (code, signal) => finish(code === 0 && signal === null
+        ? null : new Error('The job worker could not drain its active task.'));
+      const timer = setTimeout(() => finish(new Error('The job worker did not drain in time.')), timeoutMs);
+      worker.once('exit', onExit);
+    });
+  } else {
+    await stopPhpServerAwaitable({ timeoutMs, processRef: worker });
+  }
   jobWorkerProcess = null;
 }
 
@@ -696,18 +720,22 @@ const NON_RETRYABLE_STARTUP_CODES = new Set([
 ]);
 
 async function stopRuntimeServices() {
-  await stopJobWorker();
-  stopPHP();
-  stopQZTray();
-  try {
-    await stopHttpsProxy();
-  } catch (error) {
-    console.warn('[Runtime] Failed to stop HTTPS proxy during recovery:', error.message);
+  const failures = [];
+  for (const stop of [
+    () => stopHttpsProxy({ disconnect: true }),
+    stopJobWorker,
+    stopPhpServerAwaitable,
+    stopQZTrayAndWait,
+    stopMySQL,
+  ]) {
+    try { await stop(); } catch (error) { failures.push(error); }
   }
-  await stopMySQL();
+  if (failures.length) {
+    throw new AggregateError(failures, failures.map((error) => error.message).join(', '));
+  }
 }
 
-async function startCoreRuntime({ maxAttempts = 2, healthTimeout = 60000, resetBeforeStart = false } = {}) {
+async function startCoreRuntime({ maxAttempts = 2, healthTimeout = 60000, resetBeforeStart = false, probation } = {}) {
   if (resetBeforeStart) await stopRuntimeServices();
 
   let lastError = null;
@@ -716,19 +744,18 @@ async function startCoreRuntime({ maxAttempts = 2, healthTimeout = 60000, resetB
 
     try {
       setSplashStatus('جاري تشغيل قاعدة البيانات...');
-      const mysqlInfo = await startMySQL(mysqlPort, { maxStartupAttempts: 3 });
+      const mysqlInfo = await startMySQL(mysqlPort, { maxStartupAttempts: probation ? 1 : 3, probation });
       applyMysqlStartupInfo(mysqlInfo);
       console.log(`[Main] MariaDB started successfully on port ${mysqlPort}`);
 
       setSplashStatus('جاري تشغيل الخادم...');
-      const phpServerInfo = await startPHP(phpPort, mysqlPort, dbCredentials);
+      const phpServerInfo = await startPHP(phpPort, mysqlPort, dbCredentials, { probation, maxStartupAttempts: probation ? 1 : 2 });
       phpPort = phpServerInfo.port;
       console.log(`[Main] PHP Server started successfully on port ${phpPort}`);
 
       setSplashStatus('التحقق من جاهزية النظام...');
-      const { waitForHealth } = require('./services/php-server');
-      await waitForHealth(phpServerInfo.baseUrl, { maxTime: healthTimeout });
-      return { mysqlInfo, phpServerInfo };
+      const health = await waitForHealth(phpServerInfo.baseUrl, { maxTime: healthTimeout, probationToken: probation?.token });
+      return { mysqlInfo, phpServerInfo, health };
     } catch (error) {
       lastError = error;
       captureStartupError(error, {
@@ -780,7 +807,6 @@ function startLogCleanup() {
     const cleanupProcess = spawnRuntimeProcess(phpPath, cleanupArgs, {
       cwd: backendDir,
       stdio: 'ignore',
-      detached: true,
       windowsHide: true,
       env: maintenanceEnv,
     });
@@ -789,7 +815,10 @@ function startLogCleanup() {
       args: cleanupArgs,
       cwd: backendDir,
     })));
-    cleanupProcess.unref();
+    logCleanupProcess = cleanupProcess;
+    cleanupProcess.once('close', () => {
+      if (logCleanupProcess === cleanupProcess) logCleanupProcess = null;
+    });
   } catch (error) {
     console.warn('[LogCleanup] Failed to start:', formatSpawnError(error, {
       executable: phpPath,
@@ -806,26 +835,123 @@ function startQZBackgroundService() {
       const { getJavaPath, getQZTrayPath } = require('./utils/paths');
       const qzTrayDir = path.dirname(getQZTrayPath());
       await ensureQZCerts(qzTrayDir, getJavaPath());
-      await startQZTray();
+      if (!shellInstallInProgress) await startQZTray();
     } catch (error) {
       console.warn('[QZ Service] Background startup warning:', error.message);
     }
   })();
 }
 
-async function startPostStartupServices() {
-  setSplashStatus('جاري تهيئة قاعدة البيانات...');
-  await initializeFreshRuntime({ seed: dbCredentials.freshInstall === true });
+async function startPostStartupServices({ initializeDatabase = true } = {}) {
+  if (initializeDatabase) {
+    setSplashStatus('جاري تهيئة قاعدة البيانات...');
+    await initializeFreshRuntime({ seed: dbCredentials.freshInstall === true });
+  }
   await startHttpsProxy(phpPort, 8443);
   startLogCleanup();
   startJobWorker();
   startQZBackgroundService();
 }
 
-function createMainWindow() {
+async function runShellUpdate(version, storageDir, pending) {
+  if (!dbCredentials || !mainWindow || mainWindow.isDestroyed() || !getPhpServerInfo()?.baseUrl) {
+    return { ok: false, reason_code: 'shell_runtime_unavailable', error: 'The running POS runtime could not be verified.' };
+  }
+  if ((pending.to_version || pending.target_version) !== version ||
+      (pending.to_version && pending.to_version !== version) ||
+      (pending.target_version && pending.target_version !== version)) {
+    return { ok: false, reason_code: 'shell_handoff_mismatch', error: 'The staged shell update does not match the selected release.' };
+  }
+  const lease = acquireUpdateLock(storageDir, 'electron_shell_delta', { target_version: version });
+  if (!lease.acquired) {
+    return { ok: false, reason_code: lease.reason_code, error: lease.message, owner: lease.owner || null };
+  }
+  const heartbeat = setInterval(() => heartbeatUpdateLock(lease, 'preparing_shell_handoff'), 10000);
+  shellInstallInProgress = true;
+  let supervisor;
+  let drainBegun = false;
+  try {
+    supervisor = await shellUpdate.prepareSupervisor({
+      version, storageDir, pending, lease,
+      database: {
+        DB_PORT: String(mysqlPort), DB_NAME: process.env.DB_NAME || 'pos_db',
+        DB_USER: dbCredentials.user, DB_PASS: dbCredentials.password,
+      },
+    });
+    clearInterval(heartbeat);
+    // The private launch marker disables PHP application requests. A fresh
+    // response from the owned single-worker Windows PHP server proves any
+    // request that entered it before the gate has finished.
+    drainBegun = true;
+    await waitForHealth(getPhpServerInfo().baseUrl, { maxTime: 5000 });
+    await stopHttpsProxy({ disconnect: true });
+    await stopJobWorker({ drain: true, timeoutMs: 20000 });
+    if (logCleanupProcess) await stopPhpServerAwaitable({ processRef: logCleanupProcess, timeoutMs: 4000 });
+    await stopQZTrayAndWait();
+    await stopPhpServerAwaitable({ timeoutMs: 5000 });
+    await stopMySQLCleanly();
+    await supervisor.confirmShutdown();
+    forceQuit = true;
+    setImmediate(() => app.exit(0));
+    return { ok: true, phase: 'shell_handoff_restart', restarting: true };
+  } catch (error) {
+    if (!supervisor) releaseUpdateLock(lease);
+    if (drainBegun) {
+      // No file mutation was authorized. Finish shutting down this partially
+      // drained instance before exiting; it cannot resume serving requests.
+      try { await stopRuntimeServices(); } catch (shutdownError) {
+        console.error('[Shell Update] Interrupted source shutdown:', shutdownError.message);
+      }
+      try { await supervisor.confirmFailedDrain(); } catch (notificationError) {
+        console.error('[Shell Update] Could not acknowledge source recovery:', notificationError.message);
+      }
+      setImmediate(() => app.exit(1));
+    } else {
+      shellInstallInProgress = false;
+    }
+    return { ok: false, reason_code: 'shell_handoff_failed', error: error.message };
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+async function provePackagedUi(window) {
+  const ui = await window.webContents.executeJavaScript('(' + String(() => new Promise((resolve) => {
+    const renderedView = () => {
+      if (location.protocol !== 'app:' || location.hostname !== 'pos-app' ||
+          typeof globalThis.posRuntime?.getApiBaseUrl !== 'function') return null;
+      const signIn = document.querySelector('#root form input[type="email"]');
+      if (location.pathname === '/login' && signIn?.form?.querySelector('input[type="password"]')) return 'sign-in';
+      if (document.querySelector('#root input#forced-current-password')) return 'password-change';
+      if (document.querySelector('#root .app-layout main.main-content')) return 'workspace';
+      return null;
+    };
+    const check = () => {
+      const view = renderedView();
+      if (!view) return;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve(view);
+    };
+    const observer = new MutationObserver(check);
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      resolve(null);
+    }, 15000);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    check();
+  })) + ')()');
+  if (!ui || !window.isVisible() || window.isEnabled() || window.webContents.isCrashed()) {
+    throw new Error('The packaged POS interface did not render in its desktop window.');
+  }
+  return ui;
+}
+
+function createMainWindow({ fenced = false } = {}) {
   const window = new BrowserWindow({
     width: 1280, height: 800,
     minWidth: 1024, minHeight: 600,
+    show: !fenced,
     icon: path.join(__dirname, 'assets', 'icon.png'),
     titleBarStyle: 'hidden',
     titleBarOverlay: {
@@ -847,7 +973,8 @@ function createMainWindow() {
     if (!url.startsWith('app://pos-app/')) event.preventDefault();
   });
   window.setMenu(null);
-  window.maximize();
+  if (fenced) window.setEnabled(false);
+  if (!fenced) window.maximize();
   window.webContents.on('before-input-event', (event, input) => {
     if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) {
       event.preventDefault();
@@ -870,16 +997,31 @@ function createMainWindow() {
   return window;
 }
 
-async function showMainApplication() {
+async function loadMainApplication({ fenced = false } = {}) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
-  mainWindow = createMainWindow();
-  await mainWindow.loadURL('app://pos-app/index.html');
+  const window = createMainWindow({ fenced });
+  mainWindow = window;
+  await window.loadURL('app://pos-app/index.html');
+  return window;
+}
+
+function activateMainApplication(window, { admitted = false } = {}) {
+  if (window.isDestroyed() || window.webContents.isCrashed()) throw new Error('The POS desktop window closed during startup.');
+  if (admitted) {
+    window.setEnabled(true);
+    window.show();
+    window.focus();
+  }
   if (splash && !splash.isDestroyed()) splash.close();
   if (!tray || tray.isDestroyed?.()) {
     tray = null;
     createTray();
   }
-  setupAutoUpdater(mainWindow);
+  setupAutoUpdater(window);
+}
+
+async function showMainApplication() {
+  activateMainApplication(await loadMainApplication());
 }
 
 // منع تشغيل أكثر من نسخة
@@ -887,7 +1029,7 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) { app.quit(); }
 
 app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (shellStartupFenced || !mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   // Closing the window normally hides it in the tray. A second launch from
   // the desktop shortcut must wake that hidden window before focusing it.
@@ -902,6 +1044,31 @@ app.on('window-all-closed', () => {
 });
 
 app.whenReady().then(async () => {
+  if (!gotTheLock) return;
+  let startup;
+  let runtimeStarting = false;
+  let probationAbandoned = false;
+  try {
+    startup = await shellUpdate.checkStartup(() => {
+      probationAbandoned = true;
+      if (!runtimeStarting) {
+        void stopRuntimeServices().catch((error) => {
+          console.error('[Shell Update] Interrupted candidate shutdown:', error.message);
+        }).finally(() => app.exit(1));
+      }
+    });
+  } catch (error) {
+    console.error('[Shell Update] Startup interlock:', error.message);
+    app.exit(1);
+    return;
+  }
+  if (startup.mode === 'blocked') {
+    app.exit(0);
+    return;
+  }
+  const probation = startup.probation;
+  shellStartupFenced = Boolean(probation);
+
   // ── Session Cookie Proxy ──
   const { session } = require('electron');
   const { getCookiesPath } = require('./utils/paths');
@@ -1000,6 +1167,9 @@ app.whenReady().then(async () => {
 
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     const requestHeaders = { ...details.requestHeaders };
+    for (const header of Object.keys(requestHeaders)) {
+      if (header.toLowerCase() === 'x-pos-shell-delta-handoff') delete requestHeaders[header];
+    }
     try {
       // 5. Origin guard
       const initiator = details.initiator || '';
@@ -1023,6 +1193,10 @@ app.whenReady().then(async () => {
         }
 
         if (parsedUrl) {
+            if (details.method === 'POST' && /^\/api\/(?:v[0-9]+\/)?updates?\/apply\/?$/.test(parsedUrl.pathname) &&
+                shellUpdate.isShellUpdateCapable() && !shellInstallInProgress && !shellStartupFenced) {
+              requestHeaders['X-POS-Shell-Delta-Handoff'] = shellUpdate.backendToken;
+            }
             const cookieHeader = getCookieHeader(sessionCookies, parsedUrl.pathname);
             // Clear any existing cookie headers case-insensitively to avoid duplicates
             for (const key of Object.keys(requestHeaders)) {
@@ -1047,7 +1221,7 @@ app.whenReady().then(async () => {
   const { net } = require('electron');
   const url = require('url');
 
-  protocol.handle('app', async (request) => {
+  const appProtocolHandler = async (request) => {
     const requestUrl = new URL(request.url);
     let filePath = decodeURIComponent(requestUrl.pathname);
     
@@ -1085,7 +1259,8 @@ app.whenReady().then(async () => {
     // SPA fallback to index.html for unknown routes
     const indexHtmlPath = path.join(distDir, 'index.html');
     return net.fetch(url.pathToFileURL(indexHtmlPath).toString());
-  });
+  };
+  protocol.handle('app', appProtocolHandler);
 
   // ── Prepare Runtime Directories ──
   try {
@@ -1098,7 +1273,7 @@ app.whenReady().then(async () => {
   // ── Run Runtime Migration ──
   try {
     const { runRuntimeMigration } = require('./utils/runtimeMigrator');
-    const migrationResult = runRuntimeMigration({ dryRun: false, safeMode: true });
+    const migrationResult = probation ? null : runRuntimeMigration({ dryRun: false, safeMode: true });
     if (migrationResult && migrationResult.success === false && migrationResult.error) {
       if (migrationResult.error.includes('ENOENT') || migrationResult.error.includes('EACCES') || migrationResult.error.includes('EPERM')) {
         throw new Error(`Critical migration foundation error: ${migrationResult.error}`);
@@ -1110,16 +1285,20 @@ app.whenReady().then(async () => {
   }
 
   // ── Configure Windows Firewall rules (production) ──
-  if (process.env.POS_LAN_ENABLED === 'true') {
+  if (!probation && process.env.POS_LAN_ENABLED === 'true') {
     configureFirewall().catch(err => console.error('[Firewall] Failed:', err));
   }
 
   ipcMain.handle('get-version', (event) => {
-    assertTrustedAppRenderer(event);
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     return app.getVersion();
   });
+  ipcMain.handle('runtime:is-shell-startup-fenced', (event) => {
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
+    return shellStartupFenced;
+  });
   ipcMain.handle('get-api-base-url', async (event) => {
-    assertTrustedAppRenderer(event);
+    assertTrustedAppRenderer(event, { allowDuringShellStartup: true });
     try {
       const { getRuntimePortsPath } = require('./utils/paths');
       const fs = require('fs');
@@ -1133,7 +1312,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('delta:get-capability', (event) => {
     assertTrustedAppRenderer(event);
-    return { capable: true, protocol: 1 };
+    return { capable: true, protocol: 1, shellDelta: shellUpdate.isShellUpdateCapable() };
   });
   ipcMain.handle('delta:apply-staged', async (event, version) => {
     assertTrustedAppRenderer(event);
@@ -1150,6 +1329,20 @@ app.whenReady().then(async () => {
     const { stopPhpServerAwaitable } = require('./services/php-server');
     const storageDir = getDataDir();
     const currentState = readUpdateState(storageDir);
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) {
+      throw new Error('The update action requires the owned app window.');
+    }
+    if (currentState?.operation === 'shell_delta') {
+      if (currentState.state === 'desktop_handoff_pending' && currentState.requires_recovery !== true) {
+        if (!isActiveUpdateState(currentState)) {
+          return { ok: false, reason_code: 'shell_handoff_expired', error: 'The staged shell update authorization has expired.' };
+        }
+        return runShellUpdate(version, storageDir, currentState);
+      }
+      if (currentState.requires_recovery === true) {
+        return { ok: false, reason_code: 'recovery_required', error: 'The previous shell update requires recovery.' };
+      }
+    }
     if (isActiveUpdateState(currentState) && currentState.state !== 'desktop_handoff_pending') {
       return {
         ok: false,
@@ -1621,7 +1814,31 @@ app.whenReady().then(async () => {
     splash.webContents.executeJavaScript(
       `document.getElementById('status').textContent = 'جاري تشغيل قاعدة البيانات...'`
     );
-    await startCoreRuntime({ maxAttempts: 2 });
+    runtimeStarting = true;
+    const started = await startCoreRuntime({ maxAttempts: probation ? 1 : 2, probation });
+    if (probationAbandoned) throw new Error('The shell update supervisor was interrupted.');
+    runtimeStarting = false;
+    if (probation) {
+      const window = await loadMainApplication({ fenced: true });
+      window.maximize();
+      window.showInactive();
+      const ui = await provePackagedUi(window);
+      probation.report('health', {
+        version: started.health.version, nativeVersion: app.getVersion(), data_compatibility: started.health.data_compatibility,
+        ui, window_visible: true, php: true, phpPort: started.phpServerInfo.port,
+      });
+      await probation.waitForAdmission();
+      shellStartupFenced = false;
+      activateMainApplication(window, { admitted: true });
+      // Requests from the first render were fenced. Refresh the same desktop
+      // window now that the approved runtime can serve its normal session.
+      window.webContents.reload();
+      void startPostStartupServices({ initializeDatabase: false }).catch((error) => {
+        console.error('[Shell Update] Post-admission services:', error.message);
+      });
+      if (startup.cleanup) setTimeout(startup.cleanup, 1500).unref();
+      return;
+    }
 
     // 3. تشغيل PHP
     splash.webContents.executeJavaScript(
@@ -1646,9 +1863,14 @@ app.whenReady().then(async () => {
 
     // 4. فتح النافذة الرئيسية
     await showMainApplication();
-
+    if (startup.cleanup) setTimeout(startup.cleanup, 1500).unref();
 
   } catch (err) {
+    if (shellStartupFenced) {
+      probation.report('failed', { error: err.message });
+      try { await stopRuntimeServices(); } finally { app.exit(1); }
+      return;
+    }
     console.error('[Recovery] Entering Recovery Mode due to startup failure:', err.message);
     captureStartupError(err, {
       stage: err?.details?.stage || 'startup',
@@ -1717,7 +1939,8 @@ function createTray() {
 }
 
 let forceQuit = false;
-app.on('before-quit', async () => {
+app.on('before-quit', async (event) => {
+  if (shellInstallInProgress) { event.preventDefault(); return; }
   forceQuit = true;
   stopJobWorker();
   stopHttpsProxy();

@@ -36,9 +36,10 @@ function writeJson(string $path, array $data): void
     ensure(file_put_contents($path, $raw) === strlen($raw), "Could not write {$path}.");
 }
 
-function measureDatabase(string $lab, string $role): void
+function measureDatabase(string $lab, string $role, bool $inApp): void
 {
-    ensure(in_array($role, ['source', 'target'], true), 'Unknown database profile role.');
+    $roles = $inApp ? ['source', 'target', 'published-source'] : ['source', 'target'];
+    ensure(in_array($role, $roles, true), 'Unknown database profile role.');
     $port = filter_var(getenv('DB_PORT'), FILTER_VALIDATE_INT, [
         'options' => ['min_range' => 1025, 'max_range' => 65535],
     ]);
@@ -46,7 +47,9 @@ function measureDatabase(string $lab, string $role): void
     $db = new PDO("mysql:host=127.0.0.1;port={$port};dbname=pos_db;charset=utf8mb4", 'root', '', [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     ]);
-    $dataDir = $role === 'source' ? $lab . '/installed/resources/portable/mysql/data' : $lab . '/target-data';
+    $dataDir = !$inApp && $role === 'source'
+        ? $lab . '/installed/resources/portable/mysql/data'
+        : $lab . '/' . $role . '-data';
     $actual = realpath((string) $db->query('SELECT @@datadir')->fetchColumn());
     ensure($actual !== false && strcasecmp($actual, realpath($dataDir) ?: '') === 0, 'Unexpected MariaDB data directory.');
 
@@ -313,13 +316,14 @@ function verifyTransaction(string $lab): void
 try {
     $runnerTemp = getenv('RUNNER_TEMP');
     ensure(is_string($runnerTemp) && $runnerTemp !== '', 'RUNNER_TEMP is required.');
-    $lab = ProductInventoryService::resolveAbsolutePath($runnerTemp . '/setup13-shell');
-    if ($argc === 3 && $argv[1] === 'profile') {
-        measureDatabase($lab, $argv[2]);
+    $inApp = $argc === 4 && $argv[1] === 'profile' && $argv[3] === 'in-app';
+    $lab = ProductInventoryService::resolveAbsolutePath($runnerTemp . ($inApp ? '/shell-inapp' : '/setup13-shell'));
+    if (($argc === 3 || $inApp) && $argv[1] === 'profile') {
+        measureDatabase($lab, $argv[2], $inApp);
     } elseif ($argc === 2 && $argv[1] === 'transaction') {
         verifyTransaction($lab);
     } else {
-        throw new RuntimeException('Expected profile source, profile target, or transaction.');
+        throw new RuntimeException('Expected a supported profile role or transaction.');
     }
 } catch (Throwable $failure) {
     fwrite(STDERR, $failure->getMessage() . "\n");

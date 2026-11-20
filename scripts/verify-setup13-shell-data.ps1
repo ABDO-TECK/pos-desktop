@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([ValidateSet('setup13-shell', 'in-app', 'historical')] [string] $Profile = 'setup13-shell')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -7,9 +7,8 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
     throw 'Measure packaged database contracts only on GitHub-hosted Windows Actions.'
 }
 
-$lab = Join-Path $env:RUNNER_TEMP 'setup13-shell'
-$installed = Join-Path $lab 'installed'
-$target = Join-Path $lab 'target'
+$InAppFixture = $Profile -cne 'setup13-shell'
+$lab = Join-Path $env:RUNNER_TEMP $(if ($InAppFixture) { 'shell-inapp' } else { 'setup13-shell' })
 
 function Measure-PackagedDatabase {
     param([string] $Root, [string] $Role, [string] $DataDir)
@@ -78,7 +77,9 @@ function Measure-PackagedDatabase {
 
         php $phar migrate --force
         if ($LASTEXITCODE) { throw "$Role packaged PHAR migrations failed." }
-        php scripts/verify-setup13-shell-transaction.php profile $Role
+        $profileArgs = @('scripts/verify-setup13-shell-transaction.php', 'profile', $Role)
+        if ($InAppFixture) { $profileArgs += 'in-app' }
+        & php @profileArgs
         if ($LASTEXITCODE) { throw "$Role live MariaDB profile capture failed." }
 
         & (Join-Path $mysql 'bin/mysqladmin.exe') @clientArgs shutdown
@@ -94,5 +95,15 @@ function Measure-PackagedDatabase {
     }
 }
 
-Measure-PackagedDatabase -Root $installed -Role source -DataDir (Join-Path $installed 'resources/portable/mysql/data')
-Measure-PackagedDatabase -Root $target -Role target -DataDir (Join-Path $lab 'target-data')
+if ($Profile -ceq 'in-app') {
+    Measure-PackagedDatabase -Root (Join-Path $lab 'source/installed-payload') -Role source -DataDir (Join-Path $lab 'source-data')
+    Measure-PackagedDatabase -Root (Join-Path $lab 'target/win-unpacked') -Role target -DataDir (Join-Path $lab 'target-data')
+} elseif ($Profile -ceq 'historical') {
+    $published = Join-Path $env:RUNNER_TEMP 'setup13-shell/source'
+    Measure-PackagedDatabase -Root $published -Role published-source -DataDir (Join-Path $lab 'published-source-data')
+} else {
+    $installed = Join-Path $lab 'installed'
+    $target = Join-Path $lab 'target'
+    Measure-PackagedDatabase -Root $installed -Role source -DataDir (Join-Path $installed 'resources/portable/mysql/data')
+    Measure-PackagedDatabase -Root $target -Role target -DataDir (Join-Path $lab 'target-data')
+}

@@ -1,0 +1,104 @@
+name: Windows in-app shell update acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/shell-inapp-acceptance.yml'
+      - 'electron/**'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'build/**'
+      - 'database/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'build-phar.php'
+      - 'version.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-inapp-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-update:
+    runs-on: windows-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Verify native staging paths fit on this runner
+        shell: pwsh
+        run: node scripts/verify-shell-inapp-layout.mjs
+
+      - name: Verify the published Setup 0.0.13 and extract its cold x64 payload
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-baseline.ps1
+
+      - name: Install locked build dependencies
+        shell: pwsh
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
+          COMPOSER_PROCESS_TIMEOUT: '600'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm ci
+          npm --prefix frontend ci
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          "PHP_BINARY=$((Get-Command php.exe).Source)" >> $env:GITHUB_ENV
+
+      - name: Build unpublished Setup and signed good and failing shell candidates
+        id: package
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: ./scripts/prepare-shell-inapp-acceptance.ps1
+
+      - name: Apply a failing candidate from Update Center and verify automatic recovery
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 rollback
+
+      - name: Apply a healthy candidate from Update Center and verify the commit
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 commit
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Benchmark and reconstruct binary patches for the accepted bytes
+        shell: pwsh
+        run: ./scripts/measure-shell-binary-delta.ps1
+
+      - name: Upload acceptance and measurement receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-in-app-shell-update-evidence
+          path: |
+            ${{ runner.temp }}/setup13-shell/evidence/setup-source.json
+            ${{ runner.temp }}/shell-inapp/evidence/
+          if-no-files-found: warn
+          retention-days: 14

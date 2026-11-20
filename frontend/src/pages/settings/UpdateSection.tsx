@@ -43,6 +43,7 @@ import type { TransitionPhase } from '../../hooks/useChannelTransition'
 const ACTIVE_JOB_STORAGE_KEY = 'pos.active_update_job_id'
 const ADMISSION_UNKNOWN_STORAGE_KEY = 'pos.update_admission_unknown'
 const HANDOFF_STORAGE_KEY_PREFIX = 'pos.update_handoff_'
+const RESTARTING_SHELL_JOB_KEY = 'pos.restarting_shell_job_id'
 
 function isAdmissionUnknown(): boolean {
   try {
@@ -64,6 +65,27 @@ function setAdmissionUnknown(val: boolean) {
   }
 }
 
+function getRestartingShellJobId(): number | null {
+  try {
+    const jobId = Number(localStorage.getItem(RESTARTING_SHELL_JOB_KEY))
+    return Number.isSafeInteger(jobId) && jobId > 0 ? jobId : null
+  } catch {
+    return null
+  }
+}
+
+function setRestartingShellJobId(jobId: number | null) {
+  try {
+    if (jobId === null) {
+      localStorage.removeItem(RESTARTING_SHELL_JOB_KEY)
+    } else {
+      localStorage.setItem(RESTARTING_SHELL_JOB_KEY, String(jobId))
+    }
+  } catch {
+    // The regular in-window job status still works when storage is unavailable.
+  }
+}
+
 function getHandoffMarker(jobId: number): 'idle' | 'running' | 'done' | 'failed' {
   try {
     const raw = sessionStorage.getItem(HANDOFF_STORAGE_KEY_PREFIX + jobId)
@@ -71,7 +93,7 @@ function getHandoffMarker(jobId: number): 'idle' | 'running' | 'done' | 'failed'
   } catch {
     // Ignore storage errors
   }
-  return 'idle'
+  return getRestartingShellJobId() === jobId ? 'running' : 'idle'
 }
 
 function setHandoffMarker(jobId: number, marker: 'idle' | 'running' | 'done' | 'failed') {
@@ -89,7 +111,6 @@ function setHandoffMarker(jobId: number, marker: 'idle' | 'running' | 'done' | '
 function getInitialActiveJobId(): number | null {
   try {
     const raw = sessionStorage.getItem(ACTIVE_JOB_STORAGE_KEY)
-    if (!raw) return null
     const parsed = Number(raw)
     if (Number.isInteger(parsed) && parsed > 0) {
       return parsed
@@ -97,14 +118,14 @@ function getInitialActiveJobId(): number | null {
   } catch {
     // sessionStorage unavailable
   }
-  return null
+  return getRestartingShellJobId()
 }
 
-async function hasDeltaHandoffCapability(): Promise<boolean> {
+async function getUpdateCapabilities(): Promise<{ capable: boolean; shellDelta?: boolean }> {
   try {
-    return Boolean((await window.posRuntime?.getDeltaCapability?.())?.capable)
+    return await window.posRuntime?.getDeltaCapability?.() ?? { capable: false }
   } catch {
-    return false
+    return { capable: false }
   }
 }
 
@@ -118,6 +139,7 @@ export default function UpdateSection() {
     hasUpdate, 
     currentVersion, 
     latestVersion, 
+    updateType,
     changelog, 
     isChecking, 
     forceCheck, 
@@ -148,6 +170,7 @@ export default function UpdateSection() {
     } catch {
       // Ignore storage errors
     }
+    if (id === null) setRestartingShellJobId(null)
   }, [])
 
   const [normalApplyingUpdate, setApplyingUpdate] = useState<boolean>(() => {
@@ -166,10 +189,10 @@ export default function UpdateSection() {
   const [showHistory, setShowHistory] = useState(false)
   const [showSnapshots, setShowSnapshots] = useState(false)
   const [updateLogs, setUpdateLogs] = useState<string[]>([])
-  const [bootstrapRequired, setBootstrapRequired] = useState(false)
 
   // Status and Real-time progress data
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusData | null>(null)
+  const availableUpdateType = updateType ?? updateStatus?.type
   const [historyList, setHistoryList] = useState<UpdateHistoryRecord[]>([])
   const [snapshotsList, setSnapshotsList] = useState<UpdateSnapshot[]>([])
   const [rollingBack, setRollingBack] = useState(false)
@@ -180,6 +203,7 @@ export default function UpdateSection() {
     if (isAdmissionUnknown()) return 'needs_attention'
     const initialJob = getInitialActiveJobId()
     if (initialJob) {
+      if (getRestartingShellJobId() === initialJob) return 'desktop_handoff_pending'
       const marker = getHandoffMarker(initialJob)
       if (marker === 'running' || marker === 'failed') return 'needs_attention'
       if (marker === 'done') return 'completed'
@@ -462,6 +486,9 @@ export default function UpdateSection() {
               setJobState('desktop_handoff_pending')
               setJobProgress(null)
 
+              if (result.update_type === 'shell_delta') {
+                setRestartingShellJobId(activeJobId)
+              }
               const version = result.handoff_version
               const restartNotice = 'pos-update-restarting'
               toast.loading('جاري إعادة تشغيل الخدمات لإكمال التحديث...', { id: restartNotice })
@@ -472,6 +499,10 @@ export default function UpdateSection() {
                 })
                 if (!handoff.ok) {
                   throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+                }
+                if (handoff.restarting) {
+                  setRestartingShellJobId(activeJobId)
+                  return
                 }
                 setHandoffMarker(activeJobId, 'done')
                 handoffStatusRef.current = 'done'
@@ -546,7 +577,6 @@ export default function UpdateSection() {
         return
       }
       if (data?.has_update) {
-        setBootstrapRequired(Boolean(data.bootstrap_required))
         toast.success(data.bootstrap_required ? 'تحديث التطبيق مطلوب لمرة واحدة.' : '🎉 تم العثور على تحديث جديد متوافق!')
         setShowChangelog(true)
       } else {
@@ -565,15 +595,22 @@ export default function UpdateSection() {
       return
     }
 
-    const deltaCapable = await hasDeltaHandoffCapability()
-    if (!deltaCapable && updaterApi) {
+    const capabilities = await getUpdateCapabilities()
+    const deltaCapable = capabilities.capable
+    const shellVersion = availableUpdateType === 'shell_delta' ? latestVersion : null
+    if (availableUpdateType === 'shell_delta' && (!deltaCapable || capabilities.shellDelta !== true || !shellVersion)) {
+      toast.error('تعذر تجهيز تحديث تطبيق سطح المكتب. أعد فحص التحديثات من تطبيق سطح المكتب.')
+      return
+    }
+    if ((!deltaCapable || availableUpdateType === 'bootstrap') && updaterApi) {
       setApplyingUpdate(true)
       if (typeof isBootstrapActiveRef !== 'undefined') isBootstrapActiveRef.current = true
       setUpdateLogs(['🚀 جاري تحميل تحديث التطبيق المطلوب...'])
       try {
         const downloadStatus = await updaterApi.download()
-        if (downloadStatus?.state === 'error') throw new Error(downloadStatus.error || 'فشل تحميل تحديث التطبيق.')
-        if (downloadStatus?.canInstall) await updaterApi.install()
+        if (!downloadStatus?.canInstall) throw new Error(downloadStatus?.error || 'لا توجد حزمة إعداد متوافقة متاحة الآن.')
+        const installStatus = await updaterApi.install()
+        if (installStatus?.state === 'error') throw new Error(installStatus.error || 'فشل تثبيت تحديث التطبيق.')
         return
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'فشل تحديث التطبيق.')
@@ -583,13 +620,12 @@ export default function UpdateSection() {
       }
     }
 
-    const isDelta = updateStatus?.type === 'delta' || hasUpdate
-    const updateTypeLabel = bootstrapRequired ? 'تحديث التطبيق المطلوب' : (isDelta ? 'تحديث جزئي سريع (Delta Patch)' : 'تحديث كامل (Full Package)')
+    const updateTypeLabel = availableUpdateType === 'delta' ? 'تحديث جزئي سريع (Delta Patch)' : 'تحديث كامل (Full Package)'
 
     if (!force) {
-      const confirmed = await confirm(
-        `تأكيد تثبيت التحديث (${updateTypeLabel}):\n\n• سيتم أخذ نسخة احتياطية ذرية لقاعدة البيانات والملفات.\n• سيتم التحقق من التوقيع الرقمي RSA وسلامة الملفات.\n• في حال حدوث أي خطأ، سيتم التراجع التلقائي الفوري.\n\nهل ترغب في بدء التحديث الآن؟`
-      )
+      const confirmed = await confirm(shellVersion
+        ? `هل تريد تثبيت تحديث تطبيق سطح المكتب ${shellVersion}؟ سيتم التحقق من الحزمة وإعادة تشغيل التطبيق لإكمال التثبيت.`
+        : `تأكيد تثبيت التحديث (${updateTypeLabel}):\n\n• سيتم أخذ نسخة احتياطية ذرية لقاعدة البيانات والملفات.\n• سيتم التحقق من التوقيع الرقمي RSA وسلامة الملفات.\n• في حال حدوث أي خطأ، سيتم التراجع التلقائي الفوري.\n\nهل ترغب في بدء التحديث الآن؟`)
       if (!confirmed) return
     }
 
@@ -601,7 +637,7 @@ export default function UpdateSection() {
     setUpdateLogs(['🚀 بدء عملية التحديث...', '⏳ جاري الاتصال بخادم التحديثات وتجهيز الملفات...'])
 
     try {
-      const res = await applyUpdate(force, deltaCapable, true)
+      const res = await applyUpdate(force, deltaCapable, true, shellVersion ?? undefined)
       const data = res.data?.data
       const admittedJobId = (data && typeof data === 'object' && 'job_id' in data) ? Number(data.job_id) : null
 
@@ -630,6 +666,10 @@ export default function UpdateSection() {
               return window.posRuntime.applyStagedDelta(version)
             })
             if (!handoff.ok) throw new Error(handoff.error || 'فشل الاستبدال الآمن لملفات التحديث.')
+            if (handoff.restarting) {
+              setJobState('desktop_handoff_pending')
+              return
+            }
           } finally {
             toast.dismiss(restartNotice)
           }
@@ -658,7 +698,7 @@ export default function UpdateSection() {
       void loadStatusAndHistory()
 
       // Definitive HTTP 400 / 403 validation rejection can safely unlock
-      if (isAxiosError(error) && (error.response?.status === 400 || error.response?.status === 403)) {
+      if (isAxiosError(error) && (error.response?.status === 400 || error.response?.status === 403 || error.response?.status === 426)) {
         if (typeof setAdmissionUnknown !== 'undefined') setAdmissionUnknown(false)
         setApplyingUpdate(false)
         if (typeof setActiveJobId !== 'undefined') setActiveJobId(null)
@@ -711,7 +751,7 @@ export default function UpdateSection() {
     setRollingBack(true)
     setUpdateLogs(['🔄 جاري استرجاع الملفات من اللقطة الاحتياطية...'])
     try {
-      const capable = await hasDeltaHandoffCapability()
+      const { capable } = await getUpdateCapabilities()
       const res = await rollbackUpdate(snapshotPath, capable)
       const result = res.data?.data
       if (result?.requires_desktop_handoff && result.handoff_version) {
@@ -994,7 +1034,10 @@ export default function UpdateSection() {
                 color: updateStatus?.type === 'delta' ? '#60a5fa' : 'var(--text-muted)',
                 border: '1px solid rgba(255, 255, 255, 0.1)'
               }}>
-                {updateStatus?.type === 'delta' ? '📦 Delta (جزئي)' : '💿 Full (كامل)'}
+                {availableUpdateType === 'shell_delta' ? '📦 تحديث ملفات تطبيق سطح المكتب'
+                  : availableUpdateType === 'bootstrap' ? '💿 تحديث تطبيق سطح المكتب مطلوب'
+                  : availableUpdateType === 'delta' ? '📦 Delta (جزئي)'
+                  : availableUpdateType === 'full' ? '💿 Full (كامل)' : '—'}
               </span>
             </div>
           </div>

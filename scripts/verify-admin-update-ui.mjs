@@ -279,6 +279,14 @@ app.whenReady().then(async () => {
   });
 
   const evaluate = (code) => win.webContents.executeJavaScript(code);
+  const until = async (expression, description) => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (await evaluate(expression)) return;
+      await delay(50);
+    }
+    throw new Error('Timed out waiting for ' + description);
+  };
 
   try {
     await win.loadFile(${JSON.stringify(path.join(lab, 'index.html'))});
@@ -308,7 +316,13 @@ app.whenReady().then(async () => {
       '      install: async () => {}',
       '    }',
       '  };',
-      '  window.location.reload = () => { window.__reloadCount++; };',
+      '  const schedule = window.setTimeout.bind(window);',
+      '  window.setTimeout = (callback, delay, ...args) => {',
+      '    if (delay === 1500 && typeof callback === "function" && String(callback).includes("window.location.reload")) {',
+      '      return schedule(() => { window.__reloadCount++; }, delay);',
+      '    }',
+      '    return schedule(callback, delay, ...args);',
+      '  };',
       '  window.__origDateNow = Date.now;',
       '  window.__resetHarness = () => {',
       '    sessionStorage.clear();',
@@ -365,15 +379,19 @@ app.whenReady().then(async () => {
       '  sessionStorage.setItem("pos.active_update_job_id", "42");',
       '  let simulatedTime = 1000;',
       '  Date.now = () => simulatedTime;',
-      '  window.__api.getUpdateJob = async (id) => ({ data: { data: { id: 42, status: "pending" } } });',
+      '  window.__api.getUpdateJob = async (id) => {',
+      '    window.__apiCalls.getUpdateJob = (window.__apiCalls.getUpdateJob || 0) + 1;',
+      '    return { data: { data: { id: 42, status: "pending" } } };',
+      '  };',
       '  window.mountUpdateSection();',
       '  return null;',
       '})()'
     ].join('\\n'));
-    await delay(100);
+    await until('(window.__apiCalls?.getUpdateJob || 0) > 0', 'the first pending job poll');
     // Fast-forward simulated clock past 30s pending deadline
     await evaluate('Date.now = () => 40000; null;');
-    await delay(2500); // Wait for polling loop iteration
+    await until('Boolean(document.querySelector(".btn-warning") && document.body.textContent.includes("استئناف متابعة الحالة"))',
+      'the resume button after the pending job deadline');
     const a2ActiveJob = await evaluate('sessionStorage.getItem("pos.active_update_job_id")');
     assert.equal(a2ActiveJob, '42', 'Pending timeout must retain activeJobId in sessionStorage');
 
@@ -484,6 +502,59 @@ app.whenReady().then(async () => {
     assert.equal(a5FinalJob, null, 'Safe settlement must clear activeJobId from sessionStorage');
     await evaluate('window.unmountUpdateSection(); null;');
     console.log('PASS Assertion 5');
+
+    // A shell handoff's IPC acknowledgement only schedules a restart. The
+    // relaunched renderer must wait for and display the owned backend outcome.
+    const durableJobKey = 'pos.restarting_shell_job_id';
+    for (const terminal of ['completed', 'failed']) {
+      await evaluate([
+        '(function() {',
+        '  window.__resetHarness();',
+        '  localStorage.removeItem("pos.restarting_shell_job_id");',
+        '  sessionStorage.setItem("pos.active_update_job_id", "42");',
+        '  window.__ipcGatePromise = Promise.resolve({ ok: true, restarting: true });',
+        '  window.__api.getUpdateJob = async () => ({ data: { data: {',
+        '    id: 42, status: "completed", result: { ok: true, update_type: "shell_delta", requires_desktop_handoff: true, handoff_version: "1.2.0" }',
+        '  } } });',
+        '  window.mountUpdateSection();',
+        '  return null;',
+        '})()'
+      ].join('\\n'));
+      await until('window.__applyStagedDeltaCalls >= 1', 'the queued shell handoff acknowledgement');
+      assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'The staged shell handoff must be invoked once.');
+      assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), 0,
+        'Source IPC acknowledgement cannot report an applied update.');
+      assert.equal(await evaluate('sessionStorage.getItem("pos.update_handoff_42")'), 'running',
+        'The source renderer must keep the handoff pending.');
+      assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), '42',
+        'The relaunched renderer must retain the job identity.');
+      const result = terminal === 'completed'
+        ? { ok: true, desktop_handoff_completed: true, requires_desktop_handoff: false }
+        : { requires_desktop_handoff: false };
+      const job = { id: 42, status: terminal, result, last_error: terminal === 'failed' ? 'Verified shell rollback' : null };
+      await evaluate([
+        '(function() {',
+        '  window.unmountUpdateSection();',
+        '  sessionStorage.clear();',
+        '  window.__api.getUpdateJob = async () => ({ data: { data: ' + JSON.stringify(job) + ' } });',
+        '  window.mountUpdateSection();',
+        '  return null;',
+        '})()'
+      ].join('\\n'));
+      await until('localStorage.getItem(' + JSON.stringify(durableJobKey) + ') === null',
+        'settlement of the delayed shell operation');
+      assert.equal(await evaluate('window.__applyStagedDeltaCalls'), 1, 'Restart reconciliation cannot invoke another handoff.');
+      assert.equal(await evaluate('localStorage.getItem(' + JSON.stringify(durableJobKey) + ')'), null,
+        'A verified terminal recovery must clear the pending restart job.');
+      assert.equal(await evaluate('window.__toasts.filter(t => t.type === "success").length'), terminal === 'completed' ? 1 : 0,
+        'Only a completed health commit may show success.');
+      if (terminal === 'failed') {
+        assert.equal(await evaluate('window.__toasts.some(t => t.type === "error" && t.msg === "Verified shell rollback")'), true,
+          'The source renderer must report its verified rollback.');
+      }
+      await evaluate('window.unmountUpdateSection(); null;');
+    }
+    console.log('PASS shell restart reconciliation');
 
     // ─────────────────────────────────────────────────────────────
     // Assertion 6: remount during IPC/failure -> no duplicate
