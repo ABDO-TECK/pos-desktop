@@ -76,16 +76,19 @@ const component=ts.createSourceFile('UpdateSection.tsx',
  fs.readFileSync(path.join(root,'frontend/src/pages/settings/UpdateSection.tsx'),'utf8'),
  ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 const declaration=component.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='UpdateSection');
+const capabilities=component.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='getUpdateCapabilities');
 const applyHandler=declaration.body.statements.find(n=>ts.isVariableStatement(n)&&
  n.declarationList.declarations.some(d=>d.name.getText(component)==='handleApplyUpdate'));
-const printed=ts.createPrinter().printNode(ts.EmitHint.Unspecified,applyHandler,component);
+const printer=ts.createPrinter();
+const printed=[capabilities,applyHandler].map(node=>printer.printNode(ts.EmitHint.Unspecified,node,component)).join('\n');
 const handlerCode=ts.transpileModule(printed+'; exports.invoke=handleApplyUpdate;',
  {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
 const handlerExports={},visibleFailures=[];
 vm.runInNewContext(handlerCode,{
  exports:handlerExports,Error,setTimeout,isAxiosError:axios.isAxiosError,
- useCartStore:{getState:()=>({items:[]})},hasDeltaHandoffCapability:async()=>true,
- updaterApi:undefined,updateStatus:{type:'delta'},hasUpdate:true,bootstrapRequired:false,
+ useCartStore:{getState:()=>({items:[]})},
+ window:{posRuntime:{getDeltaCapability:async()=>({capable:true,shellDelta:false})}},
+ updaterApi:undefined,availableUpdateType:'delta',
  confirm:async()=>true,setApplyingUpdate:()=>{},setUpdateLogs:()=>{},
  loadStatusAndHistory:()=>new Promise(()=>{}),
  applyUpdate:async()=>{throw new axios.AxiosError('Request failed','ERR_BAD_RESPONSE',{}, {},{

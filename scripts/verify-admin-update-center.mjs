@@ -248,6 +248,16 @@ console.log('Starting Admin Update Center Verification (Node.js & Real UI DOM)..
   let resolveManualCheck;
   let resolveHydrate;
 
+  function settledUpdate(latestVersion, notes) {
+    return {
+      status: 'update_available',
+      has_update: true,
+      current_version: '0.0.10',
+      latest_version: latestVersion,
+      changelog: [notes],
+    };
+  }
+
   const mockApi = {
     getUpdateStatus: async () => {
       return new Promise((resolve) => {
@@ -268,12 +278,7 @@ console.log('Starting Admin Update Center Verification (Node.js & Real UI DOM)..
         return new Promise((resolve) => {
           resolveSilentCheck = (data) => resolve({
             data: {
-              data: data || {
-                has_update: true,
-                latest_version: '1.2.0',
-                current_version: '0.0.10',
-                release_info: { notes: 'Silent check update' }
-              }
+              data: data || settledUpdate('1.2.0', 'Silent check update')
             }
           });
         });
@@ -281,12 +286,7 @@ console.log('Starting Admin Update Center Verification (Node.js & Real UI DOM)..
       return new Promise((resolve) => {
         resolveManualCheck = (data) => resolve({
           data: {
-            data: data || {
-              has_update: true,
-              latest_version: '1.5.0',
-              current_version: '0.0.10',
-              release_info: { notes: 'Manual check update' }
-            }
+            data: data || settledUpdate('1.5.0', 'Manual check update')
           }
         });
       });
@@ -356,12 +356,7 @@ console.log('Starting Admin Update Center Verification (Node.js & Real UI DOM)..
   assert.equal(postSwitchState.latestVersion, null);
 
   // Resolve deferred silent check with stable data
-  resolveSilentCheck({
-    has_update: true,
-    latest_version: '1.2.0',
-    current_version: '0.0.10',
-    release_info: { notes: 'Old stable release' }
-  });
+  resolveSilentCheck(settledUpdate('1.2.0', 'Old stable release'));
   await pSilent;
 
   // Verify deferred check resolution did NOT clobber new channel context
@@ -386,23 +381,16 @@ console.log('Starting Admin Update Center Verification (Node.js & Real UI DOM)..
   assert.equal(useUpdateStore.getState().isChecking, true);
 
   // Resolve silent check first
-  resolveSilentCheck({
-    has_update: true,
-    latest_version: '1.2.0',
-    current_version: '0.0.10',
-  });
+  resolveSilentCheck(settledUpdate('1.2.0', 'Superseded release'));
   await pSilent2;
 
   // Resolve manual check later with higher version
-  resolveManualCheck({
-    has_update: true,
-    latest_version: '2.0.0',
-    current_version: '0.0.10',
-  });
+  resolveManualCheck(settledUpdate('2.0.0', 'Manual check update'));
   await pManual;
 
   const afterManualState = useUpdateStore.getState();
   assert.equal(afterManualState.latestVersion, '2.0.0', 'Manual check result must prevail over superseded silent check');
+  assert.equal(afterManualState.updatesUnreachable, false, 'Settled manual check must be received as a valid response');
 
   // ─────────────────────────────────────────────────────────────────
   // C. Hydrate does not cancel manual check & Authoritative check protects state
