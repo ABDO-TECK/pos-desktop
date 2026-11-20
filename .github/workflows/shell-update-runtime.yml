@@ -59,6 +59,12 @@ jobs:
           npm ci
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm --prefix frontend ci
+      - name: Verify supervised renderer keeps pending-sale sync fenced
+        shell: pwsh
+        run: |
+          npm --prefix frontend run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-shell-renderer-startup.mjs
       - name: Verify restart reconciliation in Update Center
         shell: pwsh
         run: |
