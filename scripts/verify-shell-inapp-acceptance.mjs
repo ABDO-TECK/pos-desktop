@@ -524,6 +524,13 @@ async function runAcceptance() {
   observations.apply_job_id = jobId;
   assert.ok(!updateNetwork.some(event => event.path.endsWith('/updates/rollback')), 'A rollback API call was observed.');
   observations.transport = verifyTransport({ requests, releaseRoot, lab, inventory, binary: binaryAcceptance, scenario });
+  if (binaryAcceptance) {
+    const staging = updateNetwork.find(event => event.type === 'response' && event.path.endsWith('/update/jobs/'+jobId) &&
+      event.result?.result?.shell_transport);
+    assert.ok(staging, 'The apply job did not report the selected shell transport.');
+    assert.equal(staging.result.result.shell_transport, observations.transport.transport);
+    assert.equal(staging.result.result.shell_transport_bytes, observations.transport.selected_transport_bytes);
+  }
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 && request.path.endsWith('/pos-desktop-updates/releases')));
   await screenshot(app, scenario+'-reopened');
   observations.after = {

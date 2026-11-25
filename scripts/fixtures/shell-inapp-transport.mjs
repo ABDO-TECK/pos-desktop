@@ -37,6 +37,7 @@ export function verifyTransport({ requests, releaseRoot, lab, inventory, binary,
     assert.equal(fullTransfer(payload).delivered_sha256, originalPointer.sha256);
     assert.equal(transfers(whole).length, 0, 'A successful binary transfer contacted the whole Format 2 asset.');
   } else {
+    fullTransfer(pointerSignature, transportDir);
     const delivered = fullTransfer(whole);
     assert.equal(delivered.delivered_sha256, inventory.package.sha256);
     const fullIndex = requests.indexOf(delivered);
@@ -56,6 +57,7 @@ export function verifyTransport({ requests, releaseRoot, lab, inventory, binary,
   const delivered = Object.fromEntries([...assetNames, ...binaryAssetNames].map(name => [name, downloaded(name)]));
   return {
     transport: patchSelected ? 'binary_delta' : 'whole_file',
+    selected_transport_bytes: patchSelected ? optionalBytes : wholeBytes,
     actual_complete_transfer_bytes: delivered,
     actual_total_asset_bytes: Object.values(delivered).reduce((sum, bytes) => sum + bytes, 0),
     signed_optional_bytes: optionalBytes,
