@@ -5,10 +5,13 @@ on:
   push:
     branches:
       - 'codex/*shell*'
+      - 'codex/*binary*'
       - feat-shell-delta-updates
     paths:
       - '.github/workflows/shell-release-delivery.yml'
       - 'scripts/verify-shell-release-delivery.php'
+      - 'scripts/build-shell-delta.php'
+      - 'backend/Services/ShellBinary*.php'
       - 'backend/Services/*Update*.php'
       - 'backend/Services/*ReleaseProvider.php'
       - 'backend/Services/ShellDeltaDeliveryService.php'

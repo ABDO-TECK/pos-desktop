@@ -25,12 +25,21 @@ $require = static function (bool $valid, string $failure): void {
 };
 
 $shell = array_map($asset, ['shell-manifest.json', 'shell-manifest.sig', 'shell-delta.zip']);
+$binary = array_map($asset, ['shell-binary.json', 'shell-binary.signature', 'shell-binary.bin']);
 $legacy = array_map($asset, ['manifest.json', 'manifest.sig', 'delta.zip', 'full-package.zip']);
 $release = ['tag_name' => 'v0.0.14', 'draft' => false, 'prerelease' => false];
-$mapped = $provider->mapReleaseData($release + ['assets' => [...$legacy, ...$shell]], '0.0.13');
+$mapped = $provider->mapReleaseData($release + ['assets' => [...$legacy, ...$shell, ...$binary]], '0.0.13');
 $require(($mapped['signature_url'] ?? null) === $prefix . 'manifest.sig', 'Shell signature replaced the legacy signature.');
 $require(($mapped['full_package_url'] ?? null) === $prefix . 'full-package.zip', 'Shell archive replaced the legacy full package.');
 $require(($mapped['shell_assets']['shell-delta.zip'] ?? null) === $prefix . 'shell-delta.zip', 'Canonical shell archive was not catalogued.');
+
+$require(count($mapped['shell_binary_assets'] ?? []) === 3, 'Canonical binary asset triplet was not catalogued.');
+$malformed = $binary;
+$malformed[0]['browser_download_url'] .= '?unexpected';
+foreach ([[$binary[0]], $malformed, [...$binary, $binary[1]]] as $assets) {
+    $mapped = $provider->mapReleaseData($release + ['assets' => [...$shell, ...$assets]], '0.0.13');
+    $require(count($mapped['shell_assets']) === 3 && $mapped['shell_binary_assets'] === [], 'Invalid optional assets affected whole-file discovery.');
+}
 
 $mapped = $provider->mapReleaseData($release + ['assets' => $shell], '0.0.13');
 $require(($mapped['signature_url'] ?? null) === null && ($mapped['full_package_url'] ?? null) === null, 'Shell-only release advertised legacy assets.');
@@ -52,9 +61,10 @@ $target = $lab . '/target';
 $output = $lab . '/assets';
 $storage = $lab . '/data';
 mkdir($storage, 0700, true);
+$binaryFixture = random_bytes(2 * 1024 * 1024);
 foreach ([$source => '0.0.13', $target => '0.0.14'] as $root => $version) {
     mkdir($root . '/resources/app.asar.unpacked', 0700, true);
-    file_put_contents($root . '/POS Desktop.exe', 'test desktop executable ' . $version);
+    file_put_contents($root . '/POS Desktop.exe', $version . $binaryFixture);
     file_put_contents($root . '/resources/app.asar', 'test Electron application ' . $version);
     file_put_contents($root . '/resources/app.asar.unpacked/version.json', json_encode(['version' => $version], JSON_THROW_ON_ERROR));
 }
@@ -77,6 +87,8 @@ unlink($lab . '/private.pem');
 $transport = new class ($output) extends GitHubReleaseProvider {
     public bool $corruptZip = false;
     public int $downloads = 0;
+    public array $downloadNames = [];
+    public ?string $corruptAsset = null;
 
     public function __construct(private string $assets)
     {
@@ -92,18 +104,19 @@ $transport = new class ($output) extends GitHubReleaseProvider {
     public function downloadBoundedAssetFile(string $url, string $destPath, int $maxBytes, Closure $progress): array
     {
         $this->downloads++;
+        $this->downloadNames[] = basename($url);
         $content = file_get_contents($this->assets . '/' . basename($url));
         if ($content === false || strlen($content) > $maxBytes) {
             return ['ok' => false];
         }
         $progress(strlen($content), strlen($content), 1);
-        return ['ok' => file_put_contents($destPath, $this->corruptZip ? str_repeat('x', strlen($content)) : $content) !== false];
+        return ['ok' => file_put_contents($destPath, ($this->corruptZip || $this->corruptAsset === basename($url)) ? str_repeat('x', strlen($content)) : $content) !== false];
     }
 };
 $preservedSource = hash_file('sha256', $source . '/POS Desktop.exe');
 $delta = new DeltaUpdateService(null, $source, $storage);
 $signatures = new ManifestSignatureService($lab . '/public.pem', [], false, false);
-$delivery = new ShellDeltaDeliveryService($transport, new ShellDeltaManifestService($signatures), $delta);
+$delivery = new ShellDeltaDeliveryService($transport, new ShellDeltaManifestService($signatures), $delta, $signatures);
 $catalogue = $transport->mapReleaseData($release + ['assets' => $shell], '0.0.13');
 $remote = $catalogue + ['version' => '0.0.14'];
 $verified = $delivery->inspect($remote, '0.0.13', 'stable', '0.0.13');
@@ -121,6 +134,35 @@ $require($delivery->stage($verified, $context) === null && $transport->downloads
 file_put_contents($stage . '/shell-delta.zip', 'short corrupt prior stage');
 $require($delivery->stage($verified, $context) === null && $transport->downloads === 3, 'A corrupt prior stage could not be replaced by a verified retry.');
 $require(hash_file('sha256', $source . '/POS Desktop.exe') === $preservedSource, 'Staging modified the installed source.');
+$binaryCatalogue = $transport->mapReleaseData($release + ['assets' => [...$shell, ...$binary]], '0.0.13');
+$binaryVerified = $delivery->inspect($binaryCatalogue + ['version' => '0.0.14'], '0.0.13', 'stable', '0.0.13');
+$binaryState = [];
+file_put_contents($stage . '/shell-delta.zip', 'replace with binary transport');
+$transport->downloadNames = [];
+$require($delivery->stage($binaryVerified, $context, $source, $binaryState) === null, 'Binary staging failed.');
+$require($transport->downloadNames === ['shell-binary.bin'] && ($binaryState['shell_transport'] ?? null) === 'binary_delta',
+    'Binary staging downloaded the whole-file ZIP.');
+$require(hash_file('sha256', $stage . '/shell-delta.zip') === hash_file('sha256', $output . '/shell-delta.zip'),
+    'Binary staging did not reconstruct the exact signed ZIP.');
+$require($binaryState['shell_transport_bytes'] < filesize($output . '/shell-delta.zip'),
+    'Binary staging used a larger transport.');
+$require(count(glob($stage . '/*')) === 3, 'Optional assets leaked into the worker staging directory.');
+
+file_put_contents($stage . '/shell-delta.zip', 'replace with full fallback');
+$transport->downloadNames = [];
+$transport->corruptAsset = 'shell-binary.bin';
+$require($delivery->stage($binaryVerified, $context, $source, $binaryState) === null, 'Corrupt binary transport could not fall back.');
+$require($transport->downloadNames === ['shell-binary.bin', 'shell-delta.zip'] && $binaryState['shell_transport'] === 'whole_file',
+    'Corrupt binary transport did not use the separately verified whole-file ZIP.');
+$transport->corruptAsset = null;
+
+file_put_contents($stage . '/shell-delta.zip', 'replace with full fallback');
+file_put_contents($output . '/shell-binary.signature', base64_encode('wrong signature'));
+$transport->downloadNames = [];
+$require($delivery->stage($binaryVerified, $context, $source, $binaryState) === null && $transport->downloadNames === ['shell-delta.zip'],
+    'Untrusted metadata authorized the binary download.');
+$require(hash_file('sha256', $source . '/POS Desktop.exe') === $preservedSource, 'Binary staging modified the installed source.');
+
 file_put_contents($output . '/shell-manifest.sig', base64_encode('wrong signature'));
 $require($delivery->inspect($remote, '0.0.13', 'stable', '0.0.13')['reason_code'] === 'signature_invalid', 'Invalid signature passed discovery.');
 

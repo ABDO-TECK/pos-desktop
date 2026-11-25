@@ -19,6 +19,7 @@ if (is_file(__DIR__ . '/../backend/vendor/autoload.php')) {
 use App\Services\{
     ManifestSignatureService,
     ProductInventoryService,
+    ShellBinaryTransportService,
     ShellDeltaManifestService,
     UpdateChannelPolicy,
     UpdateDataCompatibilityService
@@ -53,6 +54,7 @@ Outputs:
   shell-manifest.json
   shell-manifest.sig
   shell-delta.zip
+  shell-binary.json, shell-binary.signature, shell-binary.bin (optional smaller transport)
   source-inventory.json
   target-inventory.json
 
@@ -925,14 +927,7 @@ try {
             throw new RuntimeException("Total uncompressed payload exceeds 1 GiB limit.");
         }
 
-        if (!$zip->addFile($sourceFilePath, $relPath)) {
-            throw new RuntimeException("Failed to add file to zip archive: {$relPath}");
-        }
-
-        // Set deterministic regular Unix file attribute 0100644 << 16 on EVERY entry
-        if (!$zip->setExternalAttributesName($relPath, ZipArchive::OPSYS_UNIX, (0100644 << 16))) {
-            throw new RuntimeException("Failed to set regular Unix file attributes on zip entry: {$relPath}");
-        }
+        ShellBinaryTransportService::addCanonicalFile($zip, $sourceFilePath, $relPath);
     }
 
     $zipOpen = false;
@@ -1112,6 +1107,18 @@ try {
     $writtenZipVerify = $manifestService->validatePackageZip($zipPath, $descriptor);
     if (!$writtenZipVerify['ok']) {
         throw new RuntimeException("Written package zip re-verification failed: " . ($writtenZipVerify['reason_code'] ?? 'unknown'));
+    }
+
+    if ($purpose === 'regular') {
+        $revalidateStage();
+        $binary = new ShellBinaryTransportService();
+        try {
+            if ($binary->build($canonicalSource, $canonicalTarget, $stageDir, $descriptor, $rawManifest, $privKey)) {
+                echo "Verified smaller signed binary transport alongside the canonical shell ZIP.\n";
+            }
+        } catch (RuntimeException $e) {
+            fwrite(STDERR, "Optional binary transport unavailable: " . $e->getMessage() . "\n");
+        }
     }
 
     // GHA Fault injection hook: before_publish
