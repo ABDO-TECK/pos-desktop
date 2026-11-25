@@ -495,6 +495,12 @@ class BackgroundUpdateApplyService
             if (isset($data['handoff_version'])) {
                 $cleanData['handoff_version'] = $data['handoff_version'] ? (string) $data['handoff_version'] : null;
             }
+            if (in_array($data['shell_transport'] ?? null, ['binary_delta', 'whole_file', 'staged'], true)
+                && is_int($data['shell_transport_bytes'] ?? null) && $data['shell_transport_bytes'] >= 0
+                && $data['shell_transport_bytes'] <= ShellDeltaManifestService::MAX_PACKAGE_SIZE) {
+                $cleanData['shell_transport'] = $data['shell_transport'];
+                $cleanData['shell_transport_bytes'] = $data['shell_transport_bytes'];
+            }
             if (isset($data['applied_files']) && is_array($data['applied_files'])) {
                 $cleanData['applied_files'] = array_map(static function ($file) {
                     return basename((string) $file);
