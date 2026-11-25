@@ -729,7 +729,7 @@ class UpdateService
                 'ok' => true,
                 'updates_disabled' => false,
                 'updates_unreachable' => false,
-                'message' => 'النظام محدّث لأحدث إصدار.',
+                'message' => 'لا يوجد تحديث متاح للتثبيت.',
                 'current_version' => $currentVersion,
                 'latest_version' => null,
                 'update_engine_version' => $local['update_engine_version'] ?? null,
@@ -737,6 +737,7 @@ class UpdateService
                 'release_channel' => $remote['channel'] ?? $clientChannel,
                 'rollout_percentage' => 100,
                 'has_update' => false,
+                'is_up_to_date' => false,
                 'currentVersion' => $currentVersion,
                 'latestVersion' => null,
                 'updateAvailable' => false,
@@ -802,7 +803,11 @@ class UpdateService
             $targetReleaseChannel = $derivedReleaseChannel ?? $declaredReleaseChannel ?? $clientChannel;
             $channelCompat = $this->manifestService->checkChannelCompatibility($clientChannel, $targetReleaseChannel);
         }
-        $hasUpdate = $compatibility['compatible'] && $channelCompat['compatible'] && version_compare($latestVersion, $currentVersion, '>');
+        $versionOrder = $compatibility['compatible'] && $channelCompat['compatible']
+            ? version_compare($latestVersion, $currentVersion)
+            : null;
+        $hasUpdate = $versionOrder !== null && $versionOrder > 0;
+        $isUpToDate = $versionOrder !== null && $versionOrder <= 0;
         $deltaReason = !$channelCompat['compatible'] ? $channelCompat['reason'] : $compatibility['reason'];
         $deltaReasonCode = !$channelCompat['compatible'] ? 'channel_mismatch' : $compatibility['reason_code'];
 
@@ -978,6 +983,8 @@ class UpdateService
             ]);
         }
 
+        $noUpdateMessage = $isUpToDate ? 'النظام محدّث.' : 'لا يوجد تحديث متاح للتثبيت.';
+
         return [
             'success'               => $shellFailure === null,
 
@@ -985,7 +992,7 @@ class UpdateService
             'ok'                    => true,
             'updates_disabled'      => false,
             'updates_unreachable'   => $shellFailure !== null,
-            'message'               => $hasUpdate ? 'يتوفر تحديث جديد.' : ($deltaReason ?? 'النظام محدّث لأحدث إصدار.'),
+            'message'               => $hasUpdate ? 'يتوفر تحديث جديد.' : ($deltaReason ?? $noUpdateMessage),
             'current_version'       => $currentVersion,
             'latest_version'        => $latestVersion,
             'update_engine_version' => $clientEngineVersion,
@@ -993,6 +1000,7 @@ class UpdateService
             'release_channel'       => $deltaManifest['channel'] ?? ($remote['channel'] ?? 'stable'),
             'rollout_percentage'    => $deltaManifest['rollout_percentage'] ?? 100,
             'has_update'            => $hasUpdate,
+            'is_up_to_date'         => $isUpToDate,
             'currentVersion'        => $currentVersion,
             'latestVersion'         => $latestVersion,
             'updateAvailable'       => $hasUpdate,
