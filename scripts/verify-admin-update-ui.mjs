@@ -636,17 +636,17 @@ app.whenReady().then(async () => {
       current_version: installedVersion, latest_version: oldFeedVersion,
       has_update: false, is_up_to_date: true,
       updates_disabled: false, updates_unreachable: false,
-      update_type: 'full', changelog: [],
+      update_type: 'full', released_at: null, changelog: [],
     };
     const scenarios = [
       { label: 'older feed', result: noUpdate, summary: 'النظام محدّث' },
       { label: 'equal feed', result: { ...noUpdate, latest_version: installedVersion }, summary: 'النظام محدّث' },
+      { label: 'offline after confirmation', result: { ...noUpdate, status: 'github_network_timeout', success: false, latest_version: null, is_up_to_date: undefined, updates_unreachable: true, message: 'تعذر الاتصال بخادم التحديثات.' }, summary: 'تعذر الاتصال بخادم التحديثات.' },
       { label: 'newer full offer', result: { ...noUpdate, status: 'update_available', latest_version: '0.0.15', has_update: true, is_up_to_date: false }, offer: '💿 Full (كامل)', summary: 'تحديث متاح للتثبيت' },
       { label: 'newer shell offer', result: { ...noUpdate, status: 'update_available', latest_version: '0.0.15', has_update: true, is_up_to_date: false, update_type: 'shell_delta' }, offer: '📦 تحديث ملفات تطبيق سطح المكتب', summary: 'تحديث متاح للتثبيت' },
       { label: 'incompatible newer feed', result: { ...noUpdate, latest_version: '0.0.15', is_up_to_date: false }, summary: 'لا يوجد تحديث متاح للتثبيت' },
       { label: 'feed without a comparable version', result: { ...noUpdate, latest_version: null, is_up_to_date: false }, summary: 'لا يوجد تحديث متاح للتثبيت' },
       { label: 'legacy response without verdict', result: { ...noUpdate, is_up_to_date: undefined }, summary: 'لا يوجد تحديث متاح للتثبيت' },
-      { label: 'offline after confirmation', result: { ...noUpdate, status: 'github_network_timeout', success: false, latest_version: null, is_up_to_date: undefined, updates_unreachable: true, message: 'تعذر الاتصال بخادم التحديثات.' }, summary: 'تعذر الاتصال بخادم التحديثات.' },
     ];
     await evaluate([
       'window.__resetHarness();',
@@ -664,6 +664,7 @@ app.whenReady().then(async () => {
       await evaluate('window.__api.checkUpdate = () => new Promise(resolve => { window.__completeCheck = resolve; }); (' + checkButton + ').click(); null;');
       await until('typeof window.__completeCheck === "function" && document.getElementById("section-root").textContent.includes("جاري الفحص...")', 'manual check to start for ' + label);
       const loadingSummary = await readSummary();
+      assert.ok(await evaluate(hasExactSummaryText('جاري الفحص...')), 'The summary must show that a check is in progress for ' + label);
       assert.ok(!loadingSummary.includes('النظام محدّث'), 'A pending check must not display an up-to-date result for ' + label);
       await evaluate('window.__completeCheck({ data: { data: ' + JSON.stringify(result) + ' } }); window.__completeCheck = null; null;');
       await until('Boolean(' + checkButton + ')', 'manual check to settle for ' + label);
@@ -681,6 +682,7 @@ app.whenReady().then(async () => {
       } else {
         assert.ok(!rendered.includes('Full (كامل)'), 'Expected no default Full badge for ' + label);
         assert.ok(!rendered.includes('v' + oldFeedVersion), 'Expected no misleading update version for ' + label);
+        assert.ok(!rendered.includes('v0.0.15'), 'Expected no unoffered newer version for ' + label);
       }
       console.log('PASS: Update Center status for ' + label);
     }

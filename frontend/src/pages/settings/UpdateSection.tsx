@@ -31,7 +31,7 @@ import {
   runPostUpdateHealthCheck
 } from '../../api/endpoints'
 
-import useUpdateStore from '../../store/updateStore'
+import useUpdateStore, { isUpToDateResult, isValidSettledResult } from '../../store/updateStore'
 import useCartStore from '../../store/cartStore'
 import { useConfirmStore } from '../../store/confirmStore'
 import SectionTitle from '../../components/common/SectionTitle'
@@ -44,6 +44,8 @@ const ACTIVE_JOB_STORAGE_KEY = 'pos.active_update_job_id'
 const ADMISSION_UNKNOWN_STORAGE_KEY = 'pos.update_admission_unknown'
 const HANDOFF_STORAGE_KEY_PREFIX = 'pos.update_handoff_'
 const RESTARTING_SHELL_JOB_KEY = 'pos.restarting_shell_job_id'
+const UP_TO_DATE_LABEL = 'النظام محدّث'
+const NO_UPDATE_OFFER_LABEL = 'لا يوجد تحديث متاح للتثبيت'
 
 function isAdmissionUnknown(): boolean {
   try {
@@ -137,11 +139,14 @@ export default function UpdateSection() {
 
   const { 
     hasUpdate, 
+    isUpToDate,
     currentVersion, 
     latestVersion, 
     updateType,
     changelog, 
     isChecking, 
+    isPending,
+    lastChecked,
     forceCheck, 
     hydrateLocalStatus,
     setChannelState,
@@ -150,6 +155,12 @@ export default function UpdateSection() {
     updatesUnreachable, 
     updateErrorMessage 
   } = useUpdateStore()
+
+  const updateCheckInProgress = isChecking || isPending
+  const hasUpdateOffer = hasUpdate && !updateCheckInProgress && !updatesDisabled && !updatesUnreachable
+  const noOfferStatus = lastChecked === null
+    ? 'لم يتم التحقق من التحديثات بعد'
+    : isUpToDate ? UP_TO_DATE_LABEL : NO_UPDATE_OFFER_LABEL
 
   const handoffDoneRef = useRef(false)
   const handoffStatusRef = useRef<'idle' | 'running' | 'done' | 'failed'>('idle')
@@ -566,21 +577,22 @@ export default function UpdateSection() {
   const handleCheckUpdate = async () => {
     try {
       const data = await forceCheck()
+      if (!data) return
       await loadAll(true)
 
-      if (data?.updates_disabled) {
+      if (data.updates_disabled) {
         toast.error(data.message || 'خادم التحديثات غير مهيأ.')
         return
       }
-      if (data?.updates_unreachable) {
+      if (data.updates_unreachable || !isValidSettledResult(data)) {
         toast.error(formatUpdateError(data))
         return
       }
-      if (data?.has_update) {
+      if (data.has_update) {
         toast.success(data.bootstrap_required ? 'تحديث التطبيق مطلوب لمرة واحدة.' : '🎉 تم العثور على تحديث جديد متوافق!')
         setShowChangelog(true)
       } else {
-        toast.success('✅ النظام محدّث لأحدث إصدار.')
+        toast.success(isUpToDateResult(data) ? UP_TO_DATE_LABEL : NO_UPDATE_OFFER_LABEL)
       }
     } catch (error: unknown) {
       const responseData = isAxiosError(error) ? error.response?.data : undefined
@@ -998,8 +1010,8 @@ export default function UpdateSection() {
         <div style={{
           padding: '1.2rem',
           borderRadius: '10px',
-          background: hasUpdate ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(16, 185, 129, 0.05))' : 'var(--bg)',
-          border: hasUpdate ? '1px solid rgba(34, 197, 94, 0.35)' : '1px solid var(--border)',
+          background: hasUpdateOffer ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(16, 185, 129, 0.05))' : 'var(--bg)',
+          border: hasUpdateOffer ? '1px solid rgba(34, 197, 94, 0.35)' : '1px solid var(--border)',
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
           gap: '1rem',
@@ -1015,45 +1027,46 @@ export default function UpdateSection() {
             </div>
           </div>
 
-          <div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>أحدث إصدار متاح</div>
-            <div style={{ fontSize: '1.25rem', fontWeight: 700, color: hasUpdate ? '#22c55e' : 'var(--text)' }}>
-              {latestVersion ? `v${latestVersion}` : (currentVersion ? `v${currentVersion}` : 'غير معروف')}
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>نوع التحديث</div>
+          {hasUpdateOffer && latestVersion && (
             <div>
-              <span style={{
-                fontSize: '0.8rem',
-                fontWeight: 600,
-                padding: '0.2rem 0.5rem',
-                borderRadius: '6px',
-                background: updateStatus?.type === 'delta' ? 'rgba(59, 130, 246, 0.15)' : 'rgba(156, 163, 175, 0.15)',
-                color: updateStatus?.type === 'delta' ? '#60a5fa' : 'var(--text-muted)',
-                border: '1px solid rgba(255, 255, 255, 0.1)'
-              }}>
-                {availableUpdateType === 'shell_delta' ? '📦 تحديث ملفات تطبيق سطح المكتب'
-                  : availableUpdateType === 'bootstrap' ? '💿 تحديث تطبيق سطح المكتب مطلوب'
-                  : availableUpdateType === 'delta' ? '📦 Delta (جزئي)'
-                  : availableUpdateType === 'full' ? '💿 Full (كامل)' : '—'}
-              </span>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>أحدث إصدار متاح</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#22c55e' }}>v{latestVersion}</div>
             </div>
-          </div>
+          )}
+
+          {hasUpdateOffer && updateType && updateType !== 'none' && (
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>نوع التحديث</div>
+              <div>
+                <span style={{
+                  fontSize: '0.8rem',
+                  fontWeight: 600,
+                  padding: '0.2rem 0.5rem',
+                  borderRadius: '6px',
+                  background: updateType === 'delta' ? 'rgba(59, 130, 246, 0.15)' : 'rgba(156, 163, 175, 0.15)',
+                  color: updateType === 'delta' ? '#60a5fa' : 'var(--text-muted)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)'
+                }}>
+                  {updateType === 'shell_delta' ? '📦 تحديث ملفات تطبيق سطح المكتب'
+                    : updateType === 'bootstrap' ? '💿 تحديث تطبيق سطح المكتب مطلوب'
+                    : updateType === 'delta' ? '📦 Delta (جزئي)' : '💿 Full (كامل)'}
+                </span>
+              </div>
+            </div>
+          )}
 
           <div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>حالة النظام</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem', fontWeight: 600, color: hasUpdate ? '#22c55e' : '#38bdf8' }}>
-              {hasUpdate ? <CheckCircle2 size={16} /> : <CheckCircle2 size={16} />}
-              {hasUpdate ? 'تحديث متاح للتثبيت' : 'النظام محدّث لأحدث إصدار'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem', fontWeight: 600, color: hasUpdateOffer ? '#22c55e' : '#38bdf8' }}>
+              {(hasUpdateOffer || (isUpToDate && !updateCheckInProgress)) && <CheckCircle2 size={16} />}
+              {hasUpdateOffer ? 'تحديث متاح للتثبيت' : updateCheckInProgress ? 'جاري الفحص...' : noOfferStatus}
             </div>
           </div>
         </div>
       )}
 
       {/* Release Information Card (When update available) */}
-      {hasUpdate && updateStatus?.release_info && (
+      {hasUpdateOffer && updateStatus?.release_info && (
         <div style={{ padding: '1rem', background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.2)', borderRadius: '8px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
             <h4 style={{ margin: 0, fontSize: '0.95rem', color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -1227,7 +1240,7 @@ export default function UpdateSection() {
           {isChecking ? 'جاري الفحص...' : 'التحقق من التحديثات'}
         </button>
 
-        {hasUpdate && (
+        {hasUpdateOffer && (
           <button
             type="button"
             onClick={() => handleApplyUpdate(false)}
