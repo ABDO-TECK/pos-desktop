@@ -16,3 +16,27 @@
   - Distributing native shell updates from 0.0.13 to this patched shell requires a future explicit native baseline release approved by release management, not an unauthorized delta.
 - **Published Asset Immutability**:
   - Existing published tags (v0.0.13 on `pos-desktop`, v0.0.12-beta.1 on `pos-desktop-updates`) and their released PHP payloads remain immutable and unpatched on GitHub. Channel isolation controls are implemented in the Source repository verification and orchestration layers.
+
+## 3. Optional binary transport for signed shell releases
+
+Build the Format 2 shell release from verified source and target installations
+with `scripts/build-shell-delta.php`. On Windows Actions, use the trusted portable
+PHP from the source Setup for the builder, with `zip` and `openssl` enabled.
+Matching the installed PHP and ZIP toolchain lets the client regenerate the exact
+bytes of the canonical archive.
+
+Stage `shell-manifest.json`, `shell-manifest.sig`, and `shell-delta.zip` under the
+same release tag. For regular shell releases, the builder emits
+`shell-binary.json`, `shell-binary.signature`, and `shell-binary.bin` when those
+three files together are smaller than `shell-delta.zip` and reproduce it exactly.
+Stage the optional files together alongside the required assets when present.
+The source and target inventories provide the corresponding verification evidence.
+
+The binary metadata has a detached signature under the shell release key and
+binds the exact Format 2 manifest bytes and the payload hash and size. The payload
+ZIP has one entry per changed-file index. An entry holds copy and literal commands
+against the corresponding signed installed file or the whole changed file. The
+client verifies each reconstructed file and the canonical archive before staging.
+It downloads the separately signed canonical archive when the binary transport is
+unavailable, invalid, or incompatible with its ZIP toolchain. Existing clients,
+including 0.0.14, continue to use the three required assets.

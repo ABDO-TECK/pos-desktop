@@ -182,13 +182,16 @@ final class ShellBinaryTransportService
                     throw new RuntimeException('Cannot add a whole file to the binary transport.');
                 }
             }
+            if ($patchCount === 0) {
+                return false;
+            }
             if (!$thin->close()) {
                 throw new RuntimeException('Cannot finalize the binary transport.');
             }
             $thin = null;
             clearstatcache(true, $payload);
             $size = filesize($payload);
-            if (!$patchCount || !is_int($size) || $size < 1 || $size >= $package['size']) {
+            if (!is_int($size) || $size < 1 || $size >= $package['size']) {
                 return false;
             }
             $sha256 = hash_file('sha256', $payload);
