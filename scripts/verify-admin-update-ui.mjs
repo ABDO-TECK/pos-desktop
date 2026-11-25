@@ -21,7 +21,9 @@ try {
     `import UpdateSection from ${JSON.stringify(path.join(root, 'frontend/src/pages/settings/UpdateSection.tsx'))};`,
     `import UpdateProgress from ${JSON.stringify(path.join(root, 'frontend/src/components/update/UpdateProgress.tsx'))};`,
     `import useChannelTransition from ${JSON.stringify(path.join(root, 'frontend/src/hooks/useChannelTransition.ts'))};`,
+    `import useUpdateStore from ${JSON.stringify(path.join(root, 'frontend/src/store/updateStore.ts'))};`,
     `window.React = React;`,
+    `window.__updateStore = useUpdateStore;`,
     `let sectionRoot = null;`,
     `let progressRoot = null;`,
     `let hookRoot = null;`,
@@ -70,7 +72,6 @@ try {
         if (source.includes('api/endpoints')) return '\0fixture-api';
         if (source.includes('cartStore')) return '\0fixture-cart';
         if (source.includes('confirmStore')) return '\0fixture-confirm';
-        if (source.includes('updateStore')) return '\0fixture-store';
         if (source.includes('updateRestart')) return '\0fixture-restart';
         if (source.includes('SectionTitle')) return '\0fixture-section-title';
         if (source.includes('RollbackPoints')) return '\0fixture-rollback-points';
@@ -125,6 +126,10 @@ export const getUpdateStatus = (...args) => {
   window.__apiCalls.getUpdateStatus = (window.__apiCalls.getUpdateStatus || 0) + 1;
   return window.__api.getUpdateStatus ? window.__api.getUpdateStatus(...args) : Promise.resolve({ data: { data: {} } });
 };
+export const checkUpdate = (...args) => {
+  window.__apiCalls.checkUpdate = (window.__apiCalls.checkUpdate || 0) + 1;
+  return window.__api.checkUpdate(...args);
+};
 export const getUpdateJob = (...args) => {
   window.__apiCalls.getUpdateJob = (window.__apiCalls.getUpdateJob || 0) + 1;
   return window.__api.getUpdateJob ? window.__api.getUpdateJob(...args) : Promise.resolve({ data: { data: null } });
@@ -176,48 +181,6 @@ export const applyChannelTransition = (...args) => {
         }
         if (id === '\0fixture-confirm') {
           return `export const useConfirmStore = () => ({ confirm: async () => window.__confirmResult ?? true });`;
-        }
-        if (id === '\0fixture-store') {
-          return `
-import { create } from ${JSON.stringify(path.join(root, 'frontend/node_modules/zustand/index.js'))};
-const defaultState = {
-  hasUpdate: false,
-  latestVersion: null,
-  currentVersion: '0.0.9',
-  channel: null,
-  installedChannel: null,
-  changelog: [],
-  lastChecked: null,
-  isChecking: false,
-  isPending: false,
-  updatesDisabled: false,
-  updatesDisabledMessage: '',
-  updatesUnreachable: false,
-  updateErrorMessage: '',
-};
-
-window.__updateStore = create((set, get) => ({
-  ...defaultState,
-  setChannelState: (channel) => set({ channel, hasUpdate: false, latestVersion: null }),
-  invalidate: () => set({ hasUpdate: false, latestVersion: null }),
-  hydrateLocalStatus: async () => {
-    if (window.__api.getUpdateStatus) {
-      const res = await window.__api.getUpdateStatus();
-      const d = res.data?.data;
-      if (d) set({ currentVersion: d.current_version, channel: d.channel, installedChannel: d.installed_channel });
-      return d;
-    }
-    return null;
-  },
-  forceCheck: async () => {
-    if (window.__api.checkUpdate) return window.__api.checkUpdate();
-    return {};
-  },
-  silentCheck: async () => {}
-}));
-
-export default window.__updateStore;
-`;
         }
         if (id === '\0fixture-restart') {
           return `
@@ -327,6 +290,8 @@ app.whenReady().then(async () => {
       '  window.__resetHarness = () => {',
       '    sessionStorage.clear();',
       '    Date.now = window.__origDateNow;',
+      '    window.__updateStore.getState().invalidate();',
+      '    window.__updateStore.setState({ currentVersion: null, channel: null, installedChannel: null, updatesDisabled: false, updatesDisabledMessage: "" });',
       '    window.__toasts = [];',
       '    window.__apiCalls = {};',
       '    window.__applyStagedDeltaCalls = 0;',
@@ -660,7 +625,68 @@ app.whenReady().then(async () => {
     await evaluate('window.unmountChannelHook(); null;');
     console.log('PASS Assertion 9');
 
-    console.log('\\nALL 9 ADMIN UPDATE UI ASSERTIONS PASSED ON REAL REACT DOM!\\n');
+    // An offer must come from the checked response, not from cache-only release metadata.
+    const hasExactSummaryText = (text) => 'Array.from(document.querySelectorAll("#section-root div")).some(element => element.textContent.trim() === ' + JSON.stringify(text) + ')';
+    const readSummary = () => evaluate('document.getElementById("section-root").textContent');
+    const checkButton = 'Array.from(document.querySelectorAll("#section-root button")).find(button => button.textContent.trim() === "التحقق من التحديثات")';
+    const installedVersion = '0.0.14';
+    const oldFeedVersion = '0.0.13';
+    const noUpdate = {
+      status: 'no_update_available', success: true, ok: true,
+      current_version: installedVersion, latest_version: oldFeedVersion,
+      has_update: false, is_up_to_date: true,
+      updates_disabled: false, updates_unreachable: false,
+      update_type: 'full', changelog: [],
+    };
+    const scenarios = [
+      { label: 'older feed', result: noUpdate, summary: 'النظام محدّث' },
+      { label: 'equal feed', result: { ...noUpdate, latest_version: installedVersion }, summary: 'النظام محدّث' },
+      { label: 'newer full offer', result: { ...noUpdate, status: 'update_available', latest_version: '0.0.15', has_update: true, is_up_to_date: false }, offer: '💿 Full (كامل)', summary: 'تحديث متاح للتثبيت' },
+      { label: 'newer shell offer', result: { ...noUpdate, status: 'update_available', latest_version: '0.0.15', has_update: true, is_up_to_date: false, update_type: 'shell_delta' }, offer: '📦 تحديث ملفات تطبيق سطح المكتب', summary: 'تحديث متاح للتثبيت' },
+      { label: 'incompatible newer feed', result: { ...noUpdate, latest_version: '0.0.15', is_up_to_date: false }, summary: 'لا يوجد تحديث متاح للتثبيت' },
+      { label: 'feed without a comparable version', result: { ...noUpdate, latest_version: null, is_up_to_date: false }, summary: 'لا يوجد تحديث متاح للتثبيت' },
+      { label: 'legacy response without verdict', result: { ...noUpdate, is_up_to_date: undefined }, summary: 'لا يوجد تحديث متاح للتثبيت' },
+      { label: 'offline after confirmation', result: { ...noUpdate, status: 'github_network_timeout', success: false, latest_version: null, is_up_to_date: undefined, updates_unreachable: true, message: 'تعذر الاتصال بخادم التحديثات.' }, summary: 'تعذر الاتصال بخادم التحديثات.' },
+    ];
+    await evaluate([
+      'window.__resetHarness();',
+      'window.__api.getUpdateStatus = async () => ({ data: { data: ' + JSON.stringify({ current_version: installedVersion, latest_version: oldFeedVersion, update_available: false, type: 'full', channel: 'stable', installed_channel: 'stable' }) + ' } });',
+      'window.mountUpdateSection();',
+      'null;'
+    ].join('\\n'));
+    await until(hasExactSummaryText('v' + installedVersion), 'the installed version from local status');
+    const initialSummary = await readSummary();
+    assert.ok(initialSummary.includes('لم يتم التحقق من التحديثات بعد'), 'Local hydration alone must show the unchecked state');
+    assert.ok(!initialSummary.includes('النظام محدّث'), 'Local hydration alone cannot confirm the version is current');
+    assert.equal(await evaluate('window.__apiCalls.checkUpdate || 0'), 0, 'Opening the Update Center must not initiate a manual check');
+
+    for (const { label, result, offer, summary } of scenarios) {
+      await evaluate('window.__api.checkUpdate = () => new Promise(resolve => { window.__completeCheck = resolve; }); (' + checkButton + ').click(); null;');
+      await until('typeof window.__completeCheck === "function" && document.getElementById("section-root").textContent.includes("جاري الفحص...")', 'manual check to start for ' + label);
+      const loadingSummary = await readSummary();
+      assert.ok(!loadingSummary.includes('النظام محدّث'), 'A pending check must not display an up-to-date result for ' + label);
+      await evaluate('window.__completeCheck({ data: { data: ' + JSON.stringify(result) + ' } }); window.__completeCheck = null; null;');
+      await until('Boolean(' + checkButton + ')', 'manual check to settle for ' + label);
+      const rendered = await readSummary();
+      if (result.updates_unreachable) {
+        assert.ok(rendered.includes(summary), 'An offline check must explain the server failure');
+      } else {
+        assert.ok(await evaluate(hasExactSummaryText(summary)), 'Unexpected rendered status for ' + label + ': ' + rendered);
+      }
+      assert.equal(rendered.includes('نوع التحديث'), Boolean(offer), 'Update type visibility for ' + label);
+      assert.equal(rendered.includes('تثبيت التحديث الآن'), Boolean(offer), 'Install action visibility for ' + label);
+      if (offer) {
+        assert.ok(rendered.includes(offer), 'Expected Update Center to display the real offer type for ' + label);
+        assert.ok(rendered.includes('v0.0.15'), 'Expected Update Center to display the offered release version for ' + label);
+      } else {
+        assert.ok(!rendered.includes('Full (كامل)'), 'Expected no default Full badge for ' + label);
+        assert.ok(!rendered.includes('v' + oldFeedVersion), 'Expected no misleading update version for ' + label);
+      }
+      console.log('PASS: Update Center status for ' + label);
+    }
+    await evaluate('window.unmountUpdateSection(); null;');
+
+    console.log('\\nALL ADMIN UPDATE UI ASSERTIONS PASSED ON REAL REACT DOM!\\n');
     app.exit(0);
   } catch (error) {
     console.error(error.stack || error);
