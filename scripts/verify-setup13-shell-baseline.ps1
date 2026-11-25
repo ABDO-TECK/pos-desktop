@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch] $BinaryAcceptance)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -11,7 +11,7 @@ $runner = Get-Item -LiteralPath $env:RUNNER_TEMP
 if (-not $runner.PSIsContainer -or ($runner.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     throw 'Expected a regular Actions runner temp directory.'
 }
-$lab = Join-Path $runner.FullName 'setup13-shell'
+$lab = Join-Path $runner.FullName $(if ($BinaryAcceptance) { 'setup14-shell' } else { 'setup13-shell' })
 New-Item -ItemType Directory -Path $lab | Out-Null
 $evidence = Join-Path $lab 'evidence'
 New-Item -ItemType Directory -Path $evidence | Out-Null
@@ -22,15 +22,18 @@ $headers = @{
 }
 
 $repo = 'ABDO-TECK/pos-desktop'
-$tag = 'v0.0.13'
-$sourceCommit = 'ee5bf691c4acf6ffcd7730db1d7d0ed24f274787'
-$tagRef = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/tags/$tag" -Headers $headers -TimeoutSec 40
-if ($tagRef.object.type -cne 'commit' -or $tagRef.object.sha -cne $sourceCommit) {
+$tag = if ($BinaryAcceptance) { 'v0.0.14' } else { 'v0.0.13' }
+$sourceCommit = if ($BinaryAcceptance) { 'cee698f8b5d2cb8577a485f9a07330184986e9a5' } else { 'ee5bf691c4acf6ffcd7730db1d7d0ed24f274787' }
+$tagObject = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/tags/$tag" -Headers $headers -TimeoutSec 40).object
+if ($tagObject.type -ceq 'tag') {
+    $tagObject = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/tags/$($tagObject.sha)" -Headers $headers -TimeoutSec 40).object
+}
+if ($tagObject.type -cne 'commit' -or $tagObject.sha -cne $sourceCommit) {
     throw 'Setup tag does not reference the expected source commit.'
 }
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $headers -TimeoutSec 40
 if ($release.draft -or $release.prerelease -or $release.tag_name -cne $tag) {
-    throw 'Expected the published stable Setup 13 release.'
+    throw "Expected the published stable Setup release $tag."
 }
 
 function Save-PinnedAsset {
@@ -56,19 +59,32 @@ function Save-PinnedAsset {
     return $path
 }
 
-$setupName = 'POS-Desktop-Setup-0.0.13.exe'
-$setupSha256 = '442f110ee7f188f2cb9d1a9b0b1859074e7b953bfb2230cb86449a64ee09c62e'
-$setupSize = 322568909
-$setupId = 689979269
+$setupName = "POS-Desktop-Setup-$($tag.Substring(1)).exe"
 $inventoryName = 'deployment-inventory.json'
-$inventorySha256 = '4f3b41f28a6bf4ede11487880c46d6bd9048bc1bc1d4c511426cb9e7e08e1fb4'
-$checksums = Save-PinnedAsset -Id 689979692 -Name 'SHA256SUMS.txt' -Size 368 -Sha256 '5781353dc7bdf9f2e1df42904da08dc4804bc41f24bd8dde5caddce1535fa12c'
+if ($BinaryAcceptance) {
+    $setupSha256 = 'd496b8224159cc29224b761334b57e64a699d380568a1fa408bf3958fb8fdc50'
+    $setupSize = 322747384
+    $setupId = 772988567
+    $inventorySha256 = '1d65fabbc8ec83c7786bb94fd530f587e5065a6bd0b78139ac4a4f63af7fa0fd'
+    $inventoryId = 772989318
+    $checksumId = 772989290
+    $checksumSha256 = '2f765297c91cc0a133f29f6976c8e4fbb60f04ae04cdd5c9bf96fa0a5dabbd44'
+} else {
+    $setupSha256 = '442f110ee7f188f2cb9d1a9b0b1859074e7b953bfb2230cb86449a64ee09c62e'
+    $setupSize = 322568909
+    $setupId = 689979269
+    $inventorySha256 = '4f3b41f28a6bf4ede11487880c46d6bd9048bc1bc1d4c511426cb9e7e08e1fb4'
+    $inventoryId = 689979744
+    $checksumId = 689979692
+    $checksumSha256 = '5781353dc7bdf9f2e1df42904da08dc4804bc41f24bd8dde5caddce1535fa12c'
+}
+$checksums = Save-PinnedAsset -Id $checksumId -Name 'SHA256SUMS.txt' -Size 368 -Sha256 $checksumSha256
 if (@(Get-Content -LiteralPath $checksums | Where-Object { $_ -ceq "$setupSha256  $setupName" }).Count -ne 1 -or
     @(Get-Content -LiteralPath $checksums | Where-Object { $_ -ceq "$inventorySha256  $inventoryName" }).Count -ne 1) {
     throw 'Published SHA256SUMS.txt does not bind the installer and deployment inventory.'
 }
 
-$inventory = Save-PinnedAsset -Id 689979744 -Name $inventoryName -Size 11202 -Sha256 $inventorySha256
+$inventory = Save-PinnedAsset -Id $inventoryId -Name $inventoryName -Size 11202 -Sha256 $inventorySha256
 $installer = Save-PinnedAsset -Id $setupId -Name $setupName -Size $setupSize -Sha256 $setupSha256
 $extract = Join-Path $lab 'archive'
 $source = Join-Path $lab 'source'

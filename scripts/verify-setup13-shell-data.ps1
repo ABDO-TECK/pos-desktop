@@ -8,7 +8,11 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
 }
 
 $InAppFixture = $Profile -cne 'setup13-shell'
-$lab = Join-Path $env:RUNNER_TEMP $(if ($InAppFixture) { 'shell-inapp' } else { 'setup13-shell' })
+$lab = Join-Path $env:RUNNER_TEMP $(
+    if (-not $InAppFixture) { 'setup13-shell' }
+    elseif ($Profile -ceq 'in-app' -and $env:POS_SHELL_ACCEPTANCE_PROFILE -ceq 'binary') { 'pos-binary' }
+    else { 'shell-inapp' }
+)
 
 function Measure-PackagedDatabase {
     param([string] $Root, [string] $Role, [string] $DataDir)

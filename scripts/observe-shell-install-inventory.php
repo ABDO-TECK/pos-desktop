@@ -12,11 +12,13 @@ if (PHP_OS_FAMILY !== 'Windows' || getenv('GITHUB_ACTIONS') !== 'true'
 
 require_once __DIR__ . '/../backend/vendor/autoload.php';
 
-$lab = ProductInventoryService::resolveAbsolutePath((string)getenv('RUNNER_TEMP') . '/shell-inapp');
-$scenario = match ($argv[3]) {
-    'rollback', 'commit' => $argv[3],
-    default => throw new InvalidArgumentException('Unknown installed fixture scenario.'),
-};
+$binary = getenv('POS_SHELL_ACCEPTANCE_PROFILE') === 'binary';
+$lab = ProductInventoryService::resolveAbsolutePath((string)getenv('RUNNER_TEMP') . ($binary ? '/pos-binary' : '/shell-inapp'));
+$scenarios = $binary ? ['rollback', 'commit', 'corrupt', 'format', 'missing', 'older'] : ['rollback', 'commit'];
+if (!in_array($argv[3], $scenarios, true)) {
+    throw new InvalidArgumentException('Unknown installed fixture scenario.');
+}
+$scenario = $argv[3];
 $root = ProductInventoryService::resolveAbsolutePath($lab . '/installed-' . $scenario);
 $release = match ($argv[1]) {
     'target', 'failing' => $argv[1],

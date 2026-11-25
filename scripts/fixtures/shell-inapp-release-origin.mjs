@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import { once } from 'node:events';
+import { Transform } from 'node:stream';
 
 const repository = 'ABDO-TECK/pos-desktop-updates';
 const setupRepository = 'ABDO-TECK/pos-desktop';
-const tag = 'v0.0.14';
 export const assetNames = ['shell-manifest.json', 'shell-manifest.sig', 'shell-delta.zip'];
+export const binaryAssetNames = ['shell-binary.json', 'shell-binary.signature', 'shell-binary.bin'];
+export const olderVersion = '0.0.10';
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -17,8 +20,23 @@ async function listen(server) {
   return server.address().port;
 }
 
-export async function startReleaseFixture(lab, releaseRoot, requests) {
+export async function startReleaseFixture(lab, releaseRoot, requests, { version, binary, scenario }) {
+  const older = scenario === 'older';
+  const tag = 'v'+(older ? olderVersion : version);
   const assetPrefix = '/'+repository+'/releases/download/'+tag+'/';
+  const assets = new Map(assetNames.map(name => [name, path.join(releaseRoot, name)]));
+  if (older) {
+    // The older catalog advertises a legacy Full package. Its download must
+    // never be attempted by the installed newer POS.
+    assets.clear();
+    assets.set('full-package.zip', null);
+  } else if (binary) {
+    for (const name of binaryAssetNames) {
+      const location = scenario === 'format' && name !== 'shell-binary.bin'
+        ? path.join(lab, 'unsupported') : releaseRoot;
+      assets.set(name, path.join(location, name));
+    }
+  }
   const release = {
     id: 10014,
     tag_name: tag,
@@ -28,10 +46,10 @@ export async function startReleaseFixture(lab, releaseRoot, requests) {
     name: 'Unpublished Windows CI candidate',
     body: 'Signed, runner-local in-app update acceptance candidate.',
     html_url: 'https://github.com/'+repository+'/releases/tag/'+tag,
-    assets: assetNames.map((name, index) => ({
+    assets: [...assets].map(([name, file], index) => ({
       id: 14001 + index,
       name,
-      size: fs.statSync(path.join(releaseRoot, name)).size,
+      size: file ? fs.statSync(file).size : 1,
       state: 'uploaded',
       browser_download_url: 'https://github.com'+assetPrefix+name,
     })),
@@ -71,8 +89,8 @@ export async function startReleaseFixture(lab, releaseRoot, requests) {
     }
     if (host === 'github.com' && url.pathname.startsWith(assetPrefix)) {
       const name = url.pathname.slice(assetPrefix.length);
-      if (assetNames.includes(name)) {
-        const file = path.join(releaseRoot, name);
+      const file = assets.get(name);
+      if (file && !(scenario === 'missing' && name === 'shell-binary.bin')) {
         const bytes = fs.statSync(file).size;
         log.status = 200;
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes });
@@ -80,11 +98,30 @@ export async function startReleaseFixture(lab, releaseRoot, requests) {
           res.end();
           return;
         }
-        res.on('finish', () => { log.delivered_bytes = bytes; });
         const stream = fs.createReadStream(file);
-        res.on('close', () => stream.destroy());
+        const digest = crypto.createHash('sha256');
+        let passed = 0;
+        const corrupt = scenario === 'corrupt' && name === 'shell-binary.bin';
+        const witness = new Transform({
+          transform(chunk, _encoding, callback) {
+            if (corrupt && passed === 0) {
+              chunk[0] ^= 1;
+            }
+            passed += chunk.length;
+            digest.update(chunk);
+            callback(null, chunk);
+          },
+        });
+        res.on('finish', () => {
+          log.delivered_bytes = passed;
+          log.delivered_sha256 = digest.digest('hex');
+        });
+        res.on('close', () => {
+          stream.destroy();
+          witness.destroy();
+        });
         stream.on('error', () => res.destroy());
-        stream.pipe(res);
+        stream.pipe(witness).pipe(res);
         return;
       }
     }
