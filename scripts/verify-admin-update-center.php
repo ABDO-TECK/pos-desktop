@@ -99,6 +99,41 @@ class TestUpdateServiceDouble extends App\Services\UpdateService
 try {
     echo "Starting Admin Update Center Backend Verification...\n";
 
+    $comparisonService = new class(
+        new App\Services\GitService(),
+        new App\Services\FrontendBuildService(),
+        new App\Services\BackupService()
+    ) extends App\Services\UpdateService {
+        public array $feed = [];
+
+        public function getLocalVersion(): array
+        {
+            return ['version' => '0.0.14', 'update_channel' => 'stable'];
+        }
+
+        protected function fetchRemoteVersionDiagnostics(?string $channel = null, bool $force = false): array
+        {
+            return $this->feed;
+        }
+    };
+    $comparisonCases = [
+        ['older feed', ['version' => '0.0.13', 'channel' => 'stable'], 'no_update_available', false, true],
+        ['equal feed', ['version' => '0.0.14', 'channel' => 'stable'], 'no_update_available', false, true],
+        ['newer feed', ['version' => '0.0.15', 'channel' => 'stable'], 'update_available', true, false],
+        ['incompatible newer feed', ['version' => '1.0.0', 'channel' => 'stable'], 'no_update_available', false, false],
+        ['no eligible release', ['no_eligible_release' => true, 'channel' => 'stable'], 'no_update_available', false, false],
+    ];
+    foreach ($comparisonCases as [$label, $release, $status, $offer, $isUpToDate]) {
+        $comparisonService->feed = ['ok' => true, 'data' => $release];
+        $result = $comparisonService->checkForUpdate();
+        verify($result['status'] === $status && $result['has_update'] === $offer, "Correct offer for {$label}");
+        verify(($result['is_up_to_date'] ?? null) === $isUpToDate, "Correct installed version comparison for {$label}");
+    }
+    $comparisonService->feed = ['ok' => false, 'errorCode' => 'github_network_timeout'];
+    $result = $comparisonService->checkForUpdate();
+    verify($result['updates_unreachable'] && empty($result['is_up_to_date']), 'Offline checks cannot confirm the installed version');
+    echo "PASS: Check response confirms the installed version only against a comparable equal or older feed\n";
+
     // ══════════════════════════════════════════════════════════════════
     // Test 1: UpdateAssetDownloader throttled transfer progress & retry
     // ══════════════════════════════════════════════════════════════════
