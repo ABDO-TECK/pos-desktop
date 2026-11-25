@@ -108,8 +108,9 @@ class UpdateService
     private function shellDelivery(): ShellDeltaDeliveryService
     {
         $pinnedKey = $this->rootDir . '/backend/certs/update_public_key.pem';
-        $manifests = new ShellDeltaManifestService(new ManifestSignatureService($pinnedKey, [], false));
-        return new ShellDeltaDeliveryService($this->githubProvider, $manifests, $this->deltaUpdateService);
+        $signatures = new ManifestSignatureService($pinnedKey, [], false);
+        $manifests = new ShellDeltaManifestService($signatures);
+        return new ShellDeltaDeliveryService($this->githubProvider, $manifests, $this->deltaUpdateService, $signatures);
     }
 
     public function hasLegacyReleaseAssets(array $release): bool
@@ -388,6 +389,7 @@ class UpdateService
                         'full_package_url' => $ghRelease['full_package_url'],
                         'shell_advertised' => $ghRelease['shell_advertised'] ?? false,
                         'shell_assets' => $ghRelease['shell_assets'] ?? [],
+                        'shell_binary_assets' => $ghRelease['shell_binary_assets'] ?? [],
                         'assets' => $ghRelease['assets'],
                         'channel' => $ghRelease['channel'] ?? $targetChannel,
                         'no_eligible_release' => $noEligibleRelease,
@@ -1740,13 +1742,15 @@ class UpdateService
                 'phase' => 'staging',
             ];
             $this->deltaUpdateService->setUpdateState('verifying', $context);
-            $reason = $delivery->verifyInstalledSource(dirname($this->rootDir, 2), $verified['descriptor']);
+            $installRoot = dirname($this->rootDir, 2);
+            $reason = $delivery->verifyInstalledSource($installRoot, $verified['descriptor']);
+            $transport = [];
             if ($reason === null) {
-                $reason = $delivery->stage($verified, $context);
+                $reason = $delivery->stage($verified, $context, $installRoot, $transport);
             }
             if ($reason === null) {
                 $context['phase'] = 'desktop_handoff_pending';
-                $this->deltaUpdateService->setUpdateState('desktop_handoff_pending', $context);
+                $this->deltaUpdateService->setUpdateState('desktop_handoff_pending', $context + $transport);
                 $pending = $this->deltaUpdateService->getUpdateState() ?? [];
                 if (($pending['state'] ?? null) === 'desktop_handoff_pending'
                     && ($pending['operation'] ?? null) === ShellDeltaManifestService::OPERATION
@@ -1762,7 +1766,7 @@ class UpdateService
                         'requires_desktop_handoff' => true,
                         'handoff_version' => $version,
                         'logs' => ['تم التحقق من حزمة تحديث تطبيق سطح المكتب وتجهيزها للتثبيت.'],
-                    ]];
+                    ] + $transport];
                 }
                 $reason = 'shell_handoff_state_unavailable';
             }

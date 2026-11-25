@@ -389,6 +389,8 @@ class GitHubReleaseProvider
         $fullPackageUrl = null;
         $assetsMap = [];
         $shellAssets = [];
+        $binaryAssets = [];
+        $binaryAssetsValid = true;
         $shellAdvertised = false;
         $shellAssetsValid = true;
         $shellNames = [ShellDeltaManifestService::MANIFEST_ASSET, ShellDeltaManifestService::SIGNATURE_ASSET, ShellDeltaManifestService::PACKAGE_ASSET];
@@ -404,6 +406,14 @@ class GitHubReleaseProvider
                     $shellAssetsValid = false;
                 } else {
                     $shellAssets[$name] = $downloadUrl;
+                }
+                continue;
+            }
+            if (in_array($lowerName, ShellBinaryTransportService::ASSETS, true)) {
+                if ($name !== $lowerName || $downloadUrl !== $shellPrefix . $name || isset($binaryAssets[$name])) {
+                    $binaryAssetsValid = false;
+                } else {
+                    $binaryAssets[$name] = $downloadUrl;
                 }
                 continue;
             }
@@ -455,6 +465,7 @@ class GitHubReleaseProvider
             'full_package_url' => $fullPackageUrl,
             'shell_advertised' => $shellAdvertised,
             'shell_assets' => $shellAssetsValid && count($shellAssets) === count($shellNames) ? $shellAssets : [],
+            'shell_binary_assets' => $binaryAssetsValid && count($binaryAssets) === count(ShellBinaryTransportService::ASSETS) ? $binaryAssets : [],
             'assets' => $assetsMap,
             'channel' => 'stable',
             'error' => null,
