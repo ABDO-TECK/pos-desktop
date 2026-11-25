@@ -102,7 +102,9 @@ function observeNetwork(app) {
   app.onEvent((method, event) => {
     const url = event.request?.url ?? event.response?.url;
     if (method === 'Network.requestWillBeSent' && updateRoute.test(url)) {
-      updateNetwork.push({ type: 'request', method: event.request.method, path: new URL(url).pathname, request_id: event.requestId });
+      const requestUrl = new URL(url);
+      updateNetwork.push({ type: 'request', method: event.request.method, path: requestUrl.pathname,
+        request_id: event.requestId, background: requestUrl.searchParams.get('background') === 'true' });
     }
     if (method === 'Network.responseReceived' && updateRoute.test(url)) {
       const response = { type: 'response', status: event.response.status, path: new URL(url).pathname, request_id: event.requestId };
@@ -118,7 +120,7 @@ function observeNetwork(app) {
         const fields = ['success', 'ok', 'status', 'state', 'code', 'reason_code', 'error_code', 'errorCode', 'message', 'error',
           'id', 'job_id', 'last_error', 'phase', 'settlement_error', 'latest_version', 'handoff_version', 'requires_desktop_handoff',
           'desktop_handoff_completed', 'update_type', 'shell_update_available', 'target_version',
-          'current_version', 'has_update', 'release_tag', 'shell_transport', 'shell_transport_bytes'];
+          'current_version', 'has_update', 'is_up_to_date', 'release_tag', 'shell_transport', 'shell_transport_bytes'];
         response.result = {
           envelope: safeFields(json, fields),
           data: safeFields(json.data, fields),
@@ -334,19 +336,21 @@ async function screenshot(app, name) {
 
 async function verifyOlderStatus(app, installButton) {
   const check = await waitFor('the older-feed check response', () => updateNetwork.find(event =>
-    event.type === 'response' && event.path.endsWith('/updates/check') && event.result), 60_000);
+    event.type === 'response' && event.path.endsWith('/updates/check') && event.result &&
+    updateNetwork.some(request => request.type === 'request' && request.request_id === event.request_id && !request.background)), 60_000);
   assert.equal(check.status, 200);
   assert.equal(check.result.data.current_version, sourceVersion);
   assert.equal(check.result.data.has_update, false);
+  assert.equal(check.result.data.is_up_to_date, true);
   assert.ok(check.result.data.latest_version === olderVersion || check.result.data.release_tag === 'v'+olderVersion,
     'The foreground check must evaluate the older stable feed.');
   const readCard = "(() => { const label = [...document.querySelectorAll('div')].find(el => "+
-    "el.children.length===0 && el.textContent.trim()==='أحدث إصدار متاح'); "+
+    "el.children.length===0 && el.textContent.trim()==='حالة النظام'); "+
     "return label?.parentElement?.innerText ?? ''; })()";
   await app.until(readCard+".includes('النظام محدّث')", 'Arabic up-to-date value in the installed Update Center');
   const visible = await app.evaluate("({card:"+readCard+", body:document.body.innerText})");
-  assert.ok(!visible.card.includes('v'+olderVersion));
-  assert.ok(!visible.body.includes('نوع التحديث') && !visible.body.includes('Full (كامل)'));
+  assert.ok(!visible.body.includes('v'+olderVersion));
+  for (const label of ['أحدث إصدار متاح', 'نوع التحديث', 'Full (كامل)']) assert.ok(!visible.body.includes(label));
   assert.ok(!visible.body.includes(installButton));
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 &&
     request.path.endsWith('/pos-desktop-updates/releases')), 'The older stable catalog was not requested.');
