@@ -936,6 +936,7 @@ try {
         throw new RuntimeException("Failed to finalize zip archive: {$zipPath}");
     }
     $zip = null;
+    ShellBinaryTransportService::normalizeCanonicalTimes($zipPath);
 
     $zipSize = filesize($zipPath);
     if ($zipSize === false || $zipSize <= 0 || $zipSize > ShellDeltaManifestService::MAX_PACKAGE_SIZE) {
@@ -1109,16 +1110,29 @@ try {
         throw new RuntimeException("Written package zip re-verification failed: " . ($writtenZipVerify['reason_code'] ?? 'unknown'));
     }
 
+    $binaryBuilt = false;
     if ($purpose === 'regular') {
         $revalidateStage();
         $binary = new ShellBinaryTransportService();
         try {
-            if ($binary->build($canonicalSource, $canonicalTarget, $stageDir, $descriptor, $rawManifest, $privKey)) {
+            $binaryBuilt = $binary->build($canonicalSource, $canonicalTarget, $stageDir, $descriptor, $rawManifest, $privKey);
+            if ($binaryBuilt) {
                 echo "Verified smaller signed binary transport alongside the canonical shell ZIP.\n";
             }
         } catch (RuntimeException $e) {
             fwrite(STDERR, "Optional binary transport unavailable: " . $e->getMessage() . "\n");
         }
+    }
+
+    $expectedAssets = [
+        ShellDeltaManifestService::MANIFEST_ASSET, ShellDeltaManifestService::SIGNATURE_ASSET,
+        ShellDeltaManifestService::PACKAGE_ASSET, 'source-inventory.json', 'target-inventory.json',
+        ...($binaryBuilt ? ShellBinaryTransportService::ASSETS : []),
+    ];
+    $actualAssets = scandir($stageDir);
+    sort($expectedAssets);
+    if ($actualAssets === false || array_values(array_diff($actualAssets, ['.', '..'])) !== $expectedAssets) {
+        throw new RuntimeException("Shell release staging contains unexpected or partial assets.");
     }
 
     // GHA Fault injection hook: before_publish

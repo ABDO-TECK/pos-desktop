@@ -48,11 +48,68 @@ final class ShellBinaryTransportService
     /** Give every canonical changed-file ZIP entry identical metadata on the builder and the client. */
     public static function addCanonicalFile(ZipArchive $zip, string $file, string $name): void
     {
-        // A timestamp below the DOS epoch maps to the minimum ZIP timestamp in every time zone.
         if (!$zip->addFile($file, $name)
-            || !$zip->setMtimeName($name, 86400)
             || !$zip->setExternalAttributesName($name, ZipArchive::OPSYS_UNIX, (0100644 << 16))) {
             throw new RuntimeException('Cannot write canonical shell ZIP entry.');
+        }
+    }
+
+    /** Normalize DOS timestamps in a newly created, bounded, single-disk ZIP. */
+    public static function normalizeCanonicalTimes(string $path): void
+    {
+        $path = ProductInventoryService::resolveAbsolutePath($path);
+        $file = @fopen($path, 'r+b');
+        if ($file === false) {
+            throw new RuntimeException('Cannot normalize the shell ZIP timestamps.');
+        }
+        try {
+            $size = fstat($file)['size'] ?? 0;
+            $endOffset = $size - 22;
+            if ($endOffset < 0 || $size > ShellDeltaManifestService::MAX_PACKAGE_SIZE
+                || fseek($file, $endOffset) !== 0) {
+                throw new RuntimeException('Cannot read the canonical ZIP end record.');
+            }
+            $end = unpack('Vsignature/vdisk/vdirectoryDisk/vdiskEntries/ventries/VdirectorySize/VdirectoryOffset/vcomment',
+                ShellBinaryPatchService::readExact($file, 22));
+            if ($end['signature'] !== 0x06054b50 || $end['disk'] !== 0 || $end['directoryDisk'] !== 0
+                || $end['diskEntries'] !== $end['entries'] || $end['entries'] > ShellDeltaManifestService::MAX_FILES
+                || $end['comment'] !== 0 || $end['directoryOffset'] + $end['directorySize'] !== $endOffset) {
+                throw new RuntimeException('Unexpected canonical ZIP directory layout.');
+            }
+            $directoryStart = $end['directoryOffset'];
+            $entryOffset = $directoryStart;
+            $lastLocalEnd = 0;
+            // DOS date 1980-01-01 and time 00:00:00, written directly to avoid libzip time zone differences.
+            $fixed = pack('vv', 0, 33);
+            for ($index = 0; $index < $end['entries']; $index++) {
+                if ($entryOffset > $endOffset - 46 || fseek($file, $entryOffset) !== 0) {
+                    throw new RuntimeException('Cannot read the canonical ZIP entry header.');
+                }
+                $header = unpack('Vsignature/x16/Vcompressed/x4/vname/vextra/vcomment/x8/Vlocal',
+                    ShellBinaryPatchService::readExact($file, 46));
+                $local = $header['local'];
+                if ($header['signature'] !== 0x02014b50 || $local < $lastLocalEnd || $local > $directoryStart - 30
+                    || fseek($file, $local) !== 0) {
+                    throw new RuntimeException('Unexpected canonical ZIP entry layout.');
+                }
+                $localHeader = unpack('Vsignature/x22/vname/vextra', ShellBinaryPatchService::readExact($file, 30));
+                $lastLocalEnd = $local + 30 + $localHeader['name'] + $localHeader['extra'] + $header['compressed'];
+                if ($localHeader['signature'] !== 0x04034b50 || $lastLocalEnd > $directoryStart
+                    || fseek($file, $local + 10) !== 0) {
+                    throw new RuntimeException('Cannot normalize the canonical ZIP local timestamp.');
+                }
+                ShellBinaryPatchService::write($file, $fixed);
+                if (fseek($file, $entryOffset + 12) !== 0) {
+                    throw new RuntimeException('Cannot normalize the canonical ZIP directory timestamp.');
+                }
+                ShellBinaryPatchService::write($file, $fixed);
+                $entryOffset += 46 + $header['name'] + $header['extra'] + $header['comment'];
+            }
+            if ($entryOffset !== $endOffset || !fflush($file)) {
+                throw new RuntimeException('Canonical ZIP timestamp normalization failed.');
+            }
+        } finally {
+            fclose($file);
         }
     }
 
@@ -134,20 +191,26 @@ final class ShellBinaryTransportService
             if (!$patchCount || !is_int($size) || $size < 1 || $size >= $package['size']) {
                 return false;
             }
-            $raw = json_encode([
+            $sha256 = hash_file('sha256', $payload);
+            if ($sha256 === false) {
+                throw new RuntimeException('Cannot hash the binary transport.');
+            }
+            $metadata = [
                 'format' => self::FORMAT,
                 'manifest_sha256' => hash('sha256', $manifest),
-                'sha256' => hash_file('sha256', $payload),
+                'sha256' => $sha256,
                 'size' => $size,
-            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+            ];
+            $raw = json_encode($metadata, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
             if (!openssl_sign($raw, $signed, $key, OPENSSL_ALGO_SHA256)) {
                 throw new RuntimeException('Cannot sign the binary transport metadata.');
             }
             $signature = base64_encode($signed);
-            if ($size + strlen($raw) + strlen($signature) >= $package['size']) {
+            if (strlen($signature) > ShellDeltaManifestService::MAX_SIGNATURE_SIZE
+                || $size + strlen($raw) + strlen($signature) >= $package['size']) {
                 return false;
             }
-            $this->rebuild($sourceRoot, $payload, $roundTrip, $descriptor, json_decode($raw, true, 8, JSON_THROW_ON_ERROR));
+            $this->rebuild($sourceRoot, $payload, $roundTrip, $descriptor, $metadata);
             if (!@unlink($roundTrip)) {
                 throw new RuntimeException('Cannot remove the verified binary transport round trip.');
             }
@@ -270,6 +333,7 @@ final class ShellBinaryTransportService
                 throw new RuntimeException('Cannot finalize the reconstructed shell ZIP.');
             }
             $package = null;
+            self::normalizeCanonicalTimes($output);
             $this->assertBytes($output, $descriptor['package']);
             $completed = true;
         } finally {

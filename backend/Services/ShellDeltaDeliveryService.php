@@ -166,6 +166,9 @@ final class ShellDeltaDeliveryService
 
             $this->writeNewFile($temporary . '/' . $manifestName, $verified['manifest']);
             $this->writeNewFile($temporary . '/' . $signatureName, $verified['signature']);
+            if (scandir($temporary) !== ['.', '..', $packageName, $manifestName, $signatureName]) {
+                throw new RuntimeException('Shell update staging contains unexpected or partial assets.');
+            }
             clearstatcache(true);
             $final = ProductInventoryService::resolveConfinedPath($parent, 'shell-delta', false);
             if (file_exists($final)) {
