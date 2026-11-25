@@ -10,6 +10,7 @@ spl_autoload_register(static function (string $class): void {
 use App\Services\GitHubReleaseProvider;
 use App\Services\DeltaUpdateService;
 use App\Services\ManifestSignatureService;
+use App\Services\ShellBinaryPatchService;
 use App\Services\ShellDeltaDeliveryService;
 use App\Services\ShellDeltaManifestService;
 use App\Services\UpdateDataCompatibilityService;
@@ -156,6 +157,37 @@ $require($transport->downloadNames === ['shell-binary.bin', 'shell-delta.zip'] &
     'Corrupt binary transport did not use the separately verified whole-file ZIP.');
 $transport->corruptAsset = null;
 
+$metadataPath = $output . '/shell-binary.json';
+$signaturePath = $output . '/shell-binary.signature';
+$binaryPath = $output . '/shell-binary.bin';
+$pointer = json_decode(file_get_contents($metadataPath), true, 8, JSON_THROW_ON_ERROR);
+$resign = static function (array $metadata) use ($metadataPath, $signaturePath, $pair, $signatures): void {
+    $raw = json_encode($metadata, JSON_THROW_ON_ERROR);
+    file_put_contents($metadataPath, $raw);
+    file_put_contents($signaturePath, $signatures->signData($raw, $pair['private_key']));
+};
+foreach (['format' => 2, 'manifest_sha256' => str_repeat('0', 64), 'size' => filesize($output . '/shell-delta.zip')] as $field => $value) {
+    $resign([$field => $value] + $pointer);
+    file_put_contents($stage . '/shell-delta.zip', 'replace with full fallback');
+    $transport->downloadNames = [];
+    $require($delivery->stage($binaryVerified, $context, $source, $binaryState) === null && $transport->downloadNames === ['shell-delta.zip'],
+        'Mismatched signed binary metadata authorized a binary download: ' . $field);
+}
+
+$payloadZip = new ZipArchive();
+$require($payloadZip->open($binaryPath) === true, 'Cannot open the signed transport fixture.');
+$patch = $payloadZip->getFromName('p/0');
+$require(is_string($patch) && $patch[0] === 'L', 'Fixture did not produce a reconstructible literal.');
+$patch[5] = chr(ord($patch[5]) ^ 1);
+$require($payloadZip->addFromString('p/0', $patch) && $payloadZip->close(), 'Cannot replace the fixture patch.');
+clearstatcache(true, $binaryPath);
+$resign(['size' => filesize($binaryPath), 'sha256' => hash_file('sha256', $binaryPath)] + $pointer);
+file_put_contents($stage . '/shell-delta.zip', 'replace with full fallback');
+$transport->downloadNames = [];
+$require($delivery->stage($binaryVerified, $context, $source, $binaryState) === null
+    && $transport->downloadNames === ['shell-binary.bin', 'shell-delta.zip'] && $binaryState['shell_transport'] === 'whole_file',
+    'A validly signed patch with incorrect target bytes avoided whole-file fallback.');
+
 file_put_contents($stage . '/shell-delta.zip', 'replace with full fallback');
 file_put_contents($output . '/shell-binary.signature', base64_encode('wrong signature'));
 $transport->downloadNames = [];
@@ -165,5 +197,36 @@ $require(hash_file('sha256', $source . '/POS Desktop.exe') === $preservedSource,
 
 file_put_contents($output . '/shell-manifest.sig', base64_encode('wrong signature'));
 $require($delivery->inspect($remote, '0.0.13', 'stable', '0.0.13')['reason_code'] === 'signature_invalid', 'Invalid signature passed discovery.');
+
+$decoder = new ShellBinaryPatchService();
+$baseBytes = 'signed source file';
+$baseMeta = ['size' => strlen($baseBytes), 'sha256' => hash('sha256', $baseBytes)];
+$targetMeta = ['size' => 4, 'sha256' => hash('sha256', 'file')];
+foreach ([
+    'unrecognized command' => ['X' . pack('N', 4), $baseMeta],
+    'out-of-bounds source' => ['C' . pack('NN', $baseMeta['size'] - 3, 4), $baseMeta],
+    'out-of-bounds target' => ['C' . pack('NN', 0, 5), $baseMeta],
+    'truncated literal' => ['L' . pack('N', 4) . 'abc', $baseMeta],
+    'incomplete patch' => ['C' . pack('NN', 0, 3), $baseMeta],
+    'wrong source hash' => ['C' . pack('NN', 0, 4), ['size' => $baseMeta['size'], 'sha256' => str_repeat('0', 64)]],
+] as $case => [$bytes, $base]) {
+    $sourceStream = fopen('php://memory', 'w+b');
+    $patchStream = fopen('php://memory', 'w+b');
+    $targetStream = fopen('php://memory', 'w+b');
+    fwrite($sourceStream, $baseBytes);
+    fwrite($patchStream, $bytes);
+    rewind($sourceStream);
+    rewind($patchStream);
+    try {
+        $decoder->apply($sourceStream, $patchStream, strlen($bytes), $targetStream, $base, $targetMeta);
+        $require(false, 'Binary decoder accepted ' . $case . '.');
+    } catch (RuntimeException) {
+        $require(fstat($targetStream)['size'] <= $targetMeta['size'], 'Rejected patch exceeded the output bound.');
+    } finally {
+        fclose($sourceStream);
+        fclose($patchStream);
+        fclose($targetStream);
+    }
+}
 
 echo "Signed delivery enforces the exact source and channel, verifies ZIP bytes and publishes a retryable stage without writing the product.\n";
