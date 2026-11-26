@@ -3,7 +3,7 @@ name: Native shell release staging proof
 on:
   workflow_dispatch:
   push:
-    branches: [codex/binary-release-pipeline]
+    branches: [codex/binary-release-pipeline, codex/binary-update-acceptance]
 
 permissions:
   contents: read

@@ -4,6 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/binary-update-acceptance]
+    # The pull request checks the combined release-staging and installed paths.
+    paths-ignore:
+      - '.github/workflows/shell-binary-acceptance.yml'
+      - '.github/workflows/native-shell-release-stage.yml'
+      - 'docs/native-shell-delta-release.md'
+      - 'scripts/build-delta-release.ps1'
+      - 'scripts/stage-native-shell-delta.ps1'
+      - 'scripts/verify-setup13-shell-data.ps1'
+      - 'scripts/verify-setup13-shell-transaction.php'
   pull_request:
     paths:
       - '.github/workflows/shell-binary-acceptance.yml'
