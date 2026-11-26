@@ -219,6 +219,13 @@ function inspectReopenedProcess(pid, debugPort) {
   }
 }
 
+function verifyProcessRestart(previous, reopened, name) {
+  const prior = { pid: previous.pid, started_at: previous.started_at };
+  const current = { pid: reopened.pid, started_at: reopened.started_at };
+  assert.notDeepEqual(current, prior, name+' process identity did not change.');
+  assert.ok(Date.parse(current.started_at) > Date.parse(prior.started_at), name+' start time did not advance.');
+}
+
 function checkInstalledInventory(expected, deleted = []) {
   const requiredFiles = [
     'POS Desktop.exe',
@@ -455,7 +462,7 @@ async function runAcceptance() {
   assert.equal(outcome.source_version, sourceVersion);
   assert.equal(outcome.target_version, targetVersion);
   assert.equal(outcome.source_pid, before.processes.desktop.pid);
-  assert.ok(Number.isInteger(outcome.candidate_pid) && outcome.candidate_pid !== outcome.source_pid);
+  assert.ok(Number.isInteger(outcome.candidate_pid) && outcome.candidate_pid > 0);
   assert.match(outcome.database_backup_sha256, /^[a-f0-9]{64}$/);
 
   const expectedVersion = scenario === 'rollback' ? sourceVersion : targetVersion;
@@ -469,6 +476,7 @@ async function runAcceptance() {
     const attempted = readJson(failureTrace);
     observations.candidate_failure = attempted;
     assert.equal(attempted.pid, outcome.candidate_pid);
+    verifyProcessRestart(before.processes.desktop, attempted, 'Failing desktop');
     assert.ok(attempted.phpPort > 0 && attempted.mysqlPort > 0);
     assert.equal(attempted.electronEngine, '43.8.11', 'The failing process must use the new Electron engine.');
     assert.equal(attempted.phase, 'core-ready-before-exit');
@@ -476,7 +484,7 @@ async function runAcceptance() {
     assert.equal(outcome.candidate_failure, 'The restarted POS process exited before health proof: 78');
     assert.equal(outcome.candidate_health, null);
     assert.equal(outcome.restored_failure, null);
-    assert.ok(outcome.restored_pid !== outcome.source_pid && outcome.restored_pid !== outcome.candidate_pid);
+    assert.ok(Number.isInteger(outcome.restored_pid) && outcome.restored_pid > 0);
   } else {
     assert.ok(!fs.existsSync(failureTrace));
   }
@@ -494,9 +502,9 @@ async function runAcceptance() {
     scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11', restartedDebugPort);
   assert.equal(after.processes.desktop.pid, expectedPid);
   for (const name of ['desktop', 'php', 'database']) {
-    assert.notEqual(after.processes[name].pid, before.processes[name].pid, name+' process did not restart.');
-    assert.ok(Date.parse(after.processes[name].started_at) > Date.parse(before.processes[name].started_at), name+' start time did not advance.');
+    verifyProcessRestart(before.processes[name], after.processes[name], name);
   }
+  if (scenario === 'rollback') verifyProcessRestart(observations.candidate_failure, after.processes.desktop, 'Restored desktop');
   const preservedRow = await getCategory(app, marker);
   assert.equal(preservedRow.id, row.id, 'The original MariaDB business row did not survive.');
   const afterFiles = scenario === 'rollback'

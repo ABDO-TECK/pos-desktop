@@ -6,7 +6,6 @@ import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import { once } from 'node:events';
-import { Transform } from 'node:stream';
 
 const repository = 'ABDO-TECK/pos-desktop-updates';
 const setupRepository = 'ABDO-TECK/pos-desktop';
@@ -18,6 +17,41 @@ async function listen(server) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   return server.address().port;
+}
+
+async function streamAsset(file, bytes, response, log, corrupt) {
+  const stream = fs.createReadStream(file);
+  const digest = crypto.createHash('sha256');
+  log.transferred_bytes = 0;
+  response.once('close', () => stream.destroy());
+  try {
+    for await (const chunk of stream) {
+      if (response.destroyed) break;
+      if (corrupt && log.transferred_bytes === 0) chunk[0] ^= 1;
+      await new Promise((resolve, reject) => {
+        response.write(chunk, error => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          log.transferred_bytes += chunk.length;
+          digest.update(chunk);
+          // A content-length client can close as soon as it receives the last
+          // byte. The response's finish event is no longer a reliable receipt.
+          if (log.transferred_bytes === bytes) {
+            log.delivered_bytes = bytes;
+            log.delivered_sha256 = digest.digest('hex');
+          }
+          resolve();
+        });
+      });
+    }
+    if (!response.destroyed) response.end();
+  } catch {
+    response.destroy();
+  } finally {
+    stream.destroy();
+  }
 }
 
 export async function startReleaseFixture(lab, releaseRoot, requests, { version, binary, scenario }) {
@@ -98,30 +132,8 @@ export async function startReleaseFixture(lab, releaseRoot, requests, { version,
           res.end();
           return;
         }
-        const stream = fs.createReadStream(file);
-        const digest = crypto.createHash('sha256');
-        let passed = 0;
         const corrupt = scenario === 'corrupt' && name === 'shell-binary.bin';
-        const witness = new Transform({
-          transform(chunk, _encoding, callback) {
-            if (corrupt && passed === 0) {
-              chunk[0] ^= 1;
-            }
-            passed += chunk.length;
-            digest.update(chunk);
-            callback(null, chunk);
-          },
-        });
-        res.on('finish', () => {
-          log.delivered_bytes = passed;
-          log.delivered_sha256 = digest.digest('hex');
-        });
-        res.on('close', () => {
-          stream.destroy();
-          witness.destroy();
-        });
-        stream.on('error', () => res.destroy());
-        stream.pipe(witness).pipe(res);
+        void streamAsset(file, bytes, res, log, corrupt);
         return;
       }
     }

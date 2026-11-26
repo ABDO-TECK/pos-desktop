@@ -257,8 +257,12 @@ try {
     $startup = [regex]::Matches($main, '(?m)^    (?:const started = )?await startCoreRuntime\(\{ maxAttempts: [^\r\n]+ \}\);')
     if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
     $failure = @'
+    const createdAt = require('node:child_process').execFileSync('pwsh', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "(Get-Process -Id " + process.pid + ").StartTime.ToUniversalTime().ToString('o')",
+    ], { encoding: 'utf8', windowsHide: true, timeout: 12000 }).trim();
     fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({
-      pid: process.pid, phpPort, mysqlPort, electronEngine: process.versions.electron, phase: 'core-ready-before-exit',
+      pid: process.pid, started_at: createdAt, phpPort, mysqlPort, electronEngine: process.versions.electron, phase: 'core-ready-before-exit',
     }));
     app.exit(78);
     return;
