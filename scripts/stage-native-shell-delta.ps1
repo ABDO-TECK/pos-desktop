@@ -126,19 +126,45 @@ try {
     $phpDir = Join-Path $sourceRoot 'resources/portable/php'
     $php = Join-Path $phpDir 'php.exe'
     $targetPayload = Join-Path $targetRoot 'resources/app.asar.unpacked'
-    & $php -n -r 'require $argv[1]; $inventory = json_decode(file_get_contents($argv[2]), true, 32, JSON_THROW_ON_ERROR); exit($inventory["format"] === 1 && $inventory["version"] === $argv[4] && preg_match("/^[a-f0-9]{64}$/D", $inventory["shell_sha256"]) && $inventory["files"] == deploymentFiles($argv[3]) ? 0 : 1);' -- "$PSScriptRoot/deployment-inventory.php" $targetInventory $targetPayload $targetVersion
+    $verifyInventory = @'
+require $argv[1];
+$inventory = json_decode(file_get_contents($argv[2]), true, 32, JSON_THROW_ON_ERROR);
+$matches = ($inventory["format"] ?? null) === 1
+    && ($inventory["version"] ?? null) === $argv[4]
+    && preg_match("/^[a-f0-9]{64}$/D", $inventory["shell_sha256"] ?? "") === 1
+    && ($inventory["files"] ?? null) === deploymentFiles($argv[3]);
+exit($matches ? 0 : 1);
+'@
+    & $php -n -r $verifyInventory -- "$PSScriptRoot/deployment-inventory.php" $targetInventory $targetPayload $targetVersion
     if ($LASTEXITCODE) { throw 'Published target deployment inventory does not match the verified Setup payload.' }
     & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File "$PSScriptRoot/verify-setup13-shell-data.ps1" -Profile release -ReleaseLab $labName
     if ($LASTEXITCODE) { throw 'Could not measure both packaged data contracts.' }
 
     if ($StageOnly) {
-        node -e 'const crypto = require("node:crypto"); const fs = require("node:fs"); const {privateKey} = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }); fs.writeFileSync(process.argv[1], privateKey.export({ type: "pkcs8", format: "pem" }), { flag: "wx" });' $keyPath
+        $generateKey = @'
+const { generateKeyPairSync } = require("node:crypto");
+const { writeFileSync } = require("node:fs");
+const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+writeFileSync(process.argv[1], privateKey.export({ type: "pkcs8", format: "pem" }), { flag: "wx" });
+'@
+        node -e $generateKey $keyPath
         if ($LASTEXITCODE) { throw 'Could not generate the ephemeral verification key.' }
     } else {
         [IO.File]::WriteAllText($keyPath, $privateKey)
         $sourceTrust = Join-Path $sourceRoot 'resources/app.asar.unpacked/backend/certs/update_public_key.pem'
         $targetTrust = Join-Path $targetRoot 'resources/app.asar.unpacked/backend/certs/update_public_key.pem'
-        & $php -n -d "extension_dir=$phpDir/ext" -d extension=openssl -r 'function publicPem($key) { return $key ? openssl_pkey_get_details($key)["key"] : null; } $signer = publicPem(openssl_pkey_get_private(file_get_contents($argv[1]))); foreach (array_slice($argv, 2) as $file) { if (!$signer || $signer !== publicPem(openssl_pkey_get_public(file_get_contents($file)))) { exit(1); } }' -- $keyPath $sourceTrust $targetTrust
+        $verifyTrust = @'
+function publicPem($key) {
+    return $key ? openssl_pkey_get_details($key)["key"] : null;
+}
+$signer = publicPem(openssl_pkey_get_private(file_get_contents($argv[1])));
+foreach (array_slice($argv, 2) as $file) {
+    if (!$signer || $signer !== publicPem(openssl_pkey_get_public(file_get_contents($file)))) {
+        exit(1);
+    }
+}
+'@
+        & $php -n -d "extension_dir=$phpDir/ext" -d extension=openssl -r $verifyTrust -- $keyPath $sourceTrust $targetTrust
         if ($LASTEXITCODE) { throw 'The release signing key does not match the trust bundled with both Setups.' }
     }
     $builderArgs = @("$PSScriptRoot/build-shell-delta.php",
