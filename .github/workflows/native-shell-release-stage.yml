@@ -26,7 +26,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: pdo_mysql, mysqli, mbstring, zip, openssl, phar
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar
           coverage: none
       - name: Install locked backend dependencies
         shell: pwsh
@@ -35,6 +35,12 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          try {
+            ./scripts/build-delta-release.ps1 -Tag v0.0.14 -Channel stable -StageOnly
+            throw 'Stage-only execution unexpectedly accepted missing release configuration.'
+          } catch {
+            if ($_.Exception.Message -cne 'The stage-only probe requires explicit native release configuration.') { throw }
+          }
           $version = Get-Content -LiteralPath version.json -Raw | ConvertFrom-Json -AsHashtable
           if ($version.version -cne '0.0.14') { throw 'Expected the historical Setup 0.0.14 source version.' }
           $version.release_type = 'delta'
