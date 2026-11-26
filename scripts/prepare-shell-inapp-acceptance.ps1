@@ -257,7 +257,8 @@ try {
     $startup = [regex]::Matches($main, '(?m)^    (?:const started = )?await startCoreRuntime\(\{ maxAttempts: [^\r\n]+ \}\);')
     if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
     $failure = @'
-    const createdAt = require('node:child_process').execFileSync('pwsh', [
+    const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const createdAt = require('node:child_process').execFileSync(powershell, [
       '-NoProfile', '-NonInteractive', '-Command',
       "(Get-Process -Id " + process.pid + ").StartTime.ToUniversalTime().ToString('o')",
     ], { encoding: 'utf8', windowsHide: true, timeout: 12000 }).trim();
