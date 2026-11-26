@@ -317,9 +317,12 @@ try {
     $runnerTemp = getenv('RUNNER_TEMP');
     ensure(is_string($runnerTemp) && $runnerTemp !== '', 'RUNNER_TEMP is required.');
     $inApp = $argc === 4 && $argv[1] === 'profile' && $argv[3] === 'in-app';
-    $lab = ProductInventoryService::resolveAbsolutePath($runnerTemp . ($inApp ? '/shell-inapp' : '/setup13-shell'));
-    if (($argc === 3 || $inApp) && $argv[1] === 'profile') {
-        measureDatabase($lab, $argv[2], $inApp);
+    $release = $argc === 5 && $argv[1] === 'profile' && $argv[3] === 'release'
+        && preg_match('/^shell-release-[a-f0-9]{32}$/D', $argv[4]) === 1;
+    $labName = $release ? $argv[4] : ($inApp ? 'shell-inapp' : 'setup13-shell');
+    $lab = ProductInventoryService::resolveAbsolutePath($runnerTemp . '/' . $labName);
+    if (($argc === 3 || $inApp || $release) && $argv[1] === 'profile') {
+        measureDatabase($lab, $argv[2], $inApp || $release);
     } elseif ($argc === 2 && $argv[1] === 'transaction') {
         verifyTransaction($lab);
     } else {
