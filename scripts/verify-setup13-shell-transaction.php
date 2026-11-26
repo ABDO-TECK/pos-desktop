@@ -317,14 +317,17 @@ try {
     $runnerTemp = getenv('RUNNER_TEMP');
     ensure(is_string($runnerTemp) && $runnerTemp !== '', 'RUNNER_TEMP is required.');
     $inApp = $argc === 4 && $argv[1] === 'profile' && $argv[3] === 'in-app';
+    $release = $argc === 5 && $argv[1] === 'profile' && $argv[3] === 'release'
+        && preg_match('/^shell-release-[a-f0-9]{32}$/D', $argv[4]) === 1;
     $directory = match (true) {
+        $release => $argv[4],
         !$inApp => 'setup13-shell',
         getenv('POS_SHELL_ACCEPTANCE_PROFILE') === 'binary' => 'pos-binary',
         default => 'shell-inapp',
     };
     $lab = ProductInventoryService::resolveAbsolutePath($runnerTemp . '/' . $directory);
-    if (($argc === 3 || $inApp) && $argv[1] === 'profile') {
-        measureDatabase($lab, $argv[2], $inApp);
+    if (($argc === 3 || $inApp || $release) && $argv[1] === 'profile') {
+        measureDatabase($lab, $argv[2], $inApp || $release);
     } elseif ($argc === 2 && $argv[1] === 'transaction') {
         verifyTransaction($lab);
     } else {

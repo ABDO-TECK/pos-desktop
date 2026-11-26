@@ -1,9 +1,12 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $Tag, [ValidateSet('stable','beta')][string] $Channel)
+param([Parameter(Mandatory)][string] $Tag, [ValidateSet('stable','beta')][string] $Channel, [switch] $StageOnly)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if (-not $env:GITHUB_ACTIONS -or $env:GITHUB_REPOSITORY -ne 'ABDO-TECK/pos-desktop-updates') { throw 'This publisher runs only in the project GitHub Actions repository.' }
-if (-not $env:UPDATE_PRIVATE_KEY) { throw 'UPDATE_PRIVATE_KEY repository secret is required.' }
+$expectedRepository = if ($StageOnly) { 'ABDO-TECK/pos-desktop' } else { 'ABDO-TECK/pos-desktop-updates' }
+if ($env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_REPOSITORY -cne $expectedRepository) {
+    throw "Run this mode in GitHub Actions on $expectedRepository."
+}
+if (-not $StageOnly -and -not $env:UPDATE_PRIVATE_KEY) { throw 'UPDATE_PRIVATE_KEY repository secret is required.' }
 
 function Copy-SafeAsset {
     param(
@@ -26,6 +29,22 @@ function Copy-SafeAsset {
 }
 
 $version = Get-Content version.json -Raw | ConvertFrom-Json
+$nativeConfig = 'release-config/native-shell-delta.json'
+if (Test-Path -LiteralPath $nativeConfig) {
+    if ($version.release_type -cne 'delta' -or $Channel -cne 'stable' -or @($version.delta_baseline_tags).Count -ne 1) {
+        throw 'Native shell staging requires a stable delta release with exactly one baseline.'
+    }
+    node scripts/release-metadata.mjs $Tag
+    if ($LASTEXITCODE) { throw 'Invalid native shell release metadata.' }
+    $configuration = Get-Content -LiteralPath $nativeConfig -Raw | ConvertFrom-Json -AsHashtable
+    New-Item -ItemType Directory -Path release-assets | Out-Null
+    ./scripts/stage-native-shell-delta.ps1 -Configuration $configuration -Tag $Tag -Channel $Channel -BaselineTags $version.delta_baseline_tags -ReleaseAssets release-assets -StageOnly:$StageOnly
+    $releaseNotes = @("# POS Desktop $Tag", '') + @($version.changelog | ForEach-Object { "- $_" })
+    $releaseNotes | Set-Content -LiteralPath 'release-assets/release-notes.md' -Encoding utf8NoBOM
+    return
+}
+if ($StageOnly) { throw 'The stage-only probe requires explicit native release configuration.' }
+
 New-Item -ItemType Directory -Path release-assets -Force | Out-Null
 foreach ($baselineTag in $version.delta_baseline_tags) {
     if ($baselineTag -notmatch '^v\d+\.\d+\.\d+(?:-beta\.\d+)?$') { throw 'Invalid baseline tag.' }
