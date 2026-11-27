@@ -1,19 +1,22 @@
 {
-  "version": "0.0.14",
-  "application_version": "0.0.14",
+  "version": "0.0.15-beta.1",
+  "application_version": "0.0.15-beta.1",
   "update_engine_version": "1.0.0",
-  "channel": "stable",
-  "minimum_supported_version": "0.0.1",
+  "channel": "beta",
+  "minimum_supported_version": "0.0.14",
   "release_series": "v0",
-  "release_generation": 5,
-  "released_at": "2026-11-20",
+  "release_generation": 6,
+  "released_at": "2026-11-27",
   "changelog": [
-    "Adds the signed Windows native shell updater to the stable Setup.",
-    "Verifies application health after an update and restores the previous installed files if startup fails.",
-    "Preserves pending sales and device-owned printing configuration across update restarts."
+    "Shows the installed version, latest eligible release, and update availability in the Arabic Update Center.",
+    "Supports smaller signed binary downloads for eligible Windows shell updates, with a verified full-file fallback.",
+    "Installs over the approved Setup 0.0.14 baseline through the beta channel."
   ],
   "requires_npm_install": false,
-  "update_channel": "stable",
-  "release_type": "setup",
+  "update_channel": "beta",
+  "release_type": "delta",
+  "delta_baseline_tags": [
+    "v0.0.14"
+  ],
   "installer_version": "0.0.14"
 }
