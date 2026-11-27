@@ -476,7 +476,8 @@ async function runAcceptance() {
     const attempted = readJson(failureTrace);
     observations.candidate_failure = attempted;
     assert.equal(attempted.pid, outcome.candidate_pid);
-    verifyProcessRestart(before.processes.desktop, attempted, 'Failing desktop');
+    assert.ok(Number.isSafeInteger(attempted.observed_at_ms) && attempted.observed_at_ms > Date.parse(before.processes.desktop.started_at),
+      'The failing candidate did not reach the exit witness after the source launched.');
     assert.ok(attempted.phpPort > 0 && attempted.mysqlPort > 0);
     assert.equal(attempted.electronEngine, '43.8.11', 'The failing process must use the new Electron engine.');
     assert.equal(attempted.phase, 'core-ready-before-exit');
@@ -496,7 +497,9 @@ async function runAcceptance() {
     observations.reopened_discovery = inspectReopenedProcess(expectedPid, restartedDebugPort);
     throw error;
   }
-  const needsLogin = await app.evaluate("Boolean(document.querySelector('input[type=email]'))");
+  const login = "Boolean(document.querySelector('input[type=email]'))";
+  await app.until(login+" || Boolean(document.querySelector('a[href=\\\"/settings\\\"]'))", 'reopened sign-in or workspace');
+  const needsLogin = await app.evaluate(login);
   if (needsLogin) await app.login(credentials.email, credentials.password);
   const after = await verifyUsableRuntime(app, expectedVersion,
     scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11', restartedDebugPort);
@@ -504,7 +507,10 @@ async function runAcceptance() {
   for (const name of ['desktop', 'php', 'database']) {
     verifyProcessRestart(before.processes[name], after.processes[name], name);
   }
-  if (scenario === 'rollback') verifyProcessRestart(observations.candidate_failure, after.processes.desktop, 'Restored desktop');
+  if (scenario === 'rollback') {
+    assert.ok(Date.parse(after.processes.desktop.started_at) > observations.candidate_failure.observed_at_ms,
+      'The recovered desktop was not created after the failing candidate reached its exit witness.');
+  }
   const preservedRow = await getCategory(app, marker);
   assert.equal(preservedRow.id, row.id, 'The original MariaDB business row did not survive.');
   const afterFiles = scenario === 'rollback'

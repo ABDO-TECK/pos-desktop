@@ -88,14 +88,67 @@ export function createDesktopLab(application,evidence,extraEnv={}) {
   async function click(text){await until(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===${JSON.stringify(text)})`,'button '+text);await evaluate(`(() => {const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)});b.scrollIntoView({block:'center'});b.click();})()`);}
   async function fill(selector,value){assert.equal(await evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return false;Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event('input',{bubbles:true}));return true;})()`),true);await delay(100);}
   async function login(email,password){await until('Boolean(document.querySelector("input[type=email]"))','login');await fill('input[type=email]',email);await fill('input[type=password]',password);await evaluate('document.querySelector("form button[type=submit]").click()');}
+  async function replaceTemporaryPassword(currentPassword, password) {
+    const requests = new Map();
+    const observePasswordUpdate = (method, event) => {
+      if (method === 'Network.requestWillBeSent' && event.request.method === 'PUT' &&
+          /\/api\/v1\/users\/\d+$/.test(new URL(event.request.url).pathname)) {
+        requests.set(event.requestId, { status: null });
+      } else if (method === 'Network.responseReceived' && requests.has(event.requestId)) {
+        requests.get(event.requestId).status = event.response.status;
+      }
+    };
+    await call('Network.enable');
+    listeners.add(observePasswordUpdate);
+    try {
+      const fields = JSON.stringify({
+        'forced-current-password': currentPassword,
+        'forced-new-password': password,
+        'forced-confirm-password': password,
+      });
+      await until(`(() => {
+        const form = document.querySelector('#forced-current-password')?.form;
+        if (!form) return false;
+        const button = form.querySelector('button[type=submit]');
+        const values = ${fields};
+        const inputs = Object.keys(values).map(id => form.querySelector('#' + id));
+        if (!button || button.disabled || inputs.some(input => !input)) return false;
+        if (button.dataset.posLabPasswordSubmitted === 'true') return true;
+        const missing = inputs.filter(input => input.value !== values[input.id]);
+        if (missing.length) {
+          const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+          for (const input of missing) {
+            setValue.call(input, values[input.id]);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          // Let React accept the values. A startup reload can replace this entire form.
+          return false;
+        }
+        if (!form.checkValidity()) return false;
+        button.dataset.posLabPasswordSubmitted = 'true';
+        form.requestSubmit(button);
+        return true;
+      })()`, 'submit the current forced-password form');
+      await until('!document.querySelector("#forced-current-password") && Boolean(document.querySelector("input[type=email]"))',
+        'reauthentication');
+    } catch (error) {
+      const state = await evaluate(`({
+        route: location.pathname,
+        forced_password_form: Boolean(document.querySelector('#forced-current-password')),
+        login_form: Boolean(document.querySelector('input[type=email]')),
+      })`).catch(() => null);
+      throw new Error(error.message+' '+JSON.stringify({ renderer: state, password_updates: [...requests.values()] }));
+    } finally {
+      listeners.delete(observePasswordUpdate);
+    }
+  }
   async function freshLogin(){
     const initial=await evaluate('window.electronAPI.setup.getInitialAdmin()');assert.ok(initial?.password,'Fresh temporary admin missing');
     await until('Boolean(document.querySelector("[aria-labelledby=initial-admin-title]"))','temporary password notice');await click('فهمت');await login(initial.email,initial.password);
     const password='Lab-'+crypto.randomBytes(22).toString('base64url');
     await until('Boolean(document.querySelector("#forced-current-password"))','forced password change');
-    await fill('#forced-current-password',initial.password);await fill('#forced-new-password',password);await fill('#forced-confirm-password',password);
-    await evaluate('document.querySelector("#forced-current-password").closest("form").querySelector("button[type=submit]").click()');
-    await until('!document.querySelector("#forced-current-password") && Boolean(document.querySelector("input[type=email]"))','reauthentication');await login(initial.email,password);
+    await replaceTemporaryPassword(initial.password,password);
+    await login(initial.email,password);
     await until('Boolean(document.querySelector("a[href=\'/settings\']"))','authenticated navigation');return {email:initial.email,password};
   }
   async function system(){await until('Boolean(document.querySelector("a[href=\'/settings\']"))','settings link');await evaluate('document.querySelector("a[href=\'/settings\']").click()');await until('location.pathname==="/settings"','settings route');await click('النظام والصيانة');}
