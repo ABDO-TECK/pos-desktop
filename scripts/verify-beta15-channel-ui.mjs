@@ -58,7 +58,10 @@ const panel = '[data-testid=channel-transition]';
 const applyButton = '[data-testid=apply-channel-transition]';
 const preview = '[data-testid=transition-preview-result]';
 const evidenceFile = path.join(evidence, 'acceptance.json');
-const summary = { mode, stable_version: stable, beta_version: beta, passed: false, transitions: [] };
+const summary = {
+  mode, stable_version: stable, beta_version: beta, passed: false, transitions: [],
+  channel_selections: [], update_requests: [],
+};
 let transport;
 let auth;
 
@@ -131,27 +134,107 @@ async function verifyRuntime(version, channel, inventory, previous) {
   return { app: version, channel, native, health: health.status, managed_files: Object.keys(inventory.files).length };
 }
 
-async function category(create = false) {
+async function category() {
   return app.evaluate('(async () => {' +
     'const api = new URL("/api/v1/", window.API_BASE_URL).href;' +
     'const name = ' + JSON.stringify(markerName) + ';' +
     'const options = {credentials: "include", cache: "no-store"};' +
-    (create
-      ? 'const auth = await fetch(api + "csrf-cookie", options);' +
-        'const csrf = (await auth.json()).data.csrf_token;' +
-        'const reply = await fetch(api + "categories", {...options, method: "POST", ' +
-        'headers: {"Content-Type": "application/json", "X-XSRF-TOKEN": csrf}, body: JSON.stringify({name})});' +
-        'return {status: reply.status, row: (await reply.json()).data};'
-      : 'const reply = await fetch(api + "categories?limit=100", options);' +
-        'return {status: reply.status, row: (await reply.json()).data.find(row => row.name === name)};') +
+    'const reply = await fetch(api + "categories?limit=100", options);' +
+    'return {status: reply.status, row: (await reply.json()).data.find(row => row.name === name)};' +
     '})()');
 }
 
+async function createCategoryThroughUi() {
+  const products = 'document.querySelector("a[href=\'/products\']")';
+  await app.until('Boolean(' + products + ')', 'products navigation');
+  await app.evaluate(products + '.click()');
+  await app.until('location.pathname === "/products"', 'products route');
+  const categories = '[...document.querySelectorAll("button")].find(button => ' +
+    '!button.disabled && button.textContent.trim().startsWith("الفئات"))';
+  await app.until('Boolean(' + categories + ')', 'categories tab');
+  await app.evaluate('(' + categories + ').click()');
+  await app.click('إضافة فئة');
+  await app.fill('.modal-overlay input', markerName);
+  await app.click('حفظ');
+  await app.until('[...document.querySelectorAll("table tbody td")].some(cell => cell.textContent.trim() === ' +
+    JSON.stringify(markerName) + ')', 'saved business record');
+  return category();
+}
+
+function observeUpdateRequests() {
+  const requests = new Map();
+  const routes = new Set(['/api/v1/updates/channel', '/api/v1/updates/check',
+    '/api/v1/updates/transition/preview', '/api/v1/updates/transition/apply']);
+  const knownMessages = {
+    'CSRF token mismatch': 'csrf_token_mismatch',
+    'CSRF token missing': 'csrf_token_missing',
+    'Origin not allowed': 'origin_not_allowed',
+  };
+  const knownCode = value => typeof value === 'string' && /^[a-z0-9_]{1,80}$/i.test(value) ? value : undefined;
+  app.onEvent((method, event) => {
+    if (method === 'Network.requestWillBeSent') {
+      const route = new URL(event.request.url).pathname;
+      if (event.request.method === 'OPTIONS' || !routes.has(route)) return;
+      const observed = { route, method: event.request.method, requested_at: new Date().toISOString() };
+      if (route.endsWith('/channel') && observed.method === 'POST') {
+        try {
+          const { channel } = JSON.parse(event.request.postData ?? '');
+          if (['stable', 'beta'].includes(channel)) observed.requested_channel = channel;
+        } catch { /* Only known channel values belong in the evidence. */ }
+      }
+      requests.set(event.requestId, observed);
+      summary.update_requests.push(observed);
+      return;
+    }
+    const observed = requests.get(event.requestId);
+    if (!observed) return;
+    if (method === 'Network.responseReceived') {
+      observed.http_status = event.response.status;
+      observed.responded_at = new Date().toISOString();
+    } else if (method === 'Network.loadingFailed') {
+      observed.network_error = knownCode(event.errorText?.split('::').at(-1)) ?? 'loading_failed';
+      requests.delete(event.requestId);
+    } else if (method === 'Network.loadingFinished') {
+      requests.delete(event.requestId);
+      app.call('Network.getResponseBody', { requestId: event.requestId }).then(({ base64Encoded, body }) => {
+        if (base64Encoded || body.length > 200_000) return;
+        const response = JSON.parse(body);
+        const data = response.data;
+        observed.api_status = knownCode(response.status);
+        observed.result = knownCode(data?.status);
+        observed.reason = knownMessages[response.message] ?? knownCode(response.errors?.reason_code) ??
+          knownCode(data?.reason_code) ?? knownCode(data?.errorCode);
+        const channel = data?.channel ?? data?.selected_channel;
+        if (['stable', 'beta'].includes(channel)) observed.channel = channel;
+      }).catch(() => {}).finally(() => { observed.finished = true; });
+    }
+  });
+  return app.call('Network.enable');
+}
+
 async function selectChannel(channel) {
-  await app.until('Boolean(' + select + ' && !(' + select + ').disabled)', 'enabled update channel');
-  await app.evaluate('(() => {const select = ' + select + ';' +
-    'Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, ' + JSON.stringify(channel) + ');' +
-    'select.dispatchEvent(new Event("change", {bubbles: true}));})()');
+  const requestStart = summary.update_requests.length;
+  const channelRequest = () => summary.update_requests.slice(requestStart).find(request =>
+    request.route.endsWith('/channel') && request.method === 'POST');
+  for (const attempt of [1, 2]) {
+    await app.until('Boolean(' + select + ' && !(' + select + ').disabled)', 'enabled update channel');
+    const before = await app.evaluate(select + '?.value');
+    summary.channel_selections.push({ attempt, before, channel, at: new Date().toISOString() });
+    await app.evaluate('(() => {const select = ' + select + '; if (!select || select.disabled) return;' +
+      'Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, ' + JSON.stringify(channel) + ');' +
+      'select.dispatchEvent(new Event("change", {bubbles: true}));})()');
+    const deadline = Date.now() + 8000;
+    while (!channelRequest() && Date.now() < deadline) await delay(100);
+    // Only retry an initialization race before any request reached the API.
+    if (channelRequest()) break;
+  }
+  const request = channelRequest();
+  assert.ok(request, 'The channel control did not send a preference request.');
+  if (request.requested_channel) assert.equal(request.requested_channel, channel);
+  const deadline = Date.now() + 30_000;
+  while (!request.finished && !request.network_error && Date.now() < deadline) await delay(100);
+  assert.equal(request.http_status, 200, 'The live preference request failed. See update_requests for the outcome.');
+  if (request.channel) assert.equal(request.channel, channel);
   await app.until(select + '?.value === ' + JSON.stringify(channel) + ' && !(' + select + ').disabled',
     'saved ' + channel + ' preference');
 }
@@ -237,10 +320,11 @@ try {
   await app.start(19235);
   auth = await app.freshLogin();
   summary.baseline = await verifyRuntime(stable, 'stable', stableInventory);
-  const marker = await category(true);
-  assert.equal(marker.status, 201, 'Could not create the isolated business record.');
+  const marker = await createCategoryThroughUi();
+  assert.equal(marker.status, 200, 'Could not read the isolated business record.');
   assert.ok(Number(marker.row?.id) > 0);
   summary.business_record_id = marker.row.id;
+  await observeUpdateRequests();
   if (mode === 'staged') transport = await attachTransitionTransport({
     ui: app, application: installed, storage, evidence: diagnostics, fixture: makeStagedProvider(), auth,
   });
