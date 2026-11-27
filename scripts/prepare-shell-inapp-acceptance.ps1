@@ -8,22 +8,25 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
     throw 'Build these fixtures only on GitHub-hosted Windows Actions.'
 }
 
-$lab = Join-Path $env:RUNNER_TEMP 'shell-inapp'
-$official = Join-Path $env:RUNNER_TEMP 'setup13-shell'
+$binary = $env:POS_SHELL_ACCEPTANCE_PROFILE -ceq 'binary'
+$lab = Join-Path $env:RUNNER_TEMP $(if ($binary) { 'pos-binary' } else { 'shell-inapp' })
+$official = Join-Path $env:RUNNER_TEMP $(if ($binary) { 'setup14-shell' } else { 'setup13-shell' })
+$sourceVersion = if ($binary) { '0.0.14' } else { '0.0.13' }
+$targetVersion = if ($binary) { '0.0.15' } else { '0.0.14' }
 New-Item -ItemType Directory -Path (Join-Path $lab 'evidence') | Out-Null
 
-# The public Setup is the benchmark baseline. Record the actual shipped JS
-# inventory gap that prevents it from being the source of the new UI proof.
+# The public Setup provides pinned runtime files for the unpublished fixtures.
 $officialAsar = Join-Path $official 'source/resources/app.asar'
 $files = node -e 'const asar = require("@electron/asar"); console.log(JSON.stringify(asar.listPackage(process.argv[1])));' $officialAsar | ConvertFrom-Json
 $files = @($files | ForEach-Object { $_.Replace('\', '/').TrimStart('/') })
-if ('electron/services/shell-update.js' -cin $files) {
-    throw 'Unexpected in-app Format 2 client in published Setup 0.0.13.'
+$publicShellClient = 'electron/services/shell-update.js' -cin $files
+if ($publicShellClient -ne $binary) {
+    throw "Unexpected in-app Format 2 client inventory in published Setup $sourceVersion."
 }
 [ordered]@{
-    scope = 'Static archive inventory of the verified published Setup 0.0.13'
+    scope = "Static archive inventory of verified published Setup $sourceVersion"
     app_asar_sha256 = (Get-FileHash -LiteralPath $officialAsar).Hash.ToLowerInvariant()
-    in_app_format2_client_present = $false
+    in_app_format2_client_present = $publicShellClient
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $lab 'evidence/published-client-scope.json') -Encoding utf8NoBOM
 
 function Prepare-Electron {
@@ -46,7 +49,7 @@ if (Test-Path -LiteralPath 'portable') { throw 'Expected a fresh checkout with n
 Copy-Item -LiteralPath (Join-Path $official 'source/resources/portable') -Destination 'portable' -Recurse
 $redistributable = Get-Content -LiteralPath 'scripts/desktop-runtime.json' -Raw | ConvertFrom-Json
 $prerequisites = Join-Path $PWD 'build/prerequisites'
-& 7z.exe e (Join-Path $official 'POS-Desktop-Setup-0.0.13.exe') '$PLUGINSDIR\vc_redist.x64.exe' "-o$prerequisites" -y
+& 7z.exe e (Join-Path $official "POS-Desktop-Setup-$sourceVersion.exe") '$PLUGINSDIR\vc_redist.x64.exe' "-o$prerequisites" -y
 if ((Get-FileHash -LiteralPath (Join-Path $prerequisites $redistributable.vcredist.archiveName)).Hash.ToLowerInvariant() -cne $redistributable.vcredist.sha256.ToLowerInvariant()) {
     throw 'Extracted Visual C++ prerequisite did not match the pinned hash.'
 }
@@ -91,7 +94,7 @@ $ownedStart = 'OwnedChildProcess.Start(executable, new string[0], root, environm
 if ($broker.IndexOf($ownedStart) -lt 0 -or $broker.IndexOf($ownedStart) -ne $broker.LastIndexOf($ownedStart)) {
     throw 'Expected the unique native relaunch invocation in the packaged broker.'
 }
-$ciStart = 'OwnedChildProcess.Start(executable, new[] { environment["APPDATA"].EndsWith(@"\commit-profile\roaming", StringComparison.OrdinalIgnoreCase) ? "--remote-debugging-port=19234" : "--remote-debugging-port=19232", "--remote-debugging-address=127.0.0.1" }, root, environment)'
+$ciStart = 'OwnedChildProcess.Start(executable, new[] { environment["APPDATA"].EndsWith(@"\rollback-profile\roaming", StringComparison.OrdinalIgnoreCase) ? "--remote-debugging-port=19232" : "--remote-debugging-port=19234", "--remote-debugging-address=127.0.0.1" }, root, environment)'
 Set-Content -LiteralPath $brokerSource -Value ($broker.Replace($ownedStart, $ciStart)) -Encoding utf8NoBOM
 Add-Content -LiteralPath 'electron/preload.js' -Value "contextBridge.exposeInMainWorld('posCiElectronEngine', process.versions.electron);" -Encoding utf8NoBOM
 $indexPath = 'frontend/index.html'
@@ -99,6 +102,12 @@ $index = Get-Content -LiteralPath $indexPath -Raw
 $anchor = '<meta charset="UTF-8" />'
 if ($index.IndexOf($anchor) -lt 0 -or $index.IndexOf($anchor) -ne $index.LastIndexOf($anchor)) {
     throw 'Expected a single Vite entry document marker.'
+}
+$healthPath = 'backend/Services/HealthService.php'
+$healthSource = Get-Content -LiteralPath $healthPath -Raw
+$healthAnchor = '$this->getVersionIdentifier(),'
+if ($binary -and ([regex]::Matches($healthSource, [regex]::Escape($healthAnchor))).Count -ne 1) {
+    throw 'Expected a single packaged PHP liveness marker.'
 }
 
 function Set-FixtureVersion {
@@ -115,6 +124,10 @@ function Set-FixtureVersion {
     }
     $asset = $index.Replace($anchor, "$anchor <meta name='pos-ci-shell-build' content='$Role' />")
     Set-Content -LiteralPath $indexPath -Value $asset -Encoding utf8NoBOM -NoNewline
+    if ($binary) {
+        $health = $healthSource.Replace($healthAnchor, "$healthAnchor $([Environment]::NewLine)            'pos_ci_shell_build' => '$Role',")
+        Set-Content -LiteralPath $healthPath -Value $health -Encoding utf8NoBOM -NoNewline
+    }
 }
 
 function Build-Fixture {
@@ -190,16 +203,54 @@ function Sign-Fixture {
     param([string] $Source, [string] $Target, [string] $SourceContract, [string] $Release)
     $arguments = @('scripts/build-shell-delta.php',
         '--source-root', $Source, '--target-root', $Target,
-        '--source-native-version', '0.0.13', '--target-native-version', '0.0.14',
+        '--source-native-version', $sourceVersion, '--target-native-version', $targetVersion,
         '--source-data-contract', $SourceContract,
         '--target-data-contract', (Join-Path $lab 'target-contract.json'),
         '--private-key', $key, '--output-dir', $Release)
-    & php @arguments
+    if ($binary) {
+        # Run the release builder with the same libzip/zlib as the source that reconstructs the ZIP.
+        $phpRoot = Join-Path $Source 'resources/portable/php'
+        $php = Join-Path $phpRoot 'php.exe'
+        $extensions = Join-Path $phpRoot 'ext'
+        & $php -n -d "extension_dir=$extensions" -d 'extension=openssl' -d 'extension=zip' @arguments
+    } else {
+        & php @arguments
+    }
+}
+
+function Write-BinaryFixtureReceipt {
+    param([string] $Role)
+    $release = Join-Path $lab "$Role/release"
+    $descriptor = Get-Content -LiteralPath (Join-Path $release 'shell-manifest.json') -Raw | ConvertFrom-Json
+    $bin = Join-Path $release 'shell-binary.bin'
+    $archive = [IO.Compression.ZipFile]::OpenRead($bin)
+    try {
+        $entries = @($archive.Entries | Where-Object { $_.FullName -cmatch '^p/\d+$' } | ForEach-Object {
+            $relative = $descriptor.files[[int]$_.FullName.Substring(2)].path
+            [ordered]@{
+                path = $relative
+                source_sha256 = $descriptor.source_inventory.files.PSObject.Properties[$relative].Value.sha256
+                target_sha256 = $descriptor.target_inventory.files.PSObject.Properties[$relative].Value.sha256
+                compressed_patch_bytes = $_.CompressedLength
+            }
+        })
+        $corePaths = @('POS Desktop.exe', 'resources/app.asar', 'resources/app.asar.unpacked/backend/backend.phar')
+        if (-not ($entries | Where-Object { $_.path -cin $corePaths })) {
+            throw 'Expected a genuine binary patch for at least one installed Electron or PHP program file.'
+        }
+        [ordered]@{
+            payload_sha256 = (Get-FileHash -LiteralPath $bin).Hash.ToLowerInvariant()
+            payload_bytes = (Get-Item -LiteralPath $bin).Length
+            patch_entries = $entries
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $lab "evidence/patches-$Role.json") -Encoding utf8NoBOM
+    } finally {
+        $archive.Dispose()
+    }
 }
 
 try {
-    Build-Fixture source '0.0.13' $sourceEngine -Installer
-    Build-Fixture target '0.0.14' $targetEngine
+    Build-Fixture source $sourceVersion $sourceEngine -Installer
+    Build-Fixture target $targetVersion $targetEngine
 
     # Start the real MariaDB/PHP pair and fail before the desktop reaches sign-in.
     # This trace witnesses execution. The supervisor independently owns recovery.
@@ -207,18 +258,36 @@ try {
     if ($startup.Count -ne 1) { throw 'Expected the unique packaged startup anchor.' }
     $failure = @'
     fs.writeFileSync(path.join(process.env.APPDATA, 'candidate-failure.json'), JSON.stringify({
-      pid: process.pid, phpPort, mysqlPort, electronEngine: process.versions.electron, phase: 'core-ready-before-exit',
+      pid: process.pid, observed_at_ms: Date.now(), phpPort, mysqlPort,
+      electronEngine: process.versions.electron, phase: 'core-ready-before-exit',
     }));
     app.exit(78);
     return;
 '@
     $badMain = $main.Insert($startup[0].Index + $startup[0].Length, [Environment]::NewLine + $failure)
     Set-Content -LiteralPath $mainPath -Value ($fixtureProfile + [Environment]::NewLine + $badMain) -Encoding utf8NoBOM
-    Build-Fixture failing '0.0.14' $targetEngine -ReuseFrontendAndPhar
+    Build-Fixture failing $targetVersion $targetEngine -ReuseFrontendAndPhar
 
     ./scripts/verify-setup13-shell-data.ps1 -Profile in-app
     foreach ($role in @('target', 'failing')) {
         Sign-Fixture (Join-Path $lab 'source/installed-payload') (Join-Path $lab "$role/win-unpacked") (Join-Path $lab 'source-contract.json') (Join-Path $lab "$role/release")
+        if ($binary) { Write-BinaryFixtureReceipt $role }
+    }
+    if ($binary) {
+        $formatFixture = Join-Path $lab 'unsupported'
+        New-Item -ItemType Directory -Path $formatFixture | Out-Null
+        $formatPointer = Join-Path $formatFixture 'shell-binary.json'
+        $formatSignature = Join-Path $formatFixture 'shell-binary.signature'
+        $pointer = Get-Content -LiteralPath (Join-Path $lab 'target/release/shell-binary.json') -Raw | ConvertFrom-Json -AsHashtable
+        $pointer.format = 999
+        $pointer | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $formatPointer -Encoding utf8NoBOM
+        $sign = @'
+const { sign } = require('node:crypto');
+const { readFileSync, writeFileSync } = require('node:fs');
+const [key, pointer, signature] = process.argv.slice(1);
+writeFileSync(signature, sign('sha256', readFileSync(pointer), readFileSync(key)).toString('base64'));
+'@
+        node -e $sign $key $formatPointer $formatSignature
     }
 } finally {
     Remove-Item -LiteralPath $key -ErrorAction SilentlyContinue

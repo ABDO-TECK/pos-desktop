@@ -197,6 +197,10 @@ class DeltaUpdateService
         $isNewOperation = $operationChanged || $ownerChanged || $operationIdChanged || $isTerminalState
             || ($state === 'applying') || ($state === 'downloading' && empty($current['started_at']));
 
+        if ($isNewOperation) {
+            unset($current['shell_transport'], $current['shell_transport_bytes']);
+        }
+
         $startedAt = ($isNewOperation || empty($current['started_at']))
             ? date('Y-m-d\TH:i:sP')
             : (string) $current['started_at'];

@@ -83,6 +83,7 @@ declare global {
     current_version: string | null;
     latest_version: string | null;
     has_update: boolean;
+    is_up_to_date?: boolean;
     released_at: string | null;
     changelog: { version: string; date: string; changes: string[] }[];
     requires_npm_install?: boolean;

@@ -28,8 +28,18 @@ export function isValidSettledResult(data: unknown): data is UpdateCheckResult {
   return true
 }
 
+export function isUpToDateResult(data: UpdateCheckResult): boolean {
+  return data.status === 'no_update_available'
+    && data.has_update === false
+    && data.is_up_to_date === true
+    && !data.updates_disabled
+    && !data.updates_unreachable
+    && Boolean(data.current_version?.trim() && data.latest_version?.trim())
+}
+
 interface UpdateState {
   hasUpdate: boolean;
+  isUpToDate: boolean;
   latestVersion: string | null;
   updateType: AvailableUpdateType | null;
   currentVersion: string | null;
@@ -69,6 +79,7 @@ const POLL_INTERVAL_MS = 2_000                 // 2 seconds
 
 const useUpdateStore = create<UpdateState>((set, get) => ({
   hasUpdate: false,
+  isUpToDate: false,
   latestVersion: null,
   updateType: null,
   currentVersion: null,
@@ -93,6 +104,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
     set({
       channel,
       hasUpdate: false,
+      isUpToDate: false,
       latestVersion: null,
       updateType: null,
       changelog: [],
@@ -113,6 +125,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
     lastFailureOrPendingTime = 0
     set({
       hasUpdate: false,
+      isUpToDate: false,
       latestVersion: null,
       updateType: null,
       changelog: [],
@@ -151,11 +164,17 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
             ? data.installed_channel
             : null
 
-          set((state) => ({
-            currentVersion: (authoritativeGeneration > startAuthGen) ? state.currentVersion : (validVersion || state.currentVersion),
-            channel: validChannel || state.channel,
-            installedChannel: validInstalledChannel || state.installedChannel,
-          }))
+          set((state) => {
+            const currentVersion = authoritativeGeneration > startAuthGen
+              ? state.currentVersion
+              : validVersion || state.currentVersion
+            return {
+              currentVersion,
+              isUpToDate: state.isUpToDate && currentVersion === state.currentVersion,
+              channel: validChannel || state.channel,
+              installedChannel: validInstalledChannel || state.installedChannel,
+            }
+          })
           return data
         }
         return null
@@ -203,7 +222,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
     const runSilent = async () => {
       if (!isCurrent()) return
-      set({ isChecking: true, updatesUnreachable: false, updateErrorMessage: '' })
+      set({ isChecking: true, isUpToDate: false, updatesUnreachable: false, updateErrorMessage: '' })
 
       try {
         const deltaCapable = await hasDeltaHandoffCapability()
@@ -329,6 +348,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
         set({
           hasUpdate: Boolean(data.has_update),
+          isUpToDate: isUpToDateResult(data),
           latestVersion: data.latest_version || null,
           updateType: data.update_type ?? null,
           currentVersion: localVersion,
@@ -383,7 +403,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
       const isCurrent = () => currentChannelGen === channelGeneration && currentManualGen === manualGeneration
       if (!isCurrent()) return undefined
 
-      set({ isChecking: true, updatesUnreachable: false, updateErrorMessage: '' })
+      set({ isChecking: true, isUpToDate: false, updatesUnreachable: false, updateErrorMessage: '' })
       try {
         const deltaCapable = await hasDeltaHandoffCapability()
         if (!isCurrent()) return undefined
@@ -410,6 +430,7 @@ const useUpdateStore = create<UpdateState>((set, get) => ({
 
         const stateUpdate = {
           hasUpdate: Boolean(data?.has_update),
+          isUpToDate: isValid && isUpToDateResult(data),
           latestVersion: data?.latest_version || null,
           updateType: data?.update_type ?? null,
           currentVersion: localVersion,

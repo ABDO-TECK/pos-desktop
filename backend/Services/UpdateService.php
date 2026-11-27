@@ -108,8 +108,9 @@ class UpdateService
     private function shellDelivery(): ShellDeltaDeliveryService
     {
         $pinnedKey = $this->rootDir . '/backend/certs/update_public_key.pem';
-        $manifests = new ShellDeltaManifestService(new ManifestSignatureService($pinnedKey, [], false));
-        return new ShellDeltaDeliveryService($this->githubProvider, $manifests, $this->deltaUpdateService);
+        $signatures = new ManifestSignatureService($pinnedKey, [], false);
+        $manifests = new ShellDeltaManifestService($signatures);
+        return new ShellDeltaDeliveryService($this->githubProvider, $manifests, $this->deltaUpdateService, $signatures);
     }
 
     public function hasLegacyReleaseAssets(array $release): bool
@@ -388,6 +389,7 @@ class UpdateService
                         'full_package_url' => $ghRelease['full_package_url'],
                         'shell_advertised' => $ghRelease['shell_advertised'] ?? false,
                         'shell_assets' => $ghRelease['shell_assets'] ?? [],
+                        'shell_binary_assets' => $ghRelease['shell_binary_assets'] ?? [],
                         'assets' => $ghRelease['assets'],
                         'channel' => $ghRelease['channel'] ?? $targetChannel,
                         'no_eligible_release' => $noEligibleRelease,
@@ -729,7 +731,7 @@ class UpdateService
                 'ok' => true,
                 'updates_disabled' => false,
                 'updates_unreachable' => false,
-                'message' => 'النظام محدّث لأحدث إصدار.',
+                'message' => 'لا يوجد تحديث متاح للتثبيت.',
                 'current_version' => $currentVersion,
                 'latest_version' => null,
                 'update_engine_version' => $local['update_engine_version'] ?? null,
@@ -737,6 +739,7 @@ class UpdateService
                 'release_channel' => $remote['channel'] ?? $clientChannel,
                 'rollout_percentage' => 100,
                 'has_update' => false,
+                'is_up_to_date' => false,
                 'currentVersion' => $currentVersion,
                 'latestVersion' => null,
                 'updateAvailable' => false,
@@ -802,7 +805,11 @@ class UpdateService
             $targetReleaseChannel = $derivedReleaseChannel ?? $declaredReleaseChannel ?? $clientChannel;
             $channelCompat = $this->manifestService->checkChannelCompatibility($clientChannel, $targetReleaseChannel);
         }
-        $hasUpdate = $compatibility['compatible'] && $channelCompat['compatible'] && version_compare($latestVersion, $currentVersion, '>');
+        $versionOrder = $compatibility['compatible'] && $channelCompat['compatible']
+            ? version_compare($latestVersion, $currentVersion)
+            : null;
+        $hasUpdate = $versionOrder !== null && $versionOrder > 0;
+        $isUpToDate = $versionOrder !== null && $versionOrder <= 0;
         $deltaReason = !$channelCompat['compatible'] ? $channelCompat['reason'] : $compatibility['reason'];
         $deltaReasonCode = !$channelCompat['compatible'] ? 'channel_mismatch' : $compatibility['reason_code'];
 
@@ -978,6 +985,8 @@ class UpdateService
             ]);
         }
 
+        $noUpdateMessage = $isUpToDate ? 'النظام محدّث.' : 'لا يوجد تحديث متاح للتثبيت.';
+
         return [
             'success'               => $shellFailure === null,
 
@@ -985,7 +994,7 @@ class UpdateService
             'ok'                    => true,
             'updates_disabled'      => false,
             'updates_unreachable'   => $shellFailure !== null,
-            'message'               => $hasUpdate ? 'يتوفر تحديث جديد.' : ($deltaReason ?? 'النظام محدّث لأحدث إصدار.'),
+            'message'               => $hasUpdate ? 'يتوفر تحديث جديد.' : ($deltaReason ?? $noUpdateMessage),
             'current_version'       => $currentVersion,
             'latest_version'        => $latestVersion,
             'update_engine_version' => $clientEngineVersion,
@@ -993,6 +1002,7 @@ class UpdateService
             'release_channel'       => $deltaManifest['channel'] ?? ($remote['channel'] ?? 'stable'),
             'rollout_percentage'    => $deltaManifest['rollout_percentage'] ?? 100,
             'has_update'            => $hasUpdate,
+            'is_up_to_date'         => $isUpToDate,
             'currentVersion'        => $currentVersion,
             'latestVersion'         => $latestVersion,
             'updateAvailable'       => $hasUpdate,
@@ -1740,13 +1750,15 @@ class UpdateService
                 'phase' => 'staging',
             ];
             $this->deltaUpdateService->setUpdateState('verifying', $context);
-            $reason = $delivery->verifyInstalledSource(dirname($this->rootDir, 2), $verified['descriptor']);
+            $installRoot = dirname($this->rootDir, 2);
+            $reason = $delivery->verifyInstalledSource($installRoot, $verified['descriptor']);
+            $transport = [];
             if ($reason === null) {
-                $reason = $delivery->stage($verified, $context);
+                $reason = $delivery->stage($verified, $context, $installRoot, $transport);
             }
             if ($reason === null) {
                 $context['phase'] = 'desktop_handoff_pending';
-                $this->deltaUpdateService->setUpdateState('desktop_handoff_pending', $context);
+                $this->deltaUpdateService->setUpdateState('desktop_handoff_pending', $context + $transport);
                 $pending = $this->deltaUpdateService->getUpdateState() ?? [];
                 if (($pending['state'] ?? null) === 'desktop_handoff_pending'
                     && ($pending['operation'] ?? null) === ShellDeltaManifestService::OPERATION
@@ -1762,7 +1774,7 @@ class UpdateService
                         'requires_desktop_handoff' => true,
                         'handoff_version' => $version,
                         'logs' => ['تم التحقق من حزمة تحديث تطبيق سطح المكتب وتجهيزها للتثبيت.'],
-                    ]];
+                    ] + $transport];
                 }
                 $reason = 'shell_handoff_state_unavailable';
             }

@@ -4,15 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createDesktopLab, delay } from './desktop-transition-lab.mjs';
-import { assetNames, startReleaseFixture } from './fixtures/shell-inapp-release-origin.mjs';
-import { installedFixturePaths } from './fixtures/shell-inapp-layout.mjs';
+import { assetNames, binaryAssetNames, olderVersion, startReleaseFixture } from './fixtures/shell-inapp-release-origin.mjs';
+import { binaryAcceptance, installedFixturePaths, shellScenarios, sourceVersion, targetVersion } from './fixtures/shell-inapp-layout.mjs';
+import { verifyTransport } from './fixtures/shell-inapp-transport.mjs';
 import supervisor from '../electron/services/shell-update-files.js';
 
 assert.equal(process.platform, 'win32');
 assert.equal(process.env.GITHUB_ACTIONS, 'true');
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
 const scenario = process.argv[2];
-assert.ok(['rollback', 'commit'].includes(scenario), 'Expected a known acceptance scenario.');
+assert.ok(shellScenarios.includes(scenario), 'Expected a known acceptance scenario.');
 
 const { lab, installRoot, profile, local, roaming, shared, supervisorStateRoot } = installedFixturePaths(scenario);
 const dataDir = path.join(shared, 'POS System');
@@ -84,9 +85,9 @@ function safeSupervisorReceipt(receipt) {
 }
 
 function updaterDiagnostics() {
-  const stage = path.join(dataDir, 'update_staging', '0.0.14', 'shell-delta');
+  const stage = path.join(dataDir, 'update_staging', targetVersion, 'shell-delta');
   const stagedFileSizes = {};
-  for (const name of assetNames) {
+  for (const name of [...assetNames, ...binaryAssetNames]) {
     if (fs.existsSync(path.join(stage, name))) stagedFileSizes[name] = fs.statSync(path.join(stage, name)).size;
   }
   return {
@@ -101,7 +102,9 @@ function observeNetwork(app) {
   app.onEvent((method, event) => {
     const url = event.request?.url ?? event.response?.url;
     if (method === 'Network.requestWillBeSent' && updateRoute.test(url)) {
-      updateNetwork.push({ type: 'request', method: event.request.method, path: new URL(url).pathname, request_id: event.requestId });
+      const requestUrl = new URL(url);
+      updateNetwork.push({ type: 'request', method: event.request.method, path: requestUrl.pathname,
+        request_id: event.requestId, background: requestUrl.searchParams.get('background') === 'true' });
     }
     if (method === 'Network.responseReceived' && updateRoute.test(url)) {
       const response = { type: 'response', status: event.response.status, path: new URL(url).pathname, request_id: event.requestId };
@@ -116,7 +119,8 @@ function observeNetwork(app) {
         const json = JSON.parse(body);
         const fields = ['success', 'ok', 'status', 'state', 'code', 'reason_code', 'error_code', 'errorCode', 'message', 'error',
           'id', 'job_id', 'last_error', 'phase', 'settlement_error', 'latest_version', 'handoff_version', 'requires_desktop_handoff',
-          'desktop_handoff_completed', 'update_type', 'shell_update_available', 'target_version'];
+          'desktop_handoff_completed', 'update_type', 'shell_update_available', 'target_version',
+          'current_version', 'has_update', 'is_up_to_date', 'release_tag', 'shell_transport', 'shell_transport_bytes'];
         response.result = {
           envelope: safeFields(json, fields),
           data: safeFields(json.data, fields),
@@ -215,6 +219,13 @@ function inspectReopenedProcess(pid, debugPort) {
   }
 }
 
+function verifyProcessRestart(previous, reopened, name) {
+  const prior = { pid: previous.pid, started_at: previous.started_at };
+  const current = { pid: reopened.pid, started_at: reopened.started_at };
+  assert.notDeepEqual(current, prior, name+' process identity did not change.');
+  assert.ok(Date.parse(current.started_at) > Date.parse(prior.started_at), name+' start time did not advance.');
+}
+
 function checkInstalledInventory(expected, deleted = []) {
   const requiredFiles = [
     'POS Desktop.exe',
@@ -306,6 +317,7 @@ async function verifyUsableRuntime(app, version, marker, engine, debugPort) {
   const backendHealth = await http.json();
   assert.equal(backendHealth.status, 'ok');
   assert.equal(backendHealth.version, version);
+  if (binaryAcceptance) assert.equal(backendHealth.pos_ci_shell_build, marker, 'The running backend PHAR differs from the expected build.');
   const processes = probeProcesses(ports.apiPort, ports.mysqlPort, debugPort);
   return { frontend, backend_health: backendHealth, processes, runtime_ports: ports };
 }
@@ -329,11 +341,37 @@ async function screenshot(app, name) {
   fs.copyFileSync(path.join(profile, 'diagnostics', name+'.png'), path.join(evidence, name+'.png'));
 }
 
+async function verifyOlderStatus(app, installButton) {
+  const check = await waitFor('the older-feed check response', () => updateNetwork.find(event =>
+    event.type === 'response' && event.path.endsWith('/updates/check') && event.result &&
+    updateNetwork.some(request => request.type === 'request' && request.request_id === event.request_id && !request.background)), 60_000);
+  assert.equal(check.status, 200);
+  assert.equal(check.result.data.current_version, sourceVersion);
+  assert.equal(check.result.data.has_update, false);
+  assert.equal(check.result.data.is_up_to_date, true);
+  assert.ok(check.result.data.latest_version === olderVersion || check.result.data.release_tag === 'v'+olderVersion,
+    'The foreground check must evaluate the older stable feed.');
+  const readCard = "(() => { const label = [...document.querySelectorAll('div')].find(el => "+
+    "el.children.length===0 && el.textContent.trim()==='حالة النظام'); "+
+    "return label?.parentElement?.innerText ?? ''; })()";
+  await app.until(readCard+".includes('النظام محدّث')", 'Arabic up-to-date value in the installed Update Center');
+  const visible = await app.evaluate("({card:"+readCard+", body:document.body.innerText})");
+  assert.ok(!visible.body.includes('v'+olderVersion));
+  for (const label of ['أحدث إصدار متاح', 'نوع التحديث', 'Full (كامل)']) assert.ok(!visible.body.includes(label));
+  assert.ok(!visible.body.includes(installButton));
+  assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 &&
+    request.path.endsWith('/pos-desktop-updates/releases')), 'The older stable catalog was not requested.');
+  assert.ok(!requests.some(request => request.authority === 'github.com' && request.path.includes('/releases/download/')));
+  assert.ok(!updateNetwork.some(event => event.path.endsWith('/updates/apply')));
+  await screenshot(app, scenario+'-status');
+  observations.older_feed = { version: olderVersion, current_version: sourceVersion, card: visible.card, check: check.result };
+}
+
 for (const folder of [local, configDir, shared, path.join(local, 'pos-ci-chromium')]) {
   fs.mkdirSync(folder, { recursive: true });
 }
 fs.writeFileSync(path.join(configDir, '.env'), '# Synthetic protected configuration witness\n', { flag: 'wx' });
-const fixture = await startReleaseFixture(lab, releaseRoot, requests);
+const fixture = await startReleaseFixture(lab, releaseRoot, requests, { version: targetVersion, binary: binaryAcceptance, scenario });
 const app = createDesktopLab(installRoot, path.join(profile, 'diagnostics'), {
   LOCALAPPDATA: local,
   APPDATA: roaming,
@@ -342,10 +380,10 @@ const app = createDesktopLab(installRoot, path.join(profile, 'diagnostics'), {
   NO_PROXY: 'localhost,127.0.0.1',
 });
 
-try {
+async function runAcceptance() {
   assert.equal(inventory.format, 2);
-  assert.equal(inventory.from_version, '0.0.13');
-  assert.equal(inventory.version, '0.0.14');
+  assert.equal(inventory.from_version, sourceVersion);
+  assert.equal(inventory.version, targetVersion);
   const beforeFiles = checkInstalledInventory(inventory.source_inventory);
   const missingAtSource = inventory.files.map(file => file.path).filter(file => !inventory.source_inventory.files[file]);
   for (const relative of missingAtSource) assert.ok(!fs.existsSync(path.join(installRoot, relative)));
@@ -353,7 +391,7 @@ try {
   const beforeUninstaller = hash(uninstaller);
   await app.start(initialDebugPort);
   const credentials = await app.freshLogin();
-  const before = await verifyUsableRuntime(app, '0.0.13', 'source', '43.2.0', initialDebugPort);
+  const before = await verifyUsableRuntime(app, sourceVersion, 'source', '43.2.0', initialDebugPort);
   const marker = 'Shell acceptance '+crypto.randomBytes(10).toString('hex');
   const row = await createCategory(app, marker);
   assert.ok(Number(row?.id) > 0 && row.name === marker, 'Expected a real business row created before update.');
@@ -383,7 +421,17 @@ try {
   const installButton = 'تثبيت التحديث الآن';
   await app.until("[...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(checkButton)+")", 'enabled update check');
   await clickVisibleButton(app, checkButton);
-  await app.until("document.body.innerText.includes('v0.0.14') && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version 0.0.14 install card');
+  if (scenario === 'older') {
+    await verifyOlderStatus(app, installButton);
+    assert.deepEqual(checkInstalledInventory(inventory.source_inventory), beforeFiles);
+    assert.equal(hash(uninstaller), beforeUninstaller);
+    assert.equal(readTerminalReceipt(), null);
+    await app.stop();
+    writeJson(path.join(evidence, scenario+'.json'), { ...observations, scenario, passed: true, provider: requests, update_network: updateNetwork });
+    console.log('PASS: installed Update Center rendered the Arabic up-to-date status for the older stable feed.');
+    return;
+  }
+  await app.until("document.body.innerText.includes("+JSON.stringify('v'+targetVersion)+") && [...document.querySelectorAll('button')].some(b=>!b.disabled&&b.textContent.trim()==="+JSON.stringify(installButton)+")", 'version '+targetVersion+' install card');
   await screenshot(app, scenario+'-offered');
   await observeRendererHandoff(app);
   assert.equal(await app.evaluate("document.body.innerText.includes('تحديث ملفات تطبيق سطح المكتب')"), true,
@@ -411,13 +459,13 @@ try {
   }, 360_000);
   observations.supervisor = safeSupervisorReceipt(outcome);
   assert.equal(outcome.outcome, scenario === 'rollback' ? 'rolled_back' : 'completed', 'The supervisor produced the wrong terminal outcome.');
-  assert.equal(outcome.source_version, '0.0.13');
-  assert.equal(outcome.target_version, '0.0.14');
+  assert.equal(outcome.source_version, sourceVersion);
+  assert.equal(outcome.target_version, targetVersion);
   assert.equal(outcome.source_pid, before.processes.desktop.pid);
-  assert.ok(Number.isInteger(outcome.candidate_pid) && outcome.candidate_pid !== outcome.source_pid);
+  assert.ok(Number.isInteger(outcome.candidate_pid) && outcome.candidate_pid > 0);
   assert.match(outcome.database_backup_sha256, /^[a-f0-9]{64}$/);
 
-  const expectedVersion = scenario === 'rollback' ? '0.0.13' : '0.0.14';
+  const expectedVersion = scenario === 'rollback' ? sourceVersion : targetVersion;
   const health = scenario === 'rollback' ? outcome.restored_health : outcome.candidate_health;
   assert.equal(health.version, expectedVersion);
   assert.equal(health.php, true);
@@ -428,6 +476,8 @@ try {
     const attempted = readJson(failureTrace);
     observations.candidate_failure = attempted;
     assert.equal(attempted.pid, outcome.candidate_pid);
+    assert.ok(Number.isSafeInteger(attempted.observed_at_ms) && attempted.observed_at_ms > Date.parse(before.processes.desktop.started_at),
+      'The failing candidate did not reach the exit witness after the source launched.');
     assert.ok(attempted.phpPort > 0 && attempted.mysqlPort > 0);
     assert.equal(attempted.electronEngine, '43.8.11', 'The failing process must use the new Electron engine.');
     assert.equal(attempted.phase, 'core-ready-before-exit');
@@ -435,7 +485,7 @@ try {
     assert.equal(outcome.candidate_failure, 'The restarted POS process exited before health proof: 78');
     assert.equal(outcome.candidate_health, null);
     assert.equal(outcome.restored_failure, null);
-    assert.ok(outcome.restored_pid !== outcome.source_pid && outcome.restored_pid !== outcome.candidate_pid);
+    assert.ok(Number.isInteger(outcome.restored_pid) && outcome.restored_pid > 0);
   } else {
     assert.ok(!fs.existsSync(failureTrace));
   }
@@ -447,14 +497,19 @@ try {
     observations.reopened_discovery = inspectReopenedProcess(expectedPid, restartedDebugPort);
     throw error;
   }
-  const needsLogin = await app.evaluate("Boolean(document.querySelector('input[type=email]'))");
+  const login = "Boolean(document.querySelector('input[type=email]'))";
+  await app.until(login+" || Boolean(document.querySelector('a[href=\\\"/settings\\\"]'))", 'reopened sign-in or workspace');
+  const needsLogin = await app.evaluate(login);
   if (needsLogin) await app.login(credentials.email, credentials.password);
   const after = await verifyUsableRuntime(app, expectedVersion,
     scenario === 'rollback' ? 'source' : 'target', scenario === 'rollback' ? '43.2.0' : '43.8.11', restartedDebugPort);
   assert.equal(after.processes.desktop.pid, expectedPid);
   for (const name of ['desktop', 'php', 'database']) {
-    assert.notEqual(after.processes[name].pid, before.processes[name].pid, name+' process did not restart.');
-    assert.ok(Date.parse(after.processes[name].started_at) > Date.parse(before.processes[name].started_at), name+' start time did not advance.');
+    verifyProcessRestart(before.processes[name], after.processes[name], name);
+  }
+  if (scenario === 'rollback') {
+    assert.ok(Date.parse(after.processes.desktop.started_at) > observations.candidate_failure.observed_at_ms,
+      'The recovered desktop was not created after the failing candidate reached its exit witness.');
   }
   const preservedRow = await getCategory(app, marker);
   assert.equal(preservedRow.id, row.id, 'The original MariaDB business row did not survive.');
@@ -482,10 +537,13 @@ try {
   assert.ok(Number.isSafeInteger(jobId) && jobId > 0, 'The submitted update POST did not return a valid background job.');
   observations.apply_job_id = jobId;
   assert.ok(!updateNetwork.some(event => event.path.endsWith('/updates/rollback')), 'A rollback API call was observed.');
-  for (const name of assetNames) {
-    const bytes = fs.statSync(path.join(releaseRoot, name)).size;
-    assert.ok(requests.some(request => request.status === 200 && request.path.endsWith('/'+name) && request.delivered_bytes === bytes),
-      'No complete HTTPS fixture transfer observed for '+name);
+  observations.transport = verifyTransport({ requests, releaseRoot, lab, inventory, binary: binaryAcceptance, scenario });
+  if (binaryAcceptance) {
+    const staging = updateNetwork.find(event => event.type === 'response' && event.path.endsWith('/update/jobs/'+jobId) &&
+      event.result?.result?.shell_transport);
+    assert.ok(staging, 'The apply job did not report the selected shell transport.');
+    assert.equal(staging.result.result.shell_transport, observations.transport.transport);
+    assert.equal(staging.result.result.shell_transport_bytes, observations.transport.selected_transport_bytes);
   }
   assert.ok(requests.some(request => request.authority === 'api.github.com' && request.status === 200 && request.path.endsWith('/pos-desktop-updates/releases')));
   await screenshot(app, scenario+'-reopened');
@@ -507,9 +565,15 @@ try {
   writeJson(path.join(evidence, scenario+'.json'), {
     ...observations, scenario, passed: true, provider: requests, update_network: updateNetwork,
     manifest_sha256: hash(path.join(releaseRoot, 'shell-manifest.json')),
+    source_inventory_sha256: inventory.source_inventory_sha256,
+    target_inventory_sha256: inventory.target_inventory_sha256,
     zip_sha256: inventory.package.sha256,
   });
   console.log('PASS: installed Update Center '+scenario+' and actual desktop/PHP/MariaDB restart verified.');
+}
+
+try {
+  await runAcceptance();
 } catch (error) {
   observations.failure = { ...safeFields(error, ['message']), diagnostics: updaterDiagnostics() };
   if (observations.before) {

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory, Position = 0)] [ValidateSet('rollback', 'commit')] [string] $Scenario
+    [Parameter(Mandatory, Position = 0)] [ValidateSet('rollback', 'commit', 'corrupt', 'format', 'missing', 'older')] [string] $Scenario
 )
 
 Set-StrictMode -Version Latest
@@ -10,9 +10,14 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
     throw 'Run the installed UI proof only on GitHub-hosted Windows Actions.'
 }
 
-$lab = Join-Path $env:RUNNER_TEMP 'shell-inapp'
+$binary = $env:POS_SHELL_ACCEPTANCE_PROFILE -ceq 'binary'
+if (-not $binary -and $Scenario -cnotin @('rollback', 'commit')) {
+    throw 'This scenario requires the binary acceptance profile.'
+}
+$version = if ($binary) { '0.0.14' } else { '0.0.13' }
+$lab = Join-Path $env:RUNNER_TEMP $(if ($binary) { 'pos-binary' } else { 'shell-inapp' })
 $installed = Join-Path $lab "installed-$Scenario"
-$setup = Join-Path $lab 'source/POS-Desktop-Setup-0.0.13.exe'
+$setup = Join-Path $lab "source/POS-Desktop-Setup-$version.exe"
 if (Test-Path -LiteralPath $installed) { throw 'Expected a clean installation path for this scenario.' }
 $expected = Get-Content -LiteralPath (Join-Path $lab 'evidence/package-source.json') -Raw | ConvertFrom-Json
 if ((Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant() -cne $expected.setup_sha256) {
@@ -33,7 +38,7 @@ try {
 $uninstallRegistry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\90a2ff53-faef-56f7-9850-17442841706a'
 $registration = Get-ItemProperty -LiteralPath $uninstallRegistry
 $expectedCommand = '"{0}" /currentuser' -f (Join-Path $installed 'Uninstall POS Desktop.exe')
-if ($registration.DisplayVersion -cne '0.0.13' -or $registration.UninstallString -ine $expectedCommand) {
+if ($registration.DisplayVersion -cne $version -or $registration.UninstallString -ine $expectedCommand) {
     throw 'Expected Setup to register the new real per-user installation.'
 }
 [ordered]@{ setup_sha256 = $expected.setup_sha256; version = $registration.DisplayVersion; scope = 'current-user'; scenario = $Scenario } |

@@ -1,0 +1,136 @@
+name: Windows signed binary update acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/binary-update-acceptance]
+    # The pull request checks the combined release-staging and installed paths.
+    paths-ignore:
+      - '.github/workflows/shell-binary-acceptance.yml'
+      - '.github/workflows/native-shell-release-stage.yml'
+      - 'docs/native-shell-delta-release.md'
+      - 'scripts/build-delta-release.ps1'
+      - 'scripts/stage-native-shell-delta.ps1'
+      - 'scripts/verify-setup13-shell-data.ps1'
+      - 'scripts/verify-setup13-shell-transaction.php'
+  pull_request:
+    paths:
+      - '.github/workflows/shell-binary-acceptance.yml'
+      - 'backend/Services/*Shell*.php'
+      - 'backend/Services/*Update*.php'
+      - 'backend/Services/GitHubReleaseProvider.php'
+      - 'electron/services/shell-update*.js'
+      - 'frontend/src/pages/settings/UpdateSection.tsx'
+      - 'frontend/src/**/use*Update*.ts'
+      - 'scripts/*shell*'
+      - 'scripts/fixtures/shell-inapp-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-binary-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-update:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      POS_SHELL_ACCEPTANCE_PROFILE: binary
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.2'
+          extensions: curl, pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install locked build dependencies
+        shell: pwsh
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          COMPOSER_MAX_PARALLEL_HTTP: '1'
+          COMPOSER_MAX_PARALLEL_PROCESSES: '1'
+          COMPOSER_PROCESS_TIMEOUT: '600'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm ci
+          npm --prefix frontend ci
+          composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          "PHP_BINARY=$((Get-Command php.exe).Source)" >> $env:GITHUB_ENV
+
+      - name: Verify the updater contracts and frontend
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          node scripts/verify-shell-inapp-layout.mjs
+          php scripts/verify-shell-delta-builder.php
+          php scripts/verify-shell-release-delivery.php
+          php scripts/verify-update-background.php
+          node scripts/verify-update-background.mjs
+          node scripts/verify-admin-update-ui.mjs
+          npm --prefix frontend run typecheck
+
+      - name: Verify published Setup 0.0.14 and extract its portable prerequisites
+        shell: pwsh
+        run: ./scripts/verify-setup13-shell-baseline.ps1 -BinaryAcceptance
+
+      - name: Build unpublished Setup and signed good and failing shell candidates
+        id: package
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: ./scripts/prepare-shell-inapp-acceptance.ps1
+
+      - name: Check the Arabic status with an older stable release
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 older
+
+      - name: Commit a binary update without a whole-file download
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 commit
+
+      - name: Roll back a binary update after a candidate startup failure
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 rollback
+
+      - name: Fall back to signed Format 2 after corrupted binary bytes
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 corrupt
+
+      - name: Fall back to signed Format 2 after an unsupported binary format
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 format
+
+      - name: Fall back to signed Format 2 after a missing binary payload
+        if: "!cancelled() && steps.package.outcome == 'success'"
+        shell: pwsh
+        run: ./scripts/run-shell-inapp-acceptance.ps1 missing
+
+      - name: Upload Windows acceptance receipts and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary-update-evidence
+          path: |
+            ${{ runner.temp }}/setup14-shell/evidence/setup-source.json
+            ${{ runner.temp }}/pos-binary/evidence/
+          if-no-files-found: warn
+          retention-days: 14

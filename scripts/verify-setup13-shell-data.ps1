@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([ValidateSet('setup13-shell', 'in-app', 'historical')] [string] $Profile = 'setup13-shell')
+param(
+    [ValidateSet('setup13-shell', 'in-app', 'historical', 'release')] [string] $Profile = 'setup13-shell',
+    [ValidatePattern('^shell-release-[a-f0-9]{32}$')] [string] $ReleaseLab
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -8,7 +11,14 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONM
 }
 
 $InAppFixture = $Profile -cne 'setup13-shell'
-$lab = Join-Path $env:RUNNER_TEMP $(if ($InAppFixture) { 'shell-inapp' } else { 'setup13-shell' })
+if (($Profile -ceq 'release') -ne [bool]$ReleaseLab) {
+    throw 'The release measurement requires an isolated release lab name.'
+}
+$labName = if ($ReleaseLab) { $ReleaseLab }
+    elseif (-not $InAppFixture) { 'setup13-shell' }
+    elseif ($Profile -ceq 'in-app' -and $env:POS_SHELL_ACCEPTANCE_PROFILE -ceq 'binary') { 'pos-binary' }
+    else { 'shell-inapp' }
+$lab = Join-Path $env:RUNNER_TEMP $labName
 
 function Measure-PackagedDatabase {
     param([string] $Root, [string] $Role, [string] $DataDir)
@@ -78,7 +88,8 @@ function Measure-PackagedDatabase {
         php $phar migrate --force
         if ($LASTEXITCODE) { throw "$Role packaged PHAR migrations failed." }
         $profileArgs = @('scripts/verify-setup13-shell-transaction.php', 'profile', $Role)
-        if ($InAppFixture) { $profileArgs += 'in-app' }
+        if ($Profile -ceq 'release') { $profileArgs += @('release', $ReleaseLab) }
+        elseif ($InAppFixture) { $profileArgs += 'in-app' }
         & php @profileArgs
         if ($LASTEXITCODE) { throw "$Role live MariaDB profile capture failed." }
 
@@ -95,7 +106,7 @@ function Measure-PackagedDatabase {
     }
 }
 
-if ($Profile -ceq 'in-app') {
+if ($Profile -in @('in-app', 'release')) {
     Measure-PackagedDatabase -Root (Join-Path $lab 'source/installed-payload') -Role source -DataDir (Join-Path $lab 'source-data')
     Measure-PackagedDatabase -Root (Join-Path $lab 'target/win-unpacked') -Role target -DataDir (Join-Path $lab 'target-data')
 } elseif ($Profile -ceq 'historical') {

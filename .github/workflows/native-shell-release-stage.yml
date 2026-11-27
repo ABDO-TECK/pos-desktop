@@ -1,0 +1,79 @@
+name: Native shell release staging proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/binary-release-pipeline, codex/binary-update-acceptance]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-shell-release-stage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stage:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, mysqli, gd, mbstring, dom, xml, xmlwriter, zip, openssl, phar
+          coverage: none
+      - name: Install locked backend dependencies
+        shell: pwsh
+        run: composer install --working-dir=backend --no-dev --no-interaction --prefer-dist --no-progress
+      - name: Stage a historical official pair through the feed build entry point
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          try {
+            ./scripts/build-delta-release.ps1 -Tag v0.0.14 -Channel stable -StageOnly
+            throw 'Stage-only execution unexpectedly accepted missing release configuration.'
+          } catch {
+            if ($_.Exception.Message -cne 'The stage-only probe requires explicit native release configuration.') { throw }
+          }
+          $version = Get-Content -LiteralPath version.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($version.version -cne '0.0.14') { throw 'Expected the historical Setup 0.0.14 source version.' }
+          $version.release_type = 'delta'
+          $version.delta_baseline_tags = @('v0.0.13')
+          $version | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath version.json -Encoding utf8NoBOM
+          New-Item -ItemType Directory -Path release-config | Out-Null
+          @{
+            source_setup_version = '0.0.13'
+            source_setup_sha256 = '442f110ee7f188f2cb9d1a9b0b1859074e7b953bfb2230cb86449a64ee09c62e'
+            target_setup_version = '0.0.14'
+            target_setup_sha256 = 'd496b8224159cc29224b761334b57e64a699d380568a1fa408bf3958fb8fdc50'
+          } | ConvertTo-Json | Set-Content -LiteralPath 'release-config/native-shell-delta.json' -Encoding utf8NoBOM
+          ./scripts/build-delta-release.ps1 -Tag v0.0.14 -Channel stable -StageOnly
+      - name: Verify staged asset names and release association
+        shell: pwsh
+        run: |
+          $required = @('shell-manifest.json', 'shell-manifest.sig', 'shell-delta.zip', 'deployment-inventory.json', 'release-notes.md')
+          $optional = @('shell-binary.json', 'shell-binary.signature', 'shell-binary.bin')
+          $actual = @(Get-ChildItem -LiteralPath release-assets -Force)
+          $names = $actual.Name
+          $binaryCount = @($optional | Where-Object { $names -ccontains $_ }).Count
+          if (@($required | Where-Object { $names -cnotcontains $_ }).Count -ne 0 -or
+              ($binaryCount -ne 0 -and $binaryCount -ne $optional.Count) -or
+              @($actual | Where-Object { $_.PSIsContainer -or $_.Length -eq 0 -or $_.Name -cnotin ($required + $optional) }).Count -ne 0) {
+            throw 'Unexpected or incomplete staged assets.'
+          }
+          $manifest = Get-Content -LiteralPath 'release-assets/shell-manifest.json' -Raw | ConvertFrom-Json
+          $zip = Get-Item -LiteralPath 'release-assets/shell-delta.zip'
+          if ($manifest.from_version -cne '0.0.13' -or $manifest.version -cne '0.0.14' -or
+              $manifest.from_native_version -cne '0.0.13' -or $manifest.native_version -cne '0.0.14' -or
+              $manifest.channel -cne 'stable' -or $manifest.package.size -ne $zip.Length -or
+              $manifest.package.sha256 -cne (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'Staged manifest and canonical ZIP do not describe the verified pair.'
+          }
+          "Verified canonical Format 2 staging for the historical Setup pair. Optional binary assets staged: $binaryCount." |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
